@@ -1035,8 +1035,8 @@ pub const WIN_THEMES: [WinTheme; 18] = [
 ];
 
 pub const ACCENT_PRESETS: [(&str, &str); 10] = [
-    ("珊瑚霓虹红", "#E03E62"),
     ("Fluent 系统蓝", "#0A84FF"),
+    ("珊瑚霓虹红", "#E03E62"),
     ("赛博电光青", "#00F0FF"),
     ("极光翡翠绿", "#10B981"),
     ("落日琥珀橙", "#F59E0B"),
@@ -1083,7 +1083,7 @@ pub fn active_accent_rgb(cfg: &config::Config) -> [u8; 3] {
     if cfg.win_theme >= 1 && (cfg.win_theme as usize) <= WIN_THEMES.len() {
         return WIN_THEMES[cfg.win_theme as usize - 1].accent;
     }
-    [224, 62, 98]
+    [10, 132, 255]
 }
 
 pub fn active_accent_color() -> Color32 {

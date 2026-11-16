@@ -145,7 +145,10 @@ impl Shell {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         diagnostics::graphics(cc);
         auralsle::graphics::record_active_renderer(cc);
-        let running_compat=cc.wgpu_render_state.is_some();
+        let running_compat = cc
+            .wgpu_render_state
+            .as_ref()
+            .is_some_and(|w| w.adapter.get_info().backend == eframe::wgpu::Backend::Dx12);
         diagnostics::startup("加载本地配置");
         let boot_mcfg = auralsle::auralsle_ai_status::config::get();
         auralsle::monitors::set_module_enabled(boot_mcfg.mod_display_bt_enabled);

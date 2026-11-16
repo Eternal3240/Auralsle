@@ -1786,7 +1786,8 @@ impl App {
     pub(crate) fn page_water(&mut self, c: &Card, env: &Env) {
         let sv = self.sit_view_t.pos.clamp(0.0, 1.0);
         let h_x = if cfg!(test) { 15.0 } else { 40.0 };
-        self.health_tabs(c, h_x, sv);
+        let c_hdr = if cfg!(test) { c.clone() } else { c.shifted(0.0, -14.0) };
+        self.health_tabs(&c_hdr, h_x, sv, cfg!(test));
         let c_shifted = c.shifted(0.0, if cfg!(test) { 0.0 } else { 8.0 });
         let c = &c_shifted;
 
@@ -1839,15 +1840,16 @@ impl App {
 
     /// 标题「健康提醒」（「提醒」随模式变蓝 / 绿）与紧跟其后的分段切换：水滴 = 喝水，椅子 = 久坐。
     /// 胶囊外框与标题字等高（11..27），读起来像标题的一部分。设置子页的标题也用它。
-    pub(crate) fn health_tabs(&mut self, c: &Card, x: f32, sv: f32) {
+    pub(crate) fn health_tabs(&mut self, c: &Card, x: f32, sv: f32, show_title: bool) {
         let accent_now = mix(theme::BLUE, theme::SIT_GREEN, sv);
-        let show_title = cfg!(test);
         let x0 = if show_title {
             let wa = c.text(x, 25.0, "健康", size::TITLE, W::Bold, theme::WHITE, H::Left);
             let wb = c.text(x + wa + 1.5, 25.0, "提醒", size::TITLE, W::Bold, accent_now, H::Left);
             x + wa + 1.5 + wb + 7.0
         } else {
-            x
+            let wa = c.text_w("健康", size::TITLE, W::Bold);
+            let wb = c.text_w("提醒", size::TITLE, W::Bold);
+            x + wa + 1.5 + wb + 7.0
         };
         let (w, y, h) = (22.0, 11.0, 16.0);
         c.fill(x0, y, w * 2.0 + 3.0, h, h / 2.0, Color32::from_rgb(30, 30, 33));
@@ -3295,8 +3297,8 @@ impl App {
             .collect();
 
         if filtered.is_empty() {
-            c.fill(38.0, 54.0, 342.0, 142.0, 11.0, Color32::from_white_alpha(9));
-            c.stroke(38.0, 54.0, 342.0, 142.0, 11.0, 0.8, Color32::from_white_alpha(18));
+            c.fill(36.0, 54.0, 344.0, 142.0, 11.0, Color32::from_white_alpha(9));
+            c.stroke(36.0, 54.0, 344.0, 142.0, 11.0, 0.8, Color32::from_white_alpha(18));
             let empty_msg = match filter_tab {
                 2 => "暂无复制的图片记录 · 可复制任意截图或点击上方「＋ 演示图片」",
                 3 => "暂无复制的网页链接",
@@ -3331,9 +3333,9 @@ impl App {
             1.0 - (1.0 - el).powi(3)
         };
 
-        // 4) BrimDeck 双列 Bento 图文混合卡片流（底边紧贴指示点上方安全区、右侧 12px 滚动条通道、无死角底边空白与浑浊遮罩）
+        // 4) BrimDeck 双列 Bento 图文混合卡片流（左右严格对齐上方筛选轨与搜索框 x = 36..380，底边紧贴指示点上方安全区）
         let list_bottom = ((self.h.pos / c.s) - 30.0 - 22.0).max(164.0);
-        let list_rect = Rect::from_min_max(Pos2::new(38.0, 54.0), Pos2::new(382.0, list_bottom));
+        let list_rect = Rect::from_min_max(Pos2::new(36.0, 54.0), Pos2::new(380.0, list_bottom));
         let row_h = 47.0_f32;
         let row_count = (filtered.len() + 1) / 2;
         let mut clicked_action: Option<(usize, u8)> = None; // 0 = 一键粘贴, 1 = 收藏, 2 = 删除
@@ -3368,7 +3370,7 @@ impl App {
                 let vp_r = ui.clip_rect();
                 let fade_zone = 20.0 * c.s;
                 for r_idx in range {
-                    let total_w = list_rect.width() - 12.0;
+                    let total_w = list_rect.width() - 8.0;
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(total_w * c.s, row_h * c.s), egui::Sense::hover());
                     let top_vis = ((rect.bottom() - vp_r.top()) / fade_zone).clamp(0.0, 1.0);
                     let bot_vis = ((vp_r.bottom() - rect.top()) / fade_zone).clamp(0.0, 1.0);

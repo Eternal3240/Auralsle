@@ -948,7 +948,6 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
             ]
         };
         let draw_checker = |painter: &egui::Painter, rect: egui::Rect, radius: f32| {
-            let clip = painter.with_clip_rect(rect);
             let c1 = if dark {
                 egui::Color32::from_gray(46)
             } else {
@@ -959,18 +958,24 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
             } else {
                 egui::Color32::from_gray(236)
             };
-            clip.rect_filled(rect, radius, c1);
+            painter.rect_filled(rect, radius, c1);
+            // 棋盘格严格内缩到圆角安全区，避免尖角格子溢出圆角外框
+            let safe = rect.shrink(1.2);
+            if !safe.is_positive() {
+                return;
+            }
+            let clip = painter.with_clip_rect(safe);
             let step = 4.5_f32;
-            let cols = (rect.width() / step).ceil() as usize;
-            let rows = (rect.height() / step).ceil() as usize;
+            let cols = (safe.width() / step).ceil() as usize;
+            let rows = (safe.height() / step).ceil() as usize;
             for r in 0..rows {
                 for c in 0..cols {
                     if (r + c) % 2 == 1 {
                         let cell = egui::Rect::from_min_size(
-                            egui::pos2(rect.left() + c as f32 * step, rect.top() + r as f32 * step),
+                            egui::pos2(safe.left() + c as f32 * step, safe.top() + r as f32 * step),
                             egui::vec2(step, step),
                         )
-                        .intersect(rect);
+                        .intersect(safe);
                         if cell.width() > 0.0 && cell.height() > 0.0 {
                             clip.rect_filled(cell, 0.0, c2);
                         }
@@ -998,7 +1003,7 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
         } else {
             avail_w.max(180.0)
         };
-        let row_h = 48.0_f32;
+        let row_h = 50.0_f32;
         let row_gap = 6.0_f32;
         let total_left_h = row_h * 3.0 + row_gap * 2.0;
 
@@ -1047,17 +1052,54 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                 ui.painter().rect_filled(bar, 1.5, accent);
             }
 
-            let inner = row_rect.shrink2(egui::vec2(9.0, 5.0));
+            let inner = row_rect.shrink2(egui::vec2(10.0, 5.0));
             ui.scope_builder(
                 egui::UiBuilder::new()
                     .max_rect(inner)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 |ui| {
                     ui.set_width(inner.width());
-                    ui.spacing_mut().item_spacing.x = 7.0;
-                    if ui.checkbox(on_flag, "").changed() {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    // 使用固定 16×16 圆角方框 Fluent 复选框，避免标准 ui.checkbox 在紧凑横排中被挤成椭圆
+                    let (cb_rect, cb_resp) = ui.allocate_exact_size(
+                        egui::vec2(16.0, 16.0),
+                        egui::Sense::click(),
+                    );
+                    if cb_resp.clicked() {
+                        *on_flag = !*on_flag;
                         *active_ch = ch_idx;
                         *changed = true;
+                    }
+                    let cb_fill = if *on_flag {
+                        accent
+                    } else if cb_resp.hovered() {
+                        crate::paint::mix(skin.bg_card, title_col, 0.08)
+                    } else {
+                        skin.bg_card
+                    };
+                    let cb_stroke = if *on_flag {
+                        accent
+                    } else if cb_resp.hovered() {
+                        crate::paint::mix(skin.border, title_col, 0.35)
+                    } else {
+                        skin.border
+                    };
+                    ui.painter().rect(
+                        cb_rect,
+                        4.0,
+                        cb_fill,
+                        egui::Stroke::new(1.1, cb_stroke),
+                        egui::StrokeKind::Inside,
+                    );
+                    if *on_flag {
+                        let c = cb_rect.center();
+                        let ck = [
+                            egui::pos2(c.x - 3.6, c.y + 0.2),
+                            egui::pos2(c.x - 1.0, c.y + 2.8),
+                            egui::pos2(c.x + 3.8, c.y - 2.6),
+                        ];
+                        ui.painter().line_segment([ck[0], ck[1]], egui::Stroke::new(1.7, egui::Color32::WHITE));
+                        ui.painter().line_segment([ck[1], ck[2]], egui::Stroke::new(1.7, egui::Color32::WHITE));
                     }
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 1.5;
@@ -1071,7 +1113,7 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                             );
                             if *on_flag {
                                 ui.label(
-                                    egui::RichText::new("自定义")
+                                    egui::RichText::new("已启用")
                                         .size(9.2)
                                         .color(accent),
                                 );
@@ -1150,9 +1192,9 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                     let iw = inner.width().max(140.0);
                     ui.set_width(iw);
                     ui.set_max_width(iw);
-                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 7.0);
 
-                    // 顶部：当前编辑分区标识 + 快速预设 + 预览色块
+                    // 顶部仅保留简洁标题与当前编辑区块标识（移除多余的快捷圆点与重复色块）
                     ui.horizontal(|ui| {
                         ui.set_width(iw);
                         ui.label(
@@ -1166,7 +1208,7 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                             .fill(badge_bg)
                             .stroke(egui::Stroke::new(0.8, crate::paint::mix(skin.border, accent, 0.55)))
                             .corner_radius(4.0)
-                            .inner_margin(egui::Margin::symmetric(5, 1))
+                            .inner_margin(egui::Margin::symmetric(6, 1))
                             .show(ui, |ui| {
                                 ui.label(
                                     egui::RichText::new(label)
@@ -1175,62 +1217,6 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                                         .color(accent),
                                 );
                             });
-
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            let (pv_rect, _) = ui.allocate_exact_size(
-                                egui::vec2(26.0, 16.0),
-                                egui::Sense::hover(),
-                            );
-                            draw_checker(ui.painter(), pv_rect, 4.0);
-                            let pv_col = egui::Color32::from_rgba_unmultiplied(
-                                rgb_val[0], rgb_val[1], rgb_val[2], *alpha_val,
-                            );
-                            ui.painter().rect(
-                                pv_rect,
-                                4.0,
-                                pv_col,
-                                egui::Stroke::new(1.0, skin.border),
-                                egui::StrokeKind::Inside,
-                            );
-
-                            if iw >= 250.0 {
-                                const QUICK: [[u8; 3]; 6] = [
-                                    [241, 226, 193],
-                                    [40, 42, 50],
-                                    [56, 189, 248],
-                                    [244, 63, 94],
-                                    [52, 211, 153],
-                                    [255, 255, 255],
-                                ];
-                                for q in QUICK.iter().rev() {
-                                    let (qr, qresp) = ui.allocate_exact_size(
-                                        egui::vec2(13.0, 13.0),
-                                        egui::Sense::click(),
-                                    );
-                                    let qc = egui::Color32::from_rgb(q[0], q[1], q[2]);
-                                    ui.painter().rect(
-                                        qr,
-                                        3.5,
-                                        qc,
-                                        egui::Stroke::new(
-                                            if *rgb_val == *q { 1.4 } else { 0.8 },
-                                            if *rgb_val == *q { accent } else { skin.border },
-                                        ),
-                                        egui::StrokeKind::Inside,
-                                    );
-                                    if qresp.clicked() {
-                                        *rgb_val = *q;
-                                        let (nh, _, _) = rgb_to_hsv(*rgb_val);
-                                        ui.ctx().data_mut(|d| {
-                                            d.insert_temp(egui::Id::new(("aora_color_hue", ch_idx)), nh);
-                                        });
-                                        *on_flag = true;
-                                        *changed = true;
-                                    }
-                                }
-                            }
-                        });
                     });
 
                     // 计算并保持 Hue 记忆（黑白/灰阶拖动时不丢失色相角）
@@ -1245,14 +1231,14 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                     let mut sat = cur_s;
                     let mut val = cur_v;
 
-                    // 中段：2D SV 调色画布 + 色相条 + 透明度条
-                    let mid_h = (inner.height() - 18.0 - 24.0 - 12.0).max(66.0);
+                    // 中段：圆角抗锯齿 2D SV 调色画布 + 圆角 Hue 条 + 圆角 Alpha 条
+                    let mid_h = (inner.height() - 18.0 - 22.0 - 16.0).max(66.0);
                     let bar_w = 16.0_f32;
-                    let sv_w = (iw - bar_w * 2.0 - 12.0).max(80.0);
+                    let sv_w = (iw - bar_w * 2.0 - 14.0).max(80.0);
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.spacing_mut().item_spacing.x = 7.0;
 
-                        // 1) 2D Saturation × Value 画布
+                        // 1) 圆角抗锯齿 2D Saturation × Value 画布
                         let (sv_rect, sv_resp) = ui.allocate_exact_size(
                             egui::vec2(sv_w, mid_h),
                             egui::Sense::click_and_drag(),
@@ -1267,26 +1253,28 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                             }
                         }
                         let pure_h = hsv_to_rgb(hue, 1.0, 1.0);
-                        let hue_c = egui::Color32::from_rgb(pure_h[0], pure_h[1], pure_h[2]);
-                        // 双层叠加渲染精确双线性 SV：先横铺 White -> PureHue，再竖叠 Transparent -> Black，消除单四边形对角插值折痕
-                        let mut h_sat_mesh = egui::Mesh::default();
-                        h_sat_mesh.colored_vertex(sv_rect.left_top(), egui::Color32::WHITE);
-                        h_sat_mesh.colored_vertex(sv_rect.right_top(), hue_c);
-                        h_sat_mesh.colored_vertex(sv_rect.right_bottom(), hue_c);
-                        h_sat_mesh.colored_vertex(sv_rect.left_bottom(), egui::Color32::WHITE);
-                        h_sat_mesh.add_triangle(0, 1, 2);
-                        h_sat_mesh.add_triangle(0, 2, 3);
-                        ui.painter().add(egui::Shape::mesh(h_sat_mesh));
-
-                        let mut v_shade_mesh = egui::Mesh::default();
-                        let clear_black = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 0);
-                        v_shade_mesh.colored_vertex(sv_rect.left_top(), clear_black);
-                        v_shade_mesh.colored_vertex(sv_rect.right_top(), clear_black);
-                        v_shade_mesh.colored_vertex(sv_rect.right_bottom(), egui::Color32::BLACK);
-                        v_shade_mesh.colored_vertex(sv_rect.left_bottom(), egui::Color32::BLACK);
-                        v_shade_mesh.add_triangle(0, 1, 2);
-                        v_shade_mesh.add_triangle(0, 2, 3);
-                        ui.painter().add(egui::Shape::mesh(v_shade_mesh));
+                        let sv_mesh_rect = sv_rect.shrink(0.5);
+                        let sv_rows = crate::shape::pill_sections(sv_mesh_rect, 3.6);
+                        let sv_col = |s: f32, v: f32| -> egui::Color32 {
+                            let r = ((255.0 + (pure_h[0] as f32 - 255.0) * s) * v).round().clamp(0.0, 255.0) as u8;
+                            let g = ((255.0 + (pure_h[1] as f32 - 255.0) * s) * v).round().clamp(0.0, 255.0) as u8;
+                            let b = ((255.0 + (pure_h[2] as f32 - 255.0) * s) * v).round().clamp(0.0, 255.0) as u8;
+                            egui::Color32::from_rgb(r, g, b)
+                        };
+                        let mut sv_mesh = egui::Mesh::default();
+                        for (idx, &(y, l, r)) in sv_rows.iter().enumerate() {
+                            let v = (1.0 - (y - sv_rect.top()) / sv_rect.height()).clamp(0.0, 1.0);
+                            let sl = ((l - sv_rect.left()) / sv_rect.width()).clamp(0.0, 1.0);
+                            let sr = ((r - sv_rect.left()) / sv_rect.width()).clamp(0.0, 1.0);
+                            sv_mesh.colored_vertex(egui::pos2(l, y), sv_col(sl, v));
+                            sv_mesh.colored_vertex(egui::pos2(r, y), sv_col(sr, v));
+                            if idx > 0 {
+                                let base = ((idx - 1) * 2) as u32;
+                                sv_mesh.add_triangle(base, base + 1, base + 3);
+                                sv_mesh.add_triangle(base, base + 3, base + 2);
+                            }
+                        }
+                        ui.painter().add(egui::Shape::mesh(sv_mesh));
                         ui.painter().rect_stroke(
                             sv_rect,
                             4.0,
@@ -1297,18 +1285,19 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                             sv_rect.left() + sat * sv_rect.width(),
                             sv_rect.top() + (1.0 - val) * sv_rect.height(),
                         );
-                        ui.painter().circle_stroke(
+                        let sv_reticle_p = ui.painter().with_clip_rect(panel_rect.shrink(1.0));
+                        sv_reticle_p.circle_stroke(
                             sv_pt,
-                            5.5,
-                            egui::Stroke::new(2.0, egui::Color32::BLACK),
+                            4.8,
+                            egui::Stroke::new(1.8, egui::Color32::BLACK),
                         );
-                        ui.painter().circle_stroke(
+                        sv_reticle_p.circle_stroke(
                             sv_pt,
-                            4.2,
-                            egui::Stroke::new(1.6, egui::Color32::WHITE),
+                            3.6,
+                            egui::Stroke::new(1.4, egui::Color32::WHITE),
                         );
 
-                        // 2) Hue 色相竖条
+                        // 2) 圆角抗锯齿 Hue 色相竖条
                         let (hue_rect, hue_resp) = ui.allocate_exact_size(
                             egui::vec2(bar_w, mid_h),
                             egui::Sense::click_and_drag(),
@@ -1330,12 +1319,47 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                             (255, 0, 255),
                             (255, 0, 0),
                         ];
+                        let hue_at_y = |y: f32| -> egui::Color32 {
+                            let t = ((y - hue_rect.top()) / hue_rect.height()).clamp(0.0, 1.0) * 6.0;
+                            let idx = (t.floor() as usize).min(5);
+                            let f = t - idx as f32;
+                            let (r0, g0, b0) = HUE_STOPS[idx];
+                            let (r1, g1, b1) = HUE_STOPS[idx + 1];
+                            egui::Color32::from_rgb(
+                                (r0 as f32 + (r1 as f32 - r0 as f32) * f).round() as u8,
+                                (g0 as f32 + (g1 as f32 - g0 as f32) * f).round() as u8,
+                                (b0 as f32 + (b1 as f32 - b0 as f32) * f).round() as u8,
+                            )
+                        };
+                        let hue_mesh_rect = hue_rect.shrink(0.5);
+                        let hue_rows = crate::shape::pill_sections(hue_mesh_rect, 3.6);
+                        let span_at_rows = |rows: &[(f32, f32, f32)], y: f32| -> (f32, f32) {
+                            if y <= rows[0].0 {
+                                return (rows[0].1, rows[0].2);
+                            }
+                            for w in rows.windows(2) {
+                                if y <= w[1].0 {
+                                    let dy = (w[1].0 - w[0].0).max(1e-4);
+                                    let t = ((y - w[0].0) / dy).clamp(0.0, 1.0);
+                                    return (w[0].1 + (w[1].1 - w[0].1) * t, w[0].2 + (w[1].2 - w[0].2) * t);
+                                }
+                            }
+                            let last = rows[rows.len() - 1];
+                            (last.1, last.2)
+                        };
+                        let mut hue_ys: Vec<f32> = hue_rows.iter().map(|r| r.0).collect();
+                        for stop_i in 1..6 {
+                            let sy = hue_mesh_rect.top() + hue_mesh_rect.height() * (stop_i as f32 / 6.0);
+                            hue_ys.push(sy);
+                        }
+                        hue_ys.sort_by(|a, b| a.total_cmp(b));
+                        hue_ys.dedup_by(|a, b| (*a - *b).abs() < 0.05);
                         let mut hmesh = egui::Mesh::default();
-                        for (idx, &(r, g, b)) in HUE_STOPS.iter().enumerate() {
-                            let y = hue_rect.top() + hue_rect.height() * (idx as f32 / 6.0);
-                            let col = egui::Color32::from_rgb(r, g, b);
-                            hmesh.colored_vertex(egui::pos2(hue_rect.left(), y), col);
-                            hmesh.colored_vertex(egui::pos2(hue_rect.right(), y), col);
+                        for (idx, &y) in hue_ys.iter().enumerate() {
+                            let (l, r) = span_at_rows(&hue_rows, y);
+                            let col = hue_at_y(y);
+                            hmesh.colored_vertex(egui::pos2(l, y), col);
+                            hmesh.colored_vertex(egui::pos2(r, y), col);
                             if idx > 0 {
                                 let base = ((idx - 1) * 2) as u32;
                                 hmesh.add_triangle(base, base + 1, base + 3);
@@ -1350,7 +1374,7 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                             egui::StrokeKind::Inside,
                         );
                         let hy = hue_rect.top() + hue * hue_rect.height();
-                        ui.painter().rect(
+                        sv_reticle_p.rect(
                             egui::Rect::from_center_size(
                                 egui::pos2(hue_rect.center().x, hy),
                                 egui::vec2(bar_w + 2.0, 5.0),
@@ -1361,7 +1385,7 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                             egui::StrokeKind::Inside,
                         );
 
-                        // 3) Alpha 透明度竖条（上方 100% 不透明 -> 下方 0% 透明）
+                        // 3) 圆角抗锯齿 Alpha 透明度竖条（上方 100% 不透明 -> 下方 0% 透明）
                         let (a_rect, a_resp) = ui.allocate_exact_size(
                             egui::vec2(bar_w, mid_h),
                             egui::Sense::click_and_drag(),
@@ -1375,15 +1399,20 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                             }
                         }
                         draw_checker(ui.painter(), a_rect, 4.0);
-                        let top_c = egui::Color32::from_rgba_unmultiplied(rgb_val[0], rgb_val[1], rgb_val[2], 255);
-                        let bot_c = egui::Color32::from_rgba_unmultiplied(rgb_val[0], rgb_val[1], rgb_val[2], 0);
+                        let a_rows = crate::shape::pill_sections(a_rect.shrink(0.5), 3.6);
                         let mut amesh = egui::Mesh::default();
-                        amesh.colored_vertex(a_rect.left_top(), top_c);
-                        amesh.colored_vertex(a_rect.right_top(), top_c);
-                        amesh.colored_vertex(a_rect.right_bottom(), bot_c);
-                        amesh.colored_vertex(a_rect.left_bottom(), bot_c);
-                        amesh.add_triangle(0, 1, 2);
-                        amesh.add_triangle(0, 2, 3);
+                        for (idx, &(y, l, r)) in a_rows.iter().enumerate() {
+                            let t = (1.0 - (y - a_rect.top()) / a_rect.height()).clamp(0.0, 1.0);
+                            let a_u8 = (t * 255.0).round() as u8;
+                            let col = egui::Color32::from_rgba_unmultiplied(rgb_val[0], rgb_val[1], rgb_val[2], a_u8);
+                            amesh.colored_vertex(egui::pos2(l, y), col);
+                            amesh.colored_vertex(egui::pos2(r, y), col);
+                            if idx > 0 {
+                                let base = ((idx - 1) * 2) as u32;
+                                amesh.add_triangle(base, base + 1, base + 3);
+                                amesh.add_triangle(base, base + 3, base + 2);
+                            }
+                        }
                         ui.painter().add(egui::Shape::mesh(amesh));
                         ui.painter().rect_stroke(
                             a_rect,
@@ -1393,7 +1422,7 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                         );
                         let af = *alpha_val as f32 / 255.0;
                         let ay = a_rect.top() + (1.0 - af) * a_rect.height();
-                        ui.painter().rect(
+                        sv_reticle_p.rect(
                             egui::Rect::from_center_size(
                                 egui::pos2(a_rect.center().x, ay),
                                 egui::vec2(bar_w + 2.0, 5.0),
@@ -1888,11 +1917,18 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
                                     card_idle
                                 };
                                 ui.painter().rect_filled(rect, 7.5, fill);
-                                if is_preview && !is_fixed {
+                                let _ = is_preview;
+                                // 仅在实际固定选中（is_fixed）时高亮蓝底，悬停时仅微弱描边；「自动」模式下不再给「待机」套蓝框。
+                                if !is_fixed && resp.hovered() {
+                                    let hov_stroke = if dark {
+                                        egui::Color32::from_white_alpha(36)
+                                    } else {
+                                        egui::Color32::from_black_alpha(32)
+                                    };
                                     ui.painter().rect_stroke(
                                         rect,
                                         7.5,
-                                        egui::Stroke::new(1.2, egui::Color32::from_rgb(10, 132, 255)),
+                                        egui::Stroke::new(1.0, hov_stroke),
                                         egui::StrokeKind::Inside,
                                     );
                                 }

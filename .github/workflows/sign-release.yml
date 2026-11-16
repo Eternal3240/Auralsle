@@ -1,0 +1,137 @@
+name: SignPath 发布签名与打包
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布 Tag（留空则自动读取 Cargo.toml 版本并同步到对应 Release）'
+        required: false
+        default: ''
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-unsigned-exe:
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: 1
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      artifact-id: ${{ steps.upload-exe.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 读取版本号
+        id: meta
+        shell: pwsh
+        run: |
+          $ver = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "([^"]+)"').Groups[1].Value
+          $tag = if ("${{ github.event_name }}" -eq "release") { "${{ github.event.release.tag_name }}" } elseif ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v$ver" }
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: 安装 Rust stable
+        run: rustup toolchain install stable --profile minimal
+      - name: 构建未签名 AuraIsle.exe
+        shell: pwsh
+        run: |
+          $projectRoot = (Get-Location).Path
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          $env:CARGO_ENCODED_RUSTFLAGS = @('-C', 'target-feature=+crt-static', "--remap-path-prefix=$cargoHome=cargo", "--remap-path-prefix=$projectRoot=auraisle", '-C', 'link-arg=/PDBALTPATH:%_PDB%') -join [char]0x1f
+          cargo +stable-x86_64-pc-windows-msvc build --locked --release --bin AuraIsle --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
+      - name: 上传未签名主程序供 SignPath 验源
+        id: upload-exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-auralsle-exe
+          path: target/x86_64-pc-windows-msvc/release/AuraIsle.exe
+      - name: 校验 SignPath 仓库变量是否就绪
+        shell: pwsh
+        run: |
+          if (-not "${{ vars.SIGNPATH_ORGANIZATION_ID }}") {
+            Write-Warning "尚未设置 Repository Variable: SIGNPATH_ORGANIZATION_ID（可在 GitHub 仓库 Settings -> Secrets and variables -> Actions -> Variables 中添加后重跑）"
+          }
+
+  sign-exe:
+    needs: build-unsigned-exe
+    if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 提交 AuraIsle.exe 至 SignPath 签名
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '${{ vars.SIGNPATH_ORGANIZATION_ID }}'
+          project-slug: "${{ vars.SIGNPATH_PROJECT_SLUG || 'Auralsle' }}"
+          signing-policy-slug: "${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}"
+          github-artifact-id: '${{ needs.build-unsigned-exe.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: '${{ github.workspace }}/signed-exe'
+      - name: 上传已签名 AuraIsle.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-auralsle-exe
+          path: '${{ github.workspace }}/signed-exe/AuraIsle.exe'
+
+  package-installer:
+    needs: [build-unsigned-exe, sign-exe]
+    runs-on: windows-latest
+    outputs:
+      setup-artifact-id: ${{ steps.upload-setup.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-auralsle-exe
+          path: signed-exe
+      - name: 用已签名 AuraIsle.exe 构建便携包与安装程序
+        shell: pwsh
+        run: |
+          $compiler = ./scripts/get-nsis.ps1 -Directory $env:RUNNER_TEMP
+          ./scripts/package.ps1 -SkipBuild -Executable (Resolve-Path signed-exe/AuraIsle.exe).Path -NsisCompiler $compiler
+      - name: 上传未签名安装包供 SignPath 签名
+        id: upload-setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-auralsle-setup
+          path: dist/AuraIsle-Setup-v${{ needs.build-unsigned-exe.outputs.version }}-x64.exe
+      - name: 上传已含签名主程序的便携包
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-portable-zip
+          path: dist/AuraIsle-v${{ needs.build-unsigned-exe.outputs.version }}-windows-x64.zip
+
+  sign-and-publish-release:
+    needs: [build-unsigned-exe, package-installer]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 提交安装包至 SignPath 签名
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '${{ vars.SIGNPATH_ORGANIZATION_ID }}'
+          project-slug: "${{ vars.SIGNPATH_PROJECT_SLUG || 'Auralsle' }}"
+          signing-policy-slug: "${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}"
+          github-artifact-id: '${{ needs.package-installer.outputs.setup-artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: '${{ github.workspace }}/signed-setup'
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-portable-zip
+          path: '${{ github.workspace }}/release-assets'
+      - name: 汇总签名产物并更新 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build-unsigned-exe.outputs.tag }}
+          VER: ${{ needs.build-unsigned-exe.outputs.version }}
+        run: |
+          cp "${{ github.workspace }}/signed-setup/AuraIsle-Setup-v${VER}-x64.exe" "${{ github.workspace }}/release-assets/"
+          cd "${{ github.workspace }}/release-assets"
+          sha256sum "AuraIsle-Setup-v${VER}-x64.exe" "AuraIsle-v${VER}-windows-x64.zip" > SHA256SUMS.txt
+          gh release upload "$TAG" \
+            "AuraIsle-Setup-v${VER}-x64.exe" \
+            "AuraIsle-v${VER}-windows-x64.zip" \
+            "SHA256SUMS.txt" \
+            --clobber

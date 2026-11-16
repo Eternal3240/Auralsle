@@ -5261,7 +5261,31 @@ impl App {
                         let tile_fill = settings_color(ctx, Color32::from_rgb(0x33, 0x33, 0x33), Color32::from_rgb(0xf1, 0xf3, 0xf9));
                         let tile_stroke = settings_color(ctx, Color32::from_rgb(0x26, 0x26, 0x26), Color32::from_rgb(0xe2, 0xe4, 0xea));
 
-                        let snap = crate::resources::snapshot().unwrap_or_default();
+                        let scrolling_now = ctx.input(|i| {
+                            i.raw_scroll_delta.length_sq() > 0.1
+                                || i.smooth_scroll_delta.length_sq() > 0.1
+                                || i.pointer.any_down()
+                        });
+                        let snap_cache_id = egui::Id::new("mod_res_snap_cache_v1");
+                        let snap = {
+                            let cached = ctx.data(|d| {
+                                d.get_temp::<(std::time::Instant, crate::resources::Snapshot)>(snap_cache_id)
+                            });
+                            match cached {
+                                Some((ts, s))
+                                    if scrolling_now || ts.elapsed() < std::time::Duration::from_millis(1400) =>
+                                {
+                                    s
+                                }
+                                _ => {
+                                    let fresh = crate::resources::snapshot().unwrap_or_default();
+                                    ctx.data_mut(|d| {
+                                        d.insert_temp(snap_cache_id, (std::time::Instant::now(), fresh));
+                                    });
+                                    fresh
+                                }
+                            }
+                        };
                         let priv_mb = snap.private_bytes as f64 / (1024.0 * 1024.0);
                         let work_mb = snap.working_bytes as f64 / (1024.0 * 1024.0);
                         let tex_cnt = crate::resources::TEXTURES.load(std::sync::atomic::Ordering::Relaxed);
@@ -6344,7 +6368,10 @@ impl App {
                             if !self.settings.render_compat_reason.is_empty() {
                                 settings_hint(ui, &self.settings.render_compat_reason);
                             }
-                            if self.settings.render_compat != self.render_compat_running {
+                            let gpu_mode_now = crate::auralsle_ai_status::config::get().gpu_backend;
+                            let show_compat_restart = self.settings.render_compat != self.render_compat_running
+                                && !(gpu_mode_now == 3 && !self.settings.render_compat);
+                            if show_compat_restart {
                                 twinkle_card_break(ui);
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("重启灵屿 AuraIsle 后生效").size(13.0).color(Color32::from_rgb(230, 150, 40)));

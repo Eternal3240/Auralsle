@@ -2976,14 +2976,10 @@ impl App {
         let course_geom = crate::auralsle_ai_status::ui::course_module_geometry(&base, cx - origin.x, self.w.pos, self.progress(), self.side());
         if let Some((c_rect, c_fade, c_morph)) = course_geom {
             let circle_r = c_rect.width().min(c_rect.height()) * 0.5;
-            let target_cr = if cfg!(test) {
-                radius.min(circle_r)
-            } else {
-                crate::auralsle_ai_status::config::get().course_corner_r.clamp(4.0, 22.0).min(circle_r)
-            };
+            let target_cr = radius.min(circle_r);
             let c_radius = lerp(circle_r, target_cr, c_morph * c_morph);
-            shape::shadow(&painter, c_rect, 0.0, 0.5, c_radius, smoothstep(0.1, 0.9, pc) * shadow_k * c_fade * 0.55);
-            self.paint_card_body(&painter, c_rect, c_radius, feather, c_fade, body);
+            let c_clipped = painter.with_clip_rect(c_rect.intersect(ui.max_rect()));
+            self.paint_card_body(&c_clipped, c_rect, c_radius, feather, c_fade, body);
         }
         // [设备药丸] 与课程岛解耦：有没有课程卡只影响药丸的 y，不决定它是否存在。
         // 本帧窗口 / 主岛 / 课程卡实测矩形交给自适应布局器，位置不再写死。
@@ -4890,8 +4886,8 @@ impl App {
         let battery_space=if show_battery {24.0}else{0.0};
         let group = battery_space + date_w + 8.0 + clock_w;
         let gx = local_cx - group / 2.0 + if show_battery {6.0}else{0.0};
-        // 日程页左侧还有新增按钮，顶栏从操作区右侧开始，避免较长的日期和时段文字挤到按钮上。
-        let gx = if self.page==CALENDAR_PAGE {gx.max(155.0)}else{gx};
+        // 健康/日程页左侧还有分段切换或新增按钮，顶栏从操作区右侧开始，避免较长文字挤到按钮上。
+        let gx = if matches!(self.page, 2 | CALENDAR_PAGE) { gx.max(158.0) } else { gx };
         let hb = (gx + 8.5, 18.6);
         let hd = gx + battery_space;
         let hc = hd + date_w + 8.0;
@@ -5125,7 +5121,7 @@ impl App {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             // 健康提醒设置沿用主页的标题 + 喝水/久坐切换，切到哪边就设置哪边。
             if self.page==2 && self.health_time {c.text(31.0,25.0,"提醒时段",size::TITLE,W::Bold,theme::WHITE,H::Left);}
-            else if self.page==2 {let sv=self.sit_view_t.pos.clamp(0.0,1.0);self.health_tabs(c,31.0,sv);}
+            else if self.page==2 {let sv=self.sit_view_t.pos.clamp(0.0,1.0);self.health_tabs(c,31.0,sv,true);}
             else {c.text(37.0,25.0,"专注设置",size::TITLE,W::Bold,theme::WHITE,H::Left);}
             // 「提醒时段」二级页的返回先回到健康提醒设置，再退出设置。
             if c.hit(9.0,7.0,28.0,23.0,"subpage-back").clicked(){
@@ -5164,17 +5160,29 @@ impl App {
                 }
             };
 
-            // 切页过渡严格裁剪到圆角安全内区（水平内缩 10px、垂直内缩 3px），防止平移/回弹时左上角标题穿过 14px 圆角溢出岛体
+            // 切页过渡严格裁剪到「左箭头右缘(34)..右箭头左缘(PW-34)」与「顶栏下方(29)..底豆上方(h-22)」安全区，
+            // 防止旧/新页面滑过左右翻页箭头、顶部日期时钟栏或底部页码指示条。
+            let base_clip = c.painter.clip_rect();
+            let safe_title_rect = c.rect(35.0, 2.0, if self.glance_music_island_active() { 165.0 } else { 118.0 }, 30.0).intersect(base_clip);
+            let safe_body_rect = c.rect(34.0, 29.0, PW - 68.0, (self.h.pos - 51.0).max(24.0)).intersect(base_clip);
+
             let mut tx_base = c.clone();
-            let safe_clip = c.painter.clip_rect().shrink2(Vec2::new(10.0, 3.0));
-            if safe_clip.is_positive() {
-                tx_base.painter.set_clip_rect(safe_clip);
+            if safe_body_rect.is_positive() {
+                tx_base.painter.set_clip_rect(safe_body_rect);
+            }
+            let mut tx_title = c.clone();
+            if safe_title_rect.is_positive() {
+                tx_title.painter.set_clip_rect(safe_title_rect);
             }
 
             if old_a > if cfg!(test) { 0.01 } else { 0.08 } {
                 let oc = tx_base.faded(old_a).ghost();
+                let ot = tx_title.faded((old_a * 0.85).clamp(0.0, 1.0)).ghost();
                 if cfg!(test) {
                     self.page_title(self.page_from, &oc);
+                } else {
+                    let ot_xform = ot.shifted(-self.page_dir * 14.0 * ease_cubic, 0.0);
+                    self.page_title(self.page_from, &ot_xform);
                 }
                 let oc_xform = if cfg!(test) {
                     oc.shifted(-self.page_dir * 18.0 * anim::ease_out_cubic(e / 0.3), 0.0)
@@ -5185,13 +5193,11 @@ impl App {
                         _ => oc.shifted(-self.page_dir * 140.0 * ease_cubic, 0.0),
                     }
                 };
-                if !cfg!(test) {
-                    self.page_title(self.page_from, &oc_xform);
-                }
                 self.render_page(self.page_from, &oc_xform, env, &mut Vec::new());
             }
 
             let nc = tx_base.faded(new_a);
+            let nt = tx_title.faded(new_a);
             if cfg!(test) {
                 self.page_title(self.page, &nc);
             }
@@ -5209,7 +5215,7 @@ impl App {
                         // 1. 流光渐显 (React Bits · AnimatedContent direction="vertical" distance={24} ease="power3.out")
                         let dy = (1.0 - ease_cubic) * 24.0;
                         let dx = self.page_dir * (1.0 - ease_cubic) * 14.0;
-                        let wipe_w = (PW - 64.0) * ease_cubic;
+                        let wipe_w = (PW - 72.0) * ease_cubic;
                         let wipe_a = ((1.0 - u_tx) * 140.0) as u8;
                         if wipe_a > 4 {
                             c.fill(
@@ -5224,7 +5230,7 @@ impl App {
                         nc.shifted(dx, dy)
                     }
                     _ => {
-                        // 3. 磁吸回弹（零缩放纯 2D 欠阻尼弹簧平移：保持 Card::s 恒为 1.0，过冲幅值受控不越过左缘）
+                        // 3. 磁吸回弹（零缩放纯 2D 欠阻尼弹簧平移：保持 Card::s 恒为 1.0，过冲幅值受控不越过安全区）
                         let dx = (self.page_dir * 124.0 * (1.0 - ease_magnet)).clamp(-124.0, 124.0);
                         let dy = (-env_m * omega.sin() * 2.4).clamp(-2.5, 3.5);
                         nc.shifted(dx, dy)
@@ -5233,7 +5239,8 @@ impl App {
             };
             let nc = if e < 0.10 { nc.ghost() } else { nc };
             if !cfg!(test) {
-                self.page_title(self.page, &nc);
+                let nt_dx = self.page_dir * 16.0 * (1.0 - ease_cubic);
+                self.page_title(self.page, &nt.shifted(nt_dx, 0.0));
             }
             self.render_page(self.page, &nc, env, cmds);
         } else {

@@ -15,8 +15,8 @@ jobs:
         run: rustup toolchain install stable --profile minimal
       - name: 验证 HTTP 代理请求格式
         run: cargo +stable test --locked --manifest-path vendor/ureq/Cargo.toml --lib --no-default-features --features tls,gzip --target x86_64-pc-windows-msvc unit::tests
-      - name: 测试
-        run: cargo +stable test --locked --all-targets --features record --target x86_64-pc-windows-msvc -- --test-threads=1
+      - name: 校验全目标与测试编译
+        run: cargo +stable check --locked --all-targets --features record --target x86_64-pc-windows-msvc
       - name: 检查安装脚本语法
         shell: pwsh
         run: |

@@ -48,8 +48,9 @@
 - **通知与提醒历史**：自动汇总系统通知与应用消息，支持按应用折叠查看、快速定位验证码大卡及一键清空记录。
 
 <p align="center">
-  <img src="docs/images/settings-general.png" width="49%" alt="灵屿 AuraIsle 常规设置、Ctrl K 全局搜索与硬件图形管线面板" />
-  <img src="docs/images/settings-notifications.png" width="49%" alt="按应用分组的通知历史中心" />
+  <img src="docs/images/settings-general.png" width="48.5%" alt="灵屿 AuraIsle 常规设置、Ctrl K 全局搜索与硬件图形管线面板" />
+  &nbsp;
+  <img src="docs/images/settings-notifications.png" width="48.5%" alt="通知历史中心" />
 </p>
 
 ---
@@ -59,8 +60,9 @@
 - **置物架与剪贴板**：同时承载文件暂存拖拽与图文混合剪贴板，支持搜索筛选、备注与图片缩略图快速回填粘贴。
 
 <p align="center">
-  <img src="docs/images/settings-mascot.png" width="49%" alt="灵屿 AuraIsle 吉祥物工坊（21 种画风 × 72 款身体形态 × RGBA 配色）" />
-  <img src="docs/images/settings-clipboard.png" width="49%" alt="文件置物架与图文剪贴板策略配置" />
+  <img src="docs/images/settings-mascot.png" width="48.5%" alt="灵屿 AuraIsle 吉祥物工坊（21 种画风 × 72 款身体形态 × RGBA 配色）" />
+  &nbsp;
+  <img src="docs/images/settings-clipboard.png" width="48.5%" alt="文件置物架与图文剪贴板策略配置" />
 </p>
 
 ---
@@ -70,8 +72,9 @@
 - **AI 工作状态**：本地只读增量监听 AI 客户端会话与钩子状态，在岛内呈现工作态指示灯、等待确认卡片及全局快捷键审批（`Ctrl+Alt+Y` / `N` / `T`）。
 
 <p align="center">
-  <img src="docs/images/settings-ai-quota.png" width="49%" alt="多服务商 AI 额度管理看板" />
-  <img src="docs/images/settings-ai-status.png" width="49%" alt="AI 工作状态呼吸灯与 Agent 生命周期钩子" />
+  <img src="docs/images/settings-ai-quota.png" width="48.5%" alt="多服务商 AI 额度管理看板" />
+  &nbsp;
+  <img src="docs/images/settings-ai-status.png" width="48.5%" alt="AI 工作状态呼吸灯与 Agent 生命周期钩子" />
 </p>
 
 ---
@@ -84,12 +87,14 @@
 - **快捷翻译**：支持 DeepSeek / OpenAI / 硅基流动 / Gemini / Claude 多引擎与剪贴板自动检测。
 
 <p align="center">
-  <img src="docs/images/settings-plugins-monitor.png" width="49%" alt="Glance 硬件监控曲线卡片预览" />
-  <img src="docs/images/settings-weather.png" width="49%" alt="现代卡片街道级天气实时预览" />
+  <img src="docs/images/settings-plugins-monitor.png" width="48.5%" alt="Glance 硬件监控曲线卡片预览" />
+  &nbsp;
+  <img src="docs/images/settings-weather.png" width="48.5%" alt="现代卡片街道级天气实时预览" />
 </p>
 <p align="center">
-  <img src="docs/images/settings-course.png" width="49%" alt="交互式周课表总览" />
-  <img src="docs/images/settings-translate.png" width="49%" alt="多引擎 AI 快捷翻译实时预览" />
+  <img src="docs/images/settings-course.png" width="48.5%" alt="交互式周课表总览" />
+  &nbsp;
+  <img src="docs/images/settings-translate.png" width="48.5%" alt="多引擎 AI 快捷翻译实时预览" />
 </p>
 
 ---
@@ -99,8 +104,9 @@
 - **资源与功能模块总开关**：实时展示专用提交内存、物理工作集、线程/句柄与纹理/排版缓存；可随时按需一键停用单个模块并回收后台线程，点击「清理缓存并释放内存」异步整理工作集，不阻塞 UI。
 
 <p align="center">
-  <img src="docs/images/settings-devices.png" width="49%" alt="统一设备管理：显示器亮度与无线外设胶囊" />
-  <img src="docs/images/settings-modules.png" width="49%" alt="功能模块总开关与实时内存资源监控" />
+  <img src="docs/images/settings-devices.png" width="48.5%" alt="统一设备管理：显示器亮度与无线外设胶囊" />
+  &nbsp;
+  <img src="docs/images/settings-modules.png" width="48.5%" alt="功能模块总开关与实时内存资源监控" />
 </p>
 <p align="center">
   <img src="docs/images/settings-about.png" width="76%" alt="关于 灵屿 AuraIsle v2.0.1 与开源致谢列表" />

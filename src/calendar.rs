@@ -1391,7 +1391,7 @@ mod tests {
                 paths
             });
             let cfg=Config{provider,username:"synthetic".into(),href:None,server:Some(base.clone())};
-            let result=discover(&agent(),&cfg,"synthetic-password");
+            let result=discover(&agent().unwrap(),&cfg,"synthetic-password");
             stop_tx.send(()).unwrap();let paths=worker.join().unwrap();
             assert_eq!(result.unwrap(),format!("{base}dav/calendars/account/primary/"));
             assert_eq!(paths,vec!["/","/.well-known/caldav","/dav/principals/","/dav/principals/account/","/dav/calendars/account/"]);
@@ -1453,7 +1453,7 @@ mod tests {
             drop(stream);listener
         });
         let cfg=Config{provider:Provider::Custom,username:"synthetic".into(),href:None,server:Some(base)};
-        assert_eq!(discover(&agent(),&cfg,"synthetic-password").unwrap_err().status,Some(400));
+        assert_eq!(discover(&agent().unwrap(),&cfg,"synthetic-password").unwrap_err().status,Some(400));
         let listener=worker.join().unwrap();listener.set_nonblocking(true).unwrap();
         assert!(listener.accept().is_err());
     }
@@ -1517,7 +1517,7 @@ mod tests {
             write!(stream,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         });
         let cfg=Config{provider:Provider::WeCom,username:"synthetic".into(),href:None,server:Some(base)};
-        assert!(discover(&agent(),&cfg,"synthetic-password").unwrap_err().message.contains("不可信"));
+        assert!(discover(&agent().unwrap(),&cfg,"synthetic-password").unwrap_err().message.contains("不可信"));
         worker.join().unwrap();foreign.set_nonblocking(true).unwrap();assert!(foreign.accept().is_err());
     }
 
@@ -1551,8 +1551,9 @@ mod tests {
             }
         });
         let cfg=Config{provider:Provider::Feishu,username:"synthetic".into(),href:None,server:Some(base.clone())};
-        assert!(dav(&agent(),"REPORT",&base,"1","",&cfg,"secret").is_ok());
-        assert!(dav(&agent(),"REPORT",&base,"1","",&cfg,"secret").is_err());
+        let cl = agent().unwrap();
+        assert!(dav(&cl,"REPORT",&base,"1","",&cfg,"secret").is_ok());
+        assert!(dav(&cl,"REPORT",&base,"1","",&cfg,"secret").is_err());
         worker.join().unwrap();foreign.set_nonblocking(true).unwrap();assert!(foreign.accept().is_err());
     }
 
@@ -1873,7 +1874,7 @@ mod tests {
         assert!(Provider::Exchange.custom_server() && Provider::Exchange.server().is_empty());
         let saved=Config{provider:Provider::Exchange,username:"me@example.com".into(),href:None,server:Some("https://mail.example.com/".into())};
         assert_eq!(decode_config(&encode_config(&saved)).unwrap(),saved,"Exchange 账号的服务器地址要能保存和读回");
-        assert_eq!(Failure::transport("timed out").message, "连不上服务器，检查网络");
+        assert_eq!(Failure::transport(&std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out")).message, "连不上服务器，检查网络");
         assert_eq!(Failure::status(Provider::DingTalk, 404).message, "服务器地址不对（404）");
     }
 

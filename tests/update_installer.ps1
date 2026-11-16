@@ -19,9 +19,10 @@ try {
     [IO.File]::WriteAllText($installer, [IO.File]::ReadAllText((Join-Path $project 'installer\update.ps1')), [Text.UTF8Encoding]::new($true))
     $targetDir = Join-Path $testRoot 'installed'
     New-Item -ItemType Directory -Path $targetDir | Out-Null
-    $target = Join-Path $targetDir 'auralsle.exe'
+    $target = Join-Path $targetDir 'AuraIsle.exe'
     $data = Join-Path $targetDir 'settings.json'
     Set-Content -LiteralPath $data -Value 'keep-user-data'
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     foreach ($case in @('success','inherited-shell','bad-hash','wrong-version','traversal')) {
         Remove-Item -LiteralPath (Join-Path $targetDir 'started.txt') -ErrorAction SilentlyContinue
@@ -32,7 +33,7 @@ try {
         $archive = Join-Path $work 'update.zip'
         $zip = [IO.Compression.ZipFile]::Open($archive, [IO.Compression.ZipArchiveMode]::Create)
         $version = if ($case -eq 'wrong-version') {'9.8.8'} else {'9.8.7'}
-        $entry = if ($case -eq 'traversal') {'../auralsle.exe'} else {"Auralsle-v$version-windows-x64/auralsle.exe"}
+        $entry = if ($case -eq 'traversal') {'../AuraIsle.exe'} else {"AuraIsle-v$version-windows-x64/AuraIsle.exe"}
         [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $fixture, $entry) | Out-Null
         $zip.Dispose()
         Set-Content -LiteralPath (Join-Path $work 'version.txt') -Value $version

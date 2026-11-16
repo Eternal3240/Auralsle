@@ -357,7 +357,7 @@ mod tests {
     #[ignore="只读检查已连接企业微信返回的文件夹类型及日程数量，不输出凭据或正文"]
     fn live_wecom_folder_diagnosis(){
         let cfg=super::super::load_configs().into_iter().find(|c|c.provider==Provider::WeCom).expect("需要已连接的企业微信");
-        let password=super::super::secrets::load(&cfg).unwrap();let agent=super::super::agent();
+        let password=super::super::secrets::load(&cfg).unwrap();let agent=super::super::agent().unwrap();
         let folders=command(&agent,&cfg,&password,"FolderSync",&node(FOLDER,0x16,"",vec![node(FOLDER,0x12,"0",vec![])]),None).unwrap();
         check_status(&folders,FOLDER,0x0c,"企业微信").unwrap();
         for (i,folder) in folders.child(FOLDER,0x0e).unwrap().children.iter().enumerate(){

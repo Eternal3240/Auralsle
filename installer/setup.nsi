@@ -76,11 +76,13 @@ Function .onInit
   ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}"
   ${If} $0 != ""
     StrCpy $AutoStartChoice 1
+!if "${APP_ID}" == "AuraIsle"
   ${Else}
     ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${LEGACY_APP_ID}"
     ${If} $0 != ""
       StrCpy $AutoStartChoice 1
     ${EndIf}
+!endif
   ${EndIf}
   ; 静默安装使用同一组选项；/D 路径由 NSIS 自身处理。
   ${GetParameters} $0
@@ -240,10 +242,12 @@ FunctionEnd
 !macro ClosedCheck Prefix
 Function ${Prefix}CheckClosed
   retry:
-  System::Call 'kernel32::OpenMutexW(i 0x100000, i 0, w "Local\AuraIsle.SingleInstance") p .r0'
+  System::Call 'kernel32::OpenMutexW(i 0x100000, i 0, w "Local\${APP_ID}.SingleInstance") p .r0'
+!if "${APP_ID}" == "AuraIsle"
   ${If} $0 == 0
-    System::Call 'kernel32::OpenMutexW(i 0x100000, i 0, w "Local\Auralsle.SingleInstance") p .r0'
+    System::Call 'kernel32::OpenMutexW(i 0x100000, i 0, w "Local\${LEGACY_APP_ID}.SingleInstance") p .r0'
   ${EndIf}
+!endif
   ${If} $0 != 0
     System::Call 'kernel32::CloseHandle(p r0)'
     MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "请先从系统托盘退出${APP_NAME}，然后点击重试。" /SD IDCANCEL IDRETRY retry
@@ -261,10 +265,11 @@ Section "安装"
   Call ValidateDirectory
   SetOutPath "$INSTDIR"
   SetOverwrite on
+  Delete "$INSTDIR\auralsle.exe"
+  Delete "$INSTDIR\daozai.exe"
   File /oname=AuraIsle.exe "${SOURCE_EXE}"
   File "${PROJECT_DIR}\LICENSE"
   File "${PROJECT_DIR}\THIRD_PARTY_NOTICES.txt"
-  Delete "$INSTDIR\auralsle.exe"
   Delete "$INSTDIR\收集岛仔诊断.cmd"
   Delete "$INSTDIR\scripts\collect-diagnostics.ps1"
   RMDir "$INSTDIR\scripts"

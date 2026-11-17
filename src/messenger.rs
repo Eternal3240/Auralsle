@@ -6,7 +6,7 @@ use std::collections::HashMap;
 #[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]
-mod qq;
+pub(crate) mod qq;
 #[cfg(windows)]
 pub(crate) mod desktop;
 #[cfg(windows)]

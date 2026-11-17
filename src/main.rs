@@ -110,10 +110,10 @@ impl Shell {
         if !mcfg.mod_music_enabled {
             self.app.clear_music_artwork();
         }
-        if !mcfg.mod_weather_translate_enabled {
+        if !mcfg.mod_weather_enabled {
             self.app.clear_weather_snapshot();
         }
-        auralsle::monitors::set_module_enabled(mcfg.mod_display_bt_enabled);
+        auralsle::monitors::set_module_enabled(mcfg.mod_display_brightness_enabled);
     }
 
     #[cfg(windows)]
@@ -151,7 +151,7 @@ impl Shell {
             .is_some_and(|w| w.adapter.get_info().backend == eframe::wgpu::Backend::Dx12);
         diagnostics::startup("加载本地配置");
         let boot_mcfg = auralsle::auralsle_ai_status::config::get();
-        auralsle::monitors::set_module_enabled(boot_mcfg.mod_display_bt_enabled);
+        auralsle::monitors::set_module_enabled(boot_mcfg.mod_display_brightness_enabled);
         auralsle::monitors::start();
         let mut app = App::new(&cc.egui_ctx, Options::default());
         app.render_compat_running=running_compat;
@@ -487,7 +487,7 @@ impl eframe::App for Shell {
             }
             auralsle::bt::register_ui_ctx(ctx);
             let mcfg_bt = auralsle::auralsle_ai_status::config::get();
-            if mcfg_bt.mod_display_bt_enabled
+            if mcfg_bt.mod_bt_devices_enabled
                 && (self.app.settings.bluetooth_notifications
                     || mcfg_bt.show_bt_battery_on_island
                     || mcfg_bt.device_page_visible)

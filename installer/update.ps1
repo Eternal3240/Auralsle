@@ -33,11 +33,18 @@ try {
             ('AuraIsle-v' + $version + '-windows-x64/AuraIsle.exe'),
             ('Auralsle-v' + $version + '-windows-x64/auralsle.exe')
         )
-        $entries = @($zip.Entries | Where-Object { $candidates -ccontains $_.FullName.Replace('\','/') })
+        $entries = @($zip.Entries | Where-Object {
+            $norm = $_.FullName.Replace('\','/')
+            $candidates | Where-Object { [string]::Equals($norm, $_, [StringComparison]::OrdinalIgnoreCase) }
+        })
         if ($entries.Count -ne 1 -or $entries[0].Length -gt 200MB) { throw '更新包中缺少唯一的灵屿 AuraIsle 程序。' }
         [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $staged)
     } finally { $zip.Dispose() }
-    $actual = [Diagnostics.FileVersionInfo]::GetVersionInfo($staged).FileVersion
+    $actual = ''
+    for ($tryVer = 0; $tryVer -lt 5 -and -not $actual; $tryVer++) {
+        $actual = [Diagnostics.FileVersionInfo]::GetVersionInfo($staged).FileVersion
+        if (-not $actual) { Start-Sleep -Milliseconds 150 }
+    }
     if ($actual -ne $version -and $actual -ne "$version.0") { throw '安装包版本不匹配。' }
     Set-Content -LiteralPath (Join-Path $workRoot 'ready') -Value 'ok'
     if ($ParentProcessId -gt 0) {

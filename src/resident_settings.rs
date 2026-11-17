@@ -50,8 +50,14 @@ impl crate::app::App {
         let dragged=egui::DragAndDrop::payload::<usize>(ui.ctx());
         let mut movement=None;
         let label=|slot|match slot{CLOCK=>"时间",BATTERY=>"电量",WEATHER=>"天气",QUOTA=>"AI 额度",MUSIC=>"音乐",FOCUS=>"专注",_=>"吉祥物"};
+        let mcfg_res = if cfg!(test) {
+            None
+        } else {
+            Some(crate::auralsle_ai_status::config::get())
+        };
         for (index,&slot) in order.iter().enumerate(){
-            let raw_x=cx+layout.x[slot].unwrap();
+            let Some(raw_slot_x)=layout.x.get(slot).copied().flatten() else {continue;};
+            let raw_x=cx+raw_slot_x;
             let x = if cfg!(test) {
                 raw_x
             } else {
@@ -74,11 +80,48 @@ impl crate::app::App {
                 if *from!=slot && rect.contains(point) && ui.input(|i|i.pointer.primary_down()){movement=Some((*from,index));}
             }
             let is_dragged=dragged.as_deref()==Some(&slot);
+            if response.double_clicked() && !is_dragged {
+                match slot {
+                    CLOCK => self.settings.show_clock = !self.settings.show_clock,
+                    BATTERY => self.settings.show_battery = !self.settings.show_battery,
+                    WEATHER => self.settings.show_weather = !self.settings.show_weather,
+                    PET => self.set_pet(!self.settings.pet),
+                    QUOTA if !cfg!(test) => {
+                        crate::auralsle_ai_status::config::update(|cfg| cfg.pill_show_quota = !cfg.pill_show_quota);
+                    }
+                    MUSIC if !cfg!(test) => {
+                        crate::auralsle_ai_status::config::update(|cfg| cfg.pill_show_music = !cfg.pill_show_music);
+                    }
+                    FOCUS if !cfg!(test) => {
+                        crate::auralsle_ai_status::config::update(|cfg| cfg.pill_show_focus = !cfg.pill_show_focus);
+                    }
+                    _ => {}
+                }
+            }
             let dx=if is_dragged{pointer.map(|p|((p.x-origin.x)/scale-(left+width/2.0)).clamp(-left,layout.width-left-width)).unwrap_or(0.0)}else{0.0};
             if is_dragged {ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);}
             else if response.hovered(){ui.painter().rect_filled(rect,6.0,Color32::from_white_alpha(18));}
-            let active=match slot{CLOCK=>self.settings.show_clock,BATTERY=>self.settings.show_battery&&self.resident_power.0.is_some(),WEATHER=>weather_snapshot.is_some(),PET=>self.settings.pet,QUOTA=>count>0,MUSIC=>self.media.is_music(),FOCUS=>self.pomo.running,_=>true};
-            let c=card.shifted(dx,0.0).faded(if active||is_dragged{1.0}else{0.38}).ghost();
+            let enabled = match slot {
+                CLOCK => self.settings.show_clock,
+                BATTERY => self.settings.show_battery,
+                WEATHER => self.settings.show_weather,
+                PET => self.settings.pet,
+                QUOTA => mcfg_res.as_ref().map_or(true, |c| c.pill_show_quota),
+                MUSIC => mcfg_res.as_ref().map_or(true, |c| c.pill_show_music),
+                FOCUS => mcfg_res.as_ref().map_or(true, |c| c.pill_show_focus),
+                _ => true,
+            };
+            let runtime_active = match slot {
+                CLOCK => self.settings.show_clock,
+                BATTERY => self.settings.show_battery && self.resident_power.0.is_some(),
+                WEATHER => self.settings.show_weather && weather_snapshot.is_some(),
+                PET => self.settings.pet,
+                QUOTA => enabled && count > 0,
+                MUSIC => enabled && self.media.is_music(),
+                FOCUS => enabled && self.pomo.running,
+                _ => true,
+            };
+            let c=card.shifted(dx,0.0).faded(if runtime_active||is_dragged{1.0}else{0.34}).ghost();
             match slot{
                 BATTERY=>paint::battery(&c,x,15.0,self.resident_power.0,self.resident_power.1,1.0),
                 CLOCK=>{
@@ -93,7 +136,7 @@ impl crate::app::App {
                 _=>{c.ring(x,15.0,10.0,2.0,theme::GRAY);c.text(x,18.0,"AI",7.0,W::Bold,theme::WHITE,H::Center);},
             }
             if is_dragged {ui.painter().line_segment([Pos2::new(rect.center().x,body.bottom()+6.0),Pos2::new(rect.center().x,body.bottom()+12.0)],egui::Stroke::new(2.0,theme::BLUE));}
-            response.on_hover_text(label(slot));
+            response.on_hover_text(format!("{} · {}（按住拖动位置 · 双击切换显示/隐藏）", label(slot), if enabled { "已显示" } else { "已隐藏" }));
         }
         if let Some(palette)=self.skin_palette() {
             let end=crate::skin_paint::shape_count(ui.ctx(),ui.layer_id());
@@ -102,8 +145,8 @@ impl crate::app::App {
         if let Some((slot,index))=movement{
             if let Some(from)=order.iter().position(|value|*value==slot){order.remove(from);order.insert(index,slot);self.settings.resident_order=order;}
         }
-        ui.painter().text(Pos2::new(stage.center().x,stage.bottom()-22.0),egui::Align2::CENTER_CENTER,"按住图标左右拖动",theme::font(11.0,W::Regular),Color32::from_gray(160));
+        ui.painter().text(Pos2::new(stage.center().x,stage.bottom()-22.0),egui::Align2::CENTER_CENTER,"按住图标左右拖动 · 双击图标直接切换显示/隐藏",theme::font(11.0,W::Regular),Color32::from_gray(160));
         ui.add_space(8.0);
-        ui.label(RichText::new("灰色图标为暂未显示的组件；位置会保留。").size(11.0).color(ui.visuals().weak_text_color()));
+        ui.label(RichText::new("灰色图标为暂未显示或已隐藏的组件，双击可随时开启或关闭，位置会保留。").size(11.0).color(ui.visuals().weak_text_color()));
     }
 }

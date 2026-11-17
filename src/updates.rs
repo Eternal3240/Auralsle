@@ -67,11 +67,21 @@ impl State {
     fn begin_check(&mut self, ctx: &egui::Context, automatic: bool, load: impl FnOnce() -> Result<Option<Release>, String> + Send + 'static) -> bool {
         if self.rx.is_some() { return false; }
         let (tx, rx) = mpsc::channel(); self.rx = Some(rx); self.automatic_check = automatic;
-        self.next_check = Some(Instant::now() + CHECK_INTERVAL);
+        let interval = Self::configured_interval();
+        self.next_check = Some(Instant::now() + interval);
         self.message.clear(); self.result = None; self.dialog_open = false; self.focus_requested = false;
         let ctx = ctx.clone();
         std::thread::spawn(move || { let _ = tx.send(Event::Checked(load())); ctx.request_repaint(); });
         true
+    }
+
+    fn configured_interval() -> Duration {
+        if cfg!(test) {
+            CHECK_INTERVAL
+        } else {
+            let h = crate::auralsle_ai_status::config::get().update_check_interval_hours.clamp(1, 720) as u64;
+            Duration::from_secs(h * 3600)
+        }
     }
 
     pub(crate) fn poll(&mut self, ctx: &egui::Context) {
@@ -88,7 +98,7 @@ impl State {
             match event {
                 Event::Checked(result) => {
                     let automatic = std::mem::take(&mut self.automatic_check);
-                    let delay = if result.is_err() { RETRY_INTERVAL } else { CHECK_INTERVAL };
+                    let delay = if result.is_err() { RETRY_INTERVAL } else { Self::configured_interval() };
                     self.next_check = Some(Instant::now() + delay);
                     self.dialog_open = matches!(&result, Ok(Some(release)) if !automatic || self.notified_version.as_deref() != Some(release.version.as_str()));
                     self.focus_requested = self.dialog_open;
@@ -119,8 +129,9 @@ impl State {
                 }
             }
         }
-        // 复用主界面的低频轮询；只在实际检查时启动线程，不增加常驻计时线程。
-        if !cfg!(test) && self.should_check(Instant::now()) { self.begin_check(ctx, true, check); }
+        // 复用主界面的低频轮询；只在实际开启定时检查更新且到达设定周期时才启动线程。
+        let auto_on = cfg!(test) || crate::auralsle_ai_status::config::get().auto_check_updates;
+        if !cfg!(test) && auto_on && self.should_check(Instant::now()) { self.begin_check(ctx, true, check); }
         if self.rx.is_some() && !self.automatic_check { ctx.request_repaint_after(Duration::from_millis(100)); }
     }
 
@@ -432,14 +443,30 @@ fn launch_installer(work: &std::path::Path) -> Result<(), String> {
         .arg(work.join("apply.ps1")).arg("-WorkPath").arg(work).arg("-TargetExe").arg(target)
         .arg("-ParentProcessId").arg(std::process::id().to_string()))
         .map_err(|_| "无法启动更新程序，请通过浏览器下载安装")?;
-    // 脚本先确认缓存和安装目录可用，再允许主程序退出。
-    for _ in 0..100 {
+    // 脚本先确认缓存和安装目录可用（含解压与安全扫描，最多等待 30 秒），再允许主程序退出。
+    let mut exited = false;
+    for _ in 0..600 {
         if work.join("ready").exists() { return Ok(()); }
-        if child.try_wait().ok().flatten().is_some() { break; }
+        if child.try_wait().ok().flatten().is_some() {
+            exited = true;
+            break;
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = child.kill();
-    Err(std::fs::read_to_string(work.join("error.txt")).unwrap_or_else(|_| "无法准备安装，请通过浏览器下载后安装".into()))
+    if !exited {
+        let _ = child.kill();
+    }
+    if let Ok(msg) = std::fs::read_to_string(work.join("error.txt")) {
+        let trimmed = msg.trim();
+        if !trimmed.is_empty() {
+            return Err(trimmed.to_owned());
+        }
+    }
+    Err(if exited {
+        "无法准备安装，请通过浏览器下载后安装".into()
+    } else {
+        "安装准备超时，请重试或通过浏览器下载后安装".into()
+    })
 }
 #[cfg(not(windows))]
 fn launch_installer(_: &std::path::Path) -> Result<(), String> { Err("仅支持 Windows 应用内更新".into()) }

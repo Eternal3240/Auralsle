@@ -1653,106 +1653,215 @@ pub fn draw_mascot_settings(ui: &mut egui::Ui) {
         let shape_card_w = ((avail_w - (shape_cols as f32 - 1.0) * shape_gap) / shape_cols as f32).clamp(38.0, 82.0);
         let shape_card_h = (shape_card_w * 0.86).clamp(44.0, 56.0);
 
+        let expand_id = egui::Id::new("aora_body_shapes_expanded");
+        let shapes_expanded = ui.ctx().data(|d| d.get_temp::<bool>(expand_id).unwrap_or(false));
+        let collapsed_cap = shape_cols * 3;
+        let can_collapse = filtered_shapes.len() > collapsed_cap;
+        let expand_anim_t = if can_collapse {
+            let t = ui.ctx().animate_bool_with_time(
+                egui::Id::new("aora_body_shapes_expand_anim"),
+                shapes_expanded,
+                0.24,
+            );
+            if t > 0.004 && t < 0.996 {
+                ui.ctx().request_repaint();
+            }
+            let inv = 1.0 - t;
+            1.0 - inv * inv * inv
+        } else {
+            1.0
+        };
+        let hidden_shape_count = filtered_shapes.len().saturating_sub(collapsed_cap.saturating_sub(1));
+
+        // 抽出单格绘制闭包，保证折叠首 3 行与动画展开区完全共用一套渲染逻辑
+        let mut draw_shape_cell = |ui: &mut egui::Ui, cell: Option<usize>| {
+            let Some(i) = cell else {
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(shape_card_w, shape_card_h),
+                    if enabled { egui::Sense::click() } else { egui::Sense::hover() },
+                );
+                if resp.clicked() {
+                    ui.ctx().data_mut(|d| d.insert_temp(expand_id, !shapes_expanded));
+                }
+                let fill = if resp.hovered() { card_hover } else { card_idle };
+                ui.painter().rect_filled(rect, 7.5, fill);
+                let acc_col = if dark {
+                    egui::Color32::from_rgb(96, 165, 250)
+                } else {
+                    egui::Color32::from_rgb(10, 132, 255)
+                };
+                let toggle_top = if shapes_expanded {
+                    "▲".to_owned()
+                } else {
+                    format!("+{hidden_shape_count}")
+                };
+                ui.painter().text(
+                    egui::pos2(rect.center().x, rect.center().y - 6.0),
+                    egui::Align2::CENTER_CENTER,
+                    &toggle_top,
+                    egui::FontId::proportional(if shapes_expanded { 13.0 } else { 14.0 }),
+                    acc_col,
+                );
+                ui.painter().text(
+                    egui::pos2(rect.center().x, rect.bottom() - 9.0),
+                    egui::Align2::CENTER_CENTER,
+                    if shapes_expanded { "收起" } else { "展开全部" },
+                    egui::FontId::proportional(8.8),
+                    text_idle,
+                );
+                return;
+            };
+            let shape = BodyShape::ALL[i];
+            let selected = i == shape_idx;
+            let (rect, resp) = ui.allocate_exact_size(
+                egui::vec2(shape_card_w, shape_card_h),
+                if enabled { egui::Sense::click() } else { egui::Sense::hover() },
+            );
+            if resp.clicked() {
+                shape_idx = i;
+                changed = true;
+            }
+            let fill = if selected {
+                egui::Color32::from_rgb(10, 132, 255)
+            } else if resp.hovered() {
+                card_hover
+            } else {
+                card_idle
+            };
+            ui.painter().rect_filled(rect, 7.5, fill);
+            let icon_card = Card::new(ui, rect.min, rect);
+            let cur_color = PALETTE[color_idx];
+            let cur_style = ArtStyle::ALL[style_idx];
+            let mid_x = shape_card_w * 0.5;
+            let mid_y = shape_card_h * 0.37;
+            if shape == BodyShape::Islo {
+                let islo_ink = if color_idx <= 1 {
+                    if selected || dark {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(51, 51, 51)
+                    }
+                } else {
+                    cur_color
+                };
+                islo_face::draw_custom(&icon_card, mid_x, mid_y, 0.74, IsloFace::Happy, 0.0, [0.0, 0.0], islo_ink);
+            } else {
+                let cur_fill = if custom_fill_on {
+                    egui::Color32::from_rgba_unmultiplied(
+                        custom_fill_rgb[0],
+                        custom_fill_rgb[1],
+                        custom_fill_rgb[2],
+                        custom_fill_a,
+                    )
+                } else {
+                    cur_color
+                };
+                let cur_out = custom_outline_on.then(|| {
+                    egui::Color32::from_rgba_unmultiplied(
+                        custom_outline_rgb[0],
+                        custom_outline_rgb[1],
+                        custom_outline_rgb[2],
+                        custom_outline_a,
+                    )
+                });
+                let body_r = (shape_card_h * 0.23).clamp(9.5, 13.5);
+                aora_face::draw_shape_dual(
+                    &icon_card,
+                    mid_x,
+                    mid_y,
+                    body_r,
+                    shape,
+                    cur_fill,
+                    cur_out,
+                    cur_style,
+                );
+                let mini_ink = if custom_ink_on {
+                    egui::Color32::from_rgba_unmultiplied(
+                        custom_ink_rgb[0],
+                        custom_ink_rgb[1],
+                        custom_ink_rgb[2],
+                        custom_ink_a,
+                    )
+                } else {
+                    aora_face::resolve_mascot_ink(cur_fill, cur_out, cur_style, &cfg)
+                };
+                let ([fx, fy], eye_fit) = aora_face::shape_face_fit(shape);
+                aora_face::draw_face_styled(
+                    &icon_card,
+                    mid_x + fx * body_r,
+                    mid_y + fy * body_r,
+                    0.50 * eye_fit,
+                    0,
+                    mini_ink,
+                    FaceStyle::ALL[face_idx],
+                    0.0,
+                );
+            }
+            ui.painter().text(
+                egui::pos2(rect.center().x, rect.bottom() - 8.0),
+                egui::Align2::CENTER_CENTER,
+                shape.label_zh(),
+                egui::FontId::proportional(8.8),
+                if selected { egui::Color32::WHITE } else { text_idle },
+            );
+        };
+
+        let show_more_rows = can_collapse && (shapes_expanded || expand_anim_t > 0.01);
+        let head_cells: Vec<Option<usize>> = if can_collapse && !shapes_expanded {
+            filtered_shapes
+                .iter()
+                .copied()
+                .take(collapsed_cap.saturating_sub(1))
+                .map(Some)
+                .chain(std::iter::once(None))
+                .collect()
+        } else if can_collapse {
+            filtered_shapes.iter().copied().take(collapsed_cap).map(Some).collect()
+        } else {
+            filtered_shapes.iter().copied().map(Some).collect()
+        };
+
         ui.spacing_mut().item_spacing.y = shape_gap;
-        for row_slice in filtered_shapes.chunks(shape_cols) {
+        for row_slice in head_cells.chunks(shape_cols) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = shape_gap;
-                for &i in row_slice {
-                    let shape = BodyShape::ALL[i];
-                    let selected = i == shape_idx;
-                    let (rect, resp) = ui.allocate_exact_size(
-                        egui::vec2(shape_card_w, shape_card_h),
-                        if enabled { egui::Sense::click() } else { egui::Sense::hover() },
-                    );
-                    if resp.clicked() {
-                        shape_idx = i;
-                        changed = true;
-                    }
-                    let fill = if selected {
-                        egui::Color32::from_rgb(10, 132, 255)
-                    } else if resp.hovered() {
-                        card_hover
-                    } else {
-                        card_idle
-                    };
-                    ui.painter().rect_filled(rect, 7.5, fill);
-                    let icon_card = Card::new(ui, rect.min, rect);
-                    let cur_color = PALETTE[color_idx];
-                    let cur_style = ArtStyle::ALL[style_idx];
-                    let mid_x = shape_card_w * 0.5;
-                    let mid_y = shape_card_h * 0.37;
-                    if shape == BodyShape::Islo {
-                        let islo_ink = if color_idx <= 1 {
-                            if selected || dark {
-                                egui::Color32::WHITE
-                            } else {
-                                egui::Color32::from_rgb(51, 51, 51)
-                            }
-                        } else {
-                            cur_color
-                        };
-                        islo_face::draw_custom(&icon_card, mid_x, mid_y, 0.74, IsloFace::Happy, 0.0, [0.0, 0.0], islo_ink);
-                    } else {
-                        let cur_fill = if custom_fill_on {
-                            egui::Color32::from_rgba_unmultiplied(
-                                custom_fill_rgb[0],
-                                custom_fill_rgb[1],
-                                custom_fill_rgb[2],
-                                custom_fill_a,
-                            )
-                        } else {
-                            cur_color
-                        };
-                        let cur_out = custom_outline_on.then(|| {
-                            egui::Color32::from_rgba_unmultiplied(
-                                custom_outline_rgb[0],
-                                custom_outline_rgb[1],
-                                custom_outline_rgb[2],
-                                custom_outline_a,
-                            )
-                        });
-                        let body_r = (shape_card_h * 0.23).clamp(9.5, 13.5);
-                        aora_face::draw_shape_dual(
-                            &icon_card,
-                            mid_x,
-                            mid_y,
-                            body_r,
-                            shape,
-                            cur_fill,
-                            cur_out,
-                            cur_style,
-                        );
-                        let mini_ink = if custom_ink_on {
-                            egui::Color32::from_rgba_unmultiplied(
-                                custom_ink_rgb[0],
-                                custom_ink_rgb[1],
-                                custom_ink_rgb[2],
-                                custom_ink_a,
-                            )
-                        } else {
-                            aora_face::resolve_mascot_ink(cur_fill, cur_out, cur_style, &cfg)
-                        };
-                        let ([fx, fy], eye_fit) = aora_face::shape_face_fit(shape);
-                        aora_face::draw_face_styled(
-                            &icon_card,
-                            mid_x + fx * body_r,
-                            mid_y + fy * body_r,
-                            0.50 * eye_fit,
-                            0,
-                            mini_ink,
-                            FaceStyle::ALL[face_idx],
-                            0.0,
-                        );
-                    }
-                    ui.painter().text(
-                        egui::pos2(rect.center().x, rect.bottom() - 8.0),
-                        egui::Align2::CENTER_CENTER,
-                        shape.label_zh(),
-                        egui::FontId::proportional(8.8),
-                        if selected { egui::Color32::WHITE } else { text_idle },
-                    );
+                for &cell in row_slice {
+                    draw_shape_cell(ui, cell);
                 }
             });
+        }
+
+        if show_more_rows {
+            let tail_cells: Vec<Option<usize>> = filtered_shapes
+                .iter()
+                .copied()
+                .skip(collapsed_cap)
+                .map(Some)
+                .chain(std::iter::once(None))
+                .collect();
+            let tail_rows = (tail_cells.len() + shape_cols - 1) / shape_cols;
+            let full_tail_h = tail_rows as f32 * shape_card_h + tail_rows.saturating_sub(1) as f32 * shape_gap;
+            let vis_tail_h = (full_tail_h * expand_anim_t).max(0.0);
+            if vis_tail_h > 0.5 {
+                let (box_rect, _) = ui.allocate_exact_size(egui::vec2(avail_w, vis_tail_h), egui::Sense::hover());
+                let dy = (1.0 - expand_anim_t) * -8.0;
+                let mut anim_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(box_rect.translate(egui::vec2(0.0, dy)))
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                anim_ui.set_clip_rect(box_rect.intersect(ui.clip_rect()));
+                anim_ui.multiply_opacity(expand_anim_t.clamp(0.0, 1.0));
+                anim_ui.spacing_mut().item_spacing.y = shape_gap;
+                for row_slice in tail_cells.chunks(shape_cols) {
+                    anim_ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = shape_gap;
+                        for &cell in row_slice {
+                            draw_shape_cell(ui, cell);
+                        }
+                    });
+                }
+            }
         }
 
         ui.add_space(6.0);

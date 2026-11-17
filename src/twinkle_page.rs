@@ -151,15 +151,19 @@ pub(crate) fn draw_settings(ui: &mut egui::Ui) {
         ui.label(egui::RichText::new(mon_title).size(18.0).strong().color(title_col));
     });
     ui.add_space(10.0);
-    for (k, v, has_check) in [
+    let mon_cur_str = mon_cur_br.to_string();
+    let left_rows: [(&str, &str, bool); 4] = [
         ("名称: ", mon_title, false),
         ("内部名称: ", "TMA2024", false),
         ("通信方式: ", mon_comm, true),
-        ("当前亮度: ", &mon_cur_br.to_string(), false),
+        ("当前亮度: ", &mon_cur_str, false),
+    ];
+    let right_rows: [(&str, &str, bool); 3] = [
         ("最大亮度: ", &mon_max_str, false),
         ("统一亮度区间: ", "0 - 100", false),
         ("HDR: ", "已激活", false),
-    ] {
+    ];
+    let draw_info_row = |ui: &mut egui::Ui, k: &str, v: &str, has_check: bool| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             ui.label(egui::RichText::new(k).size(14.0).color(desc_col));
@@ -174,7 +178,23 @@ pub(crate) fn draw_settings(ui: &mut egui::Ui) {
                 ui.painter().line_segment([egui::pos2(c.x - 0.8, c.y + 3.0), egui::pos2(c.x + 3.8, c.y - 2.6)], s);
             }
         });
-    }
+    };
+    let col_w = ((crate::extras::layout_avail_w(ui) - 24.0) * 0.5).max(160.0);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 24.0;
+        ui.allocate_ui_with_layout(egui::vec2(col_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.set_width(col_w);
+            for (k, v, has_check) in left_rows {
+                draw_info_row(ui, k, v, has_check);
+            }
+        });
+        ui.allocate_ui_with_layout(egui::vec2(col_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.set_width(col_w);
+            for (k, v, has_check) in right_rows {
+                draw_info_row(ui, k, v, has_check);
+            }
+        });
+    });
     ui.add_space(18.0);
 
     // 卡片 1：亮度更新速度（左文右 `<select>` 下拉框 `138×40`）

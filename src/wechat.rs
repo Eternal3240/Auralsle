@@ -81,6 +81,11 @@ fn installed_paths() -> Vec<String> {
 
 /// 检测电脑端微信（Weixin.exe / WeChat.exe）当前是否已在运行（用于与 OPPO 互联转发的手机微信通知智能去重）。
 pub fn is_pc_wechat_running() -> bool {
+    is_pc_wechat_logged_in()
+}
+
+/// 检测电脑端微信是否已登录（不仅存在进程，还具备已登录的托盘宿主机/主聊天窗，排除仅停留在扫码登录框的状态）。
+pub fn is_pc_wechat_logged_in() -> bool {
     use std::sync::{Mutex, OnceLock};
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -95,7 +100,7 @@ pub fn is_pc_wechat_running() -> bool {
             }
         }
     }
-    let mut found = false;
+    let mut pids: Vec<u32> = Vec::new();
     unsafe {
         if let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
             let mut entry = PROCESSENTRY32W {
@@ -107,14 +112,49 @@ pub fn is_pc_wechat_running() -> bool {
                 let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
                 let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_ascii_lowercase();
                 if name == "weixin.exe" || name == "wechat.exe" {
-                    found = true;
-                    break;
+                    pids.push(entry.th32ProcessID);
                 }
                 ok = Process32NextW(snap, &mut entry).is_ok();
             }
             let _ = CloseHandle(snap);
         }
     }
+    let found = if pids.is_empty() {
+        false
+    } else {
+        let p = installed_paths();
+        let hosts = unsafe { tray_hosts(&p) };
+        if !hosts.is_empty() {
+            true
+        } else {
+            // 兼容旧版主窗类名（WeChatMainWndForPC / mmui::MainWindow）或非登录窗
+            struct Ctx<'a> { pids: &'a [u32], has_main: bool, only_login: bool }
+            unsafe extern "system" fn visit(hwnd: HWND, lp: LPARAM) -> windows::Win32::Foundation::BOOL {
+                let ctx = &mut *(lp.0 as *mut Ctx);
+                let pid = window_pid(hwnd);
+                if !ctx.pids.contains(&pid) {
+                    return true.into();
+                }
+                let cls = class_name(hwnd);
+                if cls.contains("WeChatMainWndForPC") || cls.contains("mmui::MainWindow") {
+                    ctx.has_main = true;
+                    return false.into();
+                }
+                let mut buf = [0u16; 64];
+                let n = GetWindowTextW(hwnd, &mut buf);
+                if n > 0 {
+                    let t = String::from_utf16_lossy(&buf[..n as usize]);
+                    if t.contains("登录") {
+                        ctx.only_login = true;
+                    }
+                }
+                true.into()
+            }
+            let mut ctx = Ctx { pids: &pids, has_main: false, only_login: false };
+            unsafe { let _ = EnumWindows(Some(visit), LPARAM(&mut ctx as *mut Ctx as isize)); }
+            ctx.has_main || !ctx.only_login
+        }
+    };
     if let Ok(mut guard) = lock.lock() {
         *guard = Some((Instant::now(), found));
     }

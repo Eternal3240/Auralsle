@@ -109,7 +109,7 @@
   <img src="docs/images/settings-modules.png" width="48.5%" alt="功能模块总开关与实时内存资源监控" />
 </p>
 <p align="center">
-  <img src="docs/images/settings-about.png" width="76%" alt="关于 灵屿 AuraIsle v2.1.0 与开源致谢列表" />
+  <img src="docs/images/settings-about.png" width="76%" alt="关于 灵屿 AuraIsle v2.2.1 与开源致谢列表" />
 </p>
 
 ---
@@ -139,7 +139,7 @@
 - 自 **v2.0.1** 起可执行文件名为 `AuraIsle.exe`，配置与历史数据目录统一存于 `%APPDATA%\Auralsle`。
 - **关于首次运行 Windows SmartScreen 提示**（未经过签名校验的本地/测试构建，Windows 会显示「Windows 已保护你的电脑 · 发布者未知」）：
   - 下载后先在同目录比对 `SHA256SUMS.txt` 校验文件完整性；
-  - 点击弹窗里的 **「更多信息」→「仍要运行」**，或提前在 PowerShell 执行 `Unblock-File .\AuraIsle-Setup-v2.1.0-x64.exe`；
+  - 点击弹窗里的 **「更多信息」→「仍要运行」**，或提前在 PowerShell 执行 `Unblock-File .\AuraIsle-Setup-v2.2.1-x64.exe`；
   - 维护者若拥有受信任 CA 颁发的 Authenticode 证书（`.pfx` 或证书指纹），可执行 `.\scripts\package.ps1 -SignPfxPath <cert.pfx> -SignPfxPassword <pwd>` 自动对主程序与安装包签名。
 
 ---
@@ -206,7 +206,6 @@ cargo build --locked --target x86_64-pc-windows-msvc --release --bin AuraIsle
 - **Voltide** ([sdparklab/Voltide](https://github.com/sdparklab/Voltide)) — 2.4GHz / 蓝牙无线外设电量胶囊样式参考
 - **AiNiee** ([NEKOparapa/AiNiee](https://github.com/NEKOparapa/AiNiee)) — 多服务商 AI 大模型翻译引擎架构参考
 - **Aora Bot** ([sam70361/aora-bot](https://github.com/sam70361/aora-bot)) — 44 态参数化矢量吉祥物表情、21 种画风与角色形态系统
-- **Solar Icons** (480 Design) — CC BY 4.0 设备与系统线性图标集
 - **MiSans Latin** — 内置西文与数字排版主字体
 
 <div align="center">

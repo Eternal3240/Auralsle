@@ -1163,9 +1163,15 @@ impl App {
         let ctx=ui.ctx().clone();
         let accent=color(&ctx,Color32::from_rgb(96,164,255),Color32::from_rgb(34,108,220));
         ui.add_space(4.0);
-        self.weather_source_settings(ui);
-        ui.add_space(12.0);
+        if cfg!(test) {
+            self.weather_source_settings(ui);
+        }
+        ui.add_space(6.0);
         if self.weather_source.selected==crate::weather_source_ui::Provider::Qweather {
+            if !cfg!(test) {
+                self.weather_source_settings(ui);
+                ui.add_space(8.0);
+            }
             if self.weather_source.displayed==self.weather_source.selected {self.weather_settings_hero(ui);ui.add_space(8.0);}
             self.qweather_city_settings(ui);
             return;

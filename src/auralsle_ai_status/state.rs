@@ -418,7 +418,7 @@ fn lock() -> &'static Mutex<State> {
 static LAST_HOTKEY_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 pub fn tick(now: f64) {
-    if !cfg!(test) && !super::config::get().mod_ai_suite_enabled {
+    if !cfg!(test) && !super::config::get().mod_ai_status_enabled {
         if let Ok(mut s) = lock().lock() {
             s.agents.clear();
             s.finished = None;
@@ -797,94 +797,9 @@ fn newest_jsonl_in_dir(root: &std::path::Path, now_u: i64, max_age_secs: i64, ma
 
 #[cfg(windows)]
 fn detect_agent_tool_children() -> Vec<&'static str> {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
-    };
-    let mut procs: Vec<(u32, u32, String)> = Vec::with_capacity(192);
-    unsafe {
-        if let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
-            let mut pe = PROCESSENTRY32W {
-                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-                ..Default::default()
-            };
-            if Process32FirstW(snap, &mut pe).is_ok() {
-                loop {
-                    let z = pe.szExeFile.iter().position(|&c| c == 0).unwrap_or(pe.szExeFile.len());
-                    let exe = String::from_utf16_lossy(&pe.szExeFile[..z]).to_ascii_lowercase();
-                    procs.push((pe.th32ProcessID, pe.th32ParentProcessID, exe));
-                    if Process32NextW(snap, &mut pe).is_err() {
-                        break;
-                    }
-                }
-            }
-            let _ = CloseHandle(snap);
-        }
-    }
-    let parent_map: std::collections::HashMap<u32, (u32, &str)> = procs
-        .iter()
-        .map(|(pid, ppid, exe)| (*pid, (*ppid, exe.as_str())))
-        .collect();
-    let agent_of_proc = |exe: &str| -> Option<&'static str> {
-        if exe.contains("antigravity") || exe.starts_with("language_server") {
-            Some("antigravity")
-        } else if exe.contains("workbuddy") || exe.contains("codebuddy") {
-            Some("workbuddy")
-        } else if exe.contains("doubao") {
-            Some("doubao")
-        } else if exe.contains("claude") {
-            Some("claude")
-        } else if exe.contains("codex") || exe.contains("chatgpt") {
-            Some("codex")
-        } else if exe.contains("cursor") {
-            Some("cursor")
-        } else if exe.contains("windsurf") {
-            Some("windsurf")
-        } else if exe.contains("kiro") {
-            Some("kiro")
-        } else {
-            None
-        }
-    };
-    let mut active = Vec::new();
-    for &(_pid, ppid, ref exe) in &procs {
-        let is_cli_tool = matches!(
-            exe.as_str(),
-            "cmd.exe"
-                | "pwsh.exe"
-                | "powershell.exe"
-                | "git.exe"
-                | "cargo.exe"
-                | "rustc.exe"
-                | "python.exe"
-                | "rg.exe"
-                | "npm.exe"
-                | "pnpm.exe"
-                | "uv.exe"
-                | "cmake.exe"
-                | "ninja.exe"
-        );
-        if !is_cli_tool {
-            continue;
-        }
-        let mut cur_ppid = ppid;
-        for _ in 0..4 {
-            let Some(&(next_ppid, p_exe)) = parent_map.get(&cur_ppid) else {
-                break;
-            };
-            if let Some(ag_key) = agent_of_proc(p_exe) {
-                if !active.contains(&ag_key) {
-                    active.push(ag_key);
-                }
-                break;
-            }
-            if next_ppid == 0 || next_ppid == cur_ppid {
-                break;
-            }
-            cur_ppid = next_ppid;
-        }
-    }
-    active
+    // IDE/Electron 客户端在空闲打开时本身就会常驻语言服务、Git 状态轮询或终端子进程，
+    // 不能把后台子进程等同于 AI 正在工作；工作态统一由显式 Hook 或活跃会话流判定。
+    Vec::new()
 }
 
 /// 零配置原生探测 Claude Code (`~/.claude/projects/**/*.jsonl`) 与 Codex CLI (`~/.codex/sessions/**/*.jsonl`) 的实时会话状态。
@@ -958,20 +873,20 @@ fn scan_live_agent_files(now_u: i64) -> Vec<(String, String, Phase, String)> {
                             last_msg = summary;
                             break;
                         } else if stop_reason == "end_turn" {
-                            if age <= 45 {
+                            if age <= 35 {
                                 last_phase = Some(Phase::Done);
                                 let short: String = found_text.lines().next().unwrap_or("任务已完成").chars().take(42).collect();
                                 last_msg = if short.is_empty() { "Claude Code 已完成回复".to_owned() } else { short };
                             }
                             break;
-                        } else if age <= 120 {
+                        } else if age <= 25 {
                             last_phase = Some(Phase::Working);
                             let short: String = found_text.lines().next().unwrap_or("正在生成代码与回复…").chars().take(42).collect();
                             last_msg = if short.is_empty() { "Claude Code 正在思考与编码…".to_owned() } else { short };
                             break;
                         }
                     }
-                } else if row_type == "user" && age <= 120 {
+                } else if row_type == "user" && age <= 25 {
                     last_phase = Some(Phase::Working);
                     last_msg = "Claude Code 正在思考与分析任务…".to_owned();
                     break;
@@ -1004,17 +919,17 @@ fn scan_live_agent_files(now_u: i64) -> Vec<(String, String, Phase, String)> {
                     .or_else(|| v.get("type").and_then(Value::as_str))
                     .unwrap_or("");
                 if matches!(ev_type, "task_complete" | "turn_complete" | "agent_turn_complete") {
-                    if age <= 45 {
+                    if age <= 35 {
                         last_phase = Some(Phase::Done);
                         last_msg = "Codex 已完成当前编码任务".to_owned();
                     }
                     break;
-                } else if matches!(ev_type, "function_call" | "custom_tool_call" | "exec_command" | "apply_patch") && age <= 120 {
+                } else if matches!(ev_type, "function_call" | "custom_tool_call" | "exec_command" | "apply_patch") && age <= 35 {
                     let t_name = v.pointer("/payload/name").and_then(Value::as_str).unwrap_or("命令/工具");
-                    last_phase = Some(if age >= 5 { Phase::Waiting } else { Phase::Tool });
+                    last_phase = Some(if age >= 8 { Phase::Waiting } else { Phase::Tool });
                     last_msg = format!("Codex 正在执行: {t_name}");
                     break;
-                } else if age <= 90 {
+                } else if matches!(ev_type, "agent_reasoning" | "task_started" | "turn_started") && age <= 20 {
                     last_phase = Some(Phase::Working);
                     last_msg = "Codex 正在推理与编写代码…".to_owned();
                     break;
@@ -1026,135 +941,21 @@ fn scan_live_agent_files(now_u: i64) -> Vec<(String, String, Phase, String)> {
         }
     }
 
-    // 3. Gemini Antigravity 本地会话与任务产物探测 (`~/.gemini/antigravity/conversations|brain`)
-    let ag_root = home.join(".gemini").join("antigravity");
-    let ag_conv = newest_file_in_dir(&ag_root.join("conversations"), now_u, 45, 2, &["pb"], &[]);
-    let ag_brain = newest_file_in_dir(
-        &ag_root.join("brain"),
-        now_u,
-        45,
-        5,
-        &["md", "jsonl"],
-        &["media_", ".user_uploaded"],
-    );
-    let ag_mtime = [ag_conv.as_ref().map(|x| x.1), ag_brain.as_ref().map(|x| x.1)]
-        .into_iter()
-        .flatten()
-        .max();
-    if let Some(mtime) = ag_mtime {
-        let age = (now_u - mtime).max(0);
-        let (ph, msg) = if age <= 12 {
-            (Phase::Working, "Gemini Antigravity 正在分析与执行任务…".to_owned())
-        } else {
-            (Phase::Done, "Gemini Antigravity 本轮对话/任务已完成".to_owned())
-        };
-        out.push(("antigravity".to_owned(), "Gemini Antigravity".to_owned(), ph, msg));
-    }
-
-    // 4. WorkBuddy / CodeBuddy 本地会话与日志探测 (`~/.workbuddy` / `~/.codebuddy`)
-    for wb_dir in [home.join(".workbuddy"), home.join(".codebuddy")] {
-        if let Some((_, mtime)) = newest_file_in_dir(
-            &wb_dir,
-            now_u,
-            45,
-            3,
-            &["jsonl", "log"],
-            &["settings", "mcp", "lock"],
-        ) {
-            let age = (now_u - mtime).max(0);
-            let (ph, msg) = if age <= 12 {
-                (Phase::Working, "WorkBuddy 正在生成与执行开发任务…".to_owned())
-            } else {
-                (Phase::Done, "WorkBuddy 本轮任务已完成".to_owned())
-            };
-            out.push(("workbuddy".to_owned(), "WorkBuddy".to_owned(), ph, msg));
-            break;
-        }
-    }
+    // 3/4. Gemini Antigravity 与 WorkBuddy 仅凭启动/浏览触发的 .pb/.log mtime 极易在刚打开软件时误报「工作中」，
+    // 故不再基于目录文件修改时间盲猜 Working；请通过生命周期 Hook (*.json) 上报真实状态。
 
     out
 }
 
 #[cfg(windows)]
 fn cached_running_desktop_agents() -> Vec<(String, String, Phase, String)> {
-    if !super::config::get().mod_ai_suite_enabled {
+    if !super::config::get().mod_ai_status_enabled {
         if let Some(mtx) = DESKTOP_AGENTS_CACHE.get() {
             if let Ok(mut g) = mtx.lock() {
                 g.0.clear();
             }
         }
         return Vec::new();
-    }
-    // 实时追踪前台 AI Agent 窗口的键盘/粘贴/回车交互（支持全部 12 款 AI 工具，含中文输入法 VK_PROCESSKEY 与 Ctrl+V 粘贴）
-    unsafe {
-        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
-        let fg = GetForegroundWindow();
-        if !fg.0.is_null() {
-            let mut buf = [0u16; 256];
-            let len = GetWindowTextW(fg, &mut buf);
-            if len > 0 {
-                let title = String::from_utf16_lossy(&buf[..len as usize]);
-                let low = title.to_ascii_lowercase();
-                let proc_low = window_process_name_low(fg);
-                if let Some((ag_key, _ag_name)) = classify_ai_agent_window(&title, &low, &proc_low) {
-                    let now_u = unix_now();
-                    let down = |vk: i32| (GetAsyncKeyState(vk) as u16 & 0x8000) != 0;
-                    let shift_down = down(0x10);
-                    let ctrl_down = down(0x11);
-                    let enter_down = down(0x0D);
-                    let lbutton_down = down(0x01);
-                    let mut click_in_send_zone = false;
-                    if lbutton_down {
-                        use windows::Win32::Foundation::{POINT, RECT};
-                        use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
-                        let mut pt = POINT::default();
-                        let mut wr = RECT::default();
-                        if GetCursorPos(&mut pt).is_ok() && GetWindowRect(fg, &mut wr).is_ok() {
-                            let h = (wr.bottom - wr.top).max(1);
-                            if pt.x >= wr.left && pt.x <= wr.right && pt.y >= wr.top + h * 52 / 100 && pt.y <= wr.bottom {
-                                click_in_send_zone = true;
-                            }
-                        }
-                    }
-                    // 支持空格(0x20)、退格(0x08)、中文输入法选词(VK_PROCESSKEY=0xE5)、字母数字(0x30..=0x5A)、小键盘(0x60..=0x69)、标点(0xBA..=0xDF)及 Ctrl+V 粘贴
-                    let mut any_typing = down(0x20) || down(0x08) || down(0xE5) || (ctrl_down && down(0x56));
-                    if !any_typing {
-                        for vk in (0x30..=0x5A).chain(0x60..=0x69).chain(0xBA..=0xC0) {
-                            if down(vk) {
-                                any_typing = true;
-                                break;
-                            }
-                        }
-                    }
-                    if let Ok(mut tr_map) = DESKTOP_TRACKER.get_or_init(|| Mutex::new(DesktopAgentTracker::default())).lock() {
-                        let prev_enter = tr_map.prev_enter_down;
-                        let prev_lb = tr_map.prev_lbutton_down;
-                        tr_map.prev_enter_down = enter_down;
-                        tr_map.prev_lbutton_down = lbutton_down;
-                        let entry = tr_map.entries.entry(ag_key.to_owned()).or_default();
-                        if entry.last_fg_unix > 0 && (now_u - entry.last_fg_unix) > 12 {
-                            entry.typed_chars = 0;
-                        }
-                        entry.last_fg_unix = now_u;
-                        if any_typing {
-                            entry.typed_chars = entry.typed_chars.saturating_add(1);
-                            if now_u > entry.working_until {
-                                entry.done_until = 0;
-                            }
-                        }
-                        // 按下回车（非 Shift+Enter 换行，或 Ctrl+Enter 发送）或先键入内容后点击发送按钮区域，进入工作生成态（避免空闲鼠标点击误判）
-                        let enter_send = enter_down && !prev_enter && (!shift_down || ctrl_down) && entry.typed_chars >= 1;
-                        let click_send = lbutton_down && !prev_lb && click_in_send_zone && entry.typed_chars >= 1;
-                        if enter_send || click_send {
-                            entry.typed_chars = 0;
-                            entry.working_until = now_u + 18;
-                            entry.done_until = now_u + 26;
-                        }
-                    }
-                }
-            }
-        }
     }
 
     static SCAN_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1248,82 +1049,34 @@ fn detect_running_desktop_agents() -> Vec<(String, String, Phase, String)> {
                 return BOOL(1);
             };
 
-            let is_fg = ctx.fg == hwnd;
-            let waiting = title.contains("确认")
-                || title.contains("允许")
-                || title.contains("权限")
-                || title.contains("审批")
-                || low.contains("approve")
-                || low.contains("confirm")
-                || low.contains("permission")
-                || low.contains("allow?");
-            let busy_kw = title.contains("思考")
-                || title.contains("生成")
-                || title.contains("正在")
-                || title.contains("回复中")
-                || title.contains("处理中")
-                || title.contains("停止生成")
-                || title.contains("执行")
-                || title.contains("推理")
-                || title.contains("搜索")
-                || low.contains("thinking")
-                || low.contains("reasoning")
-                || low.contains("generating")
-                || low.contains("streaming")
-                || low.contains("stop generating")
-                || low.contains("working")
-                || low.contains("running")
-                || low.contains("loading")
-                || title.contains('●')
-                || title.contains('⏳')
-                || title.contains('◐')
-                || title.contains('◓')
-                || title.contains('◑')
-                || title.contains('◒');
-            let has_tool_child = ctx.tool_active_keys.contains(&ag_key);
+            let is_ide = matches!(
+                ag_key,
+                "antigravity" | "cursor" | "windsurf" | "kiro" | "workbuddy" | "zcode"
+            );
+            // IDE 窗口标题常包含正在编辑的文件名（如 loading.rs、confirm.ts、● 未保存），绝不凭窗口标题猜测工作/审批态
+            let waiting = !is_ide
+                && (title.contains("请求确认")
+                    || title.contains("需要批准")
+                    || title.contains("请求权限")
+                    || low.contains("approve?")
+                    || low.contains("allow?"));
+            let busy_kw = !is_ide
+                && (title.contains("正在回复")
+                    || title.contains("回复中")
+                    || title.contains("正在生成")
+                    || title.contains("停止生成")
+                    || low.contains("stop generating")
+                    || low.contains("generating response"));
+            let has_tool_child = false;
 
-            let mut tracker = DESKTOP_TRACKER
-                .get_or_init(|| Mutex::new(DesktopAgentTracker::default()))
-                .lock()
-                .ok();
-            let (phase_opt, status_msg) = if let Some(ref mut tr_map) = tracker {
-                let entry = tr_map.entries.entry(ag_key.to_owned()).or_default();
-                let meaningful_title_changed = is_fg
-                    && !entry.last_title.is_empty()
-                    && entry.last_title != title
-                    && title.chars().count() >= 4;
-                if title.chars().count() >= 2 {
-                    entry.last_title = title.clone();
-                }
-                if meaningful_title_changed && !waiting && (busy_kw || has_tool_child || ctx.now_u <= entry.working_until) {
-                    entry.working_until = entry.working_until.max(ctx.now_u + 10);
-                    entry.done_until = entry.done_until.max(ctx.now_u + 18);
-                }
-                if has_tool_child {
-                    entry.working_until = entry.working_until.max(ctx.now_u + 6);
-                    entry.done_until = entry.done_until.max(ctx.now_u + 14);
-                }
-                if is_fg {
-                    entry.last_fg_unix = ctx.now_u;
-                }
-                if waiting {
-                    (Some(Phase::Waiting), format!("等待你确认或批准操作 · {title}"))
-                } else if has_tool_child {
-                    (Some(Phase::Working), format!("{ag_name} 正在执行工具/命令 · {title}"))
-                } else if busy_kw || ctx.now_u <= entry.working_until {
-                    (Some(Phase::Working), format!("{ag_name} 正在思考与生成回复 · {title}"))
-                } else if entry.done_until > 0 && ctx.now_u <= entry.done_until {
-                    (Some(Phase::Done), format!("{ag_name} 已完成回复 · {title}"))
-                } else {
-                    (None, String::new())
-                }
-            } else if waiting {
+            let (phase_opt, status_msg) = if waiting {
                 (Some(Phase::Waiting), format!("等待你确认或批准操作 · {title}"))
-            } else if has_tool_child || busy_kw {
+            } else if busy_kw {
                 (Some(Phase::Working), format!("{ag_name} 正在思考与生成回复 · {title}"))
             } else {
                 (None, String::new())
             };
+            let _ = (ctx.fg, has_tool_child);
 
             if let Some(ph) = phase_opt {
                 if let Some(pos) = ctx.found.iter().position(|x| x.0 == ag_key) {
@@ -1628,7 +1381,7 @@ pub fn install_or_repair_agent_hooks() -> String {
 }
 
 pub fn snapshot() -> (Vec<Agent>, Option<Finished>) {
-    if !cfg!(test) && !super::config::get().mod_ai_suite_enabled {
+    if !cfg!(test) && !super::config::get().mod_ai_status_enabled {
         return (Vec::new(), None);
     }
     let (mut agents, finished) = lock()

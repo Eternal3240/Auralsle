@@ -270,23 +270,24 @@ impl App {
         let today=NaiveDate::parse_from_str(&env.today,"%Y-%m-%d").unwrap_or_else(|_|chrono::Local::now().date_naive());
         let now=calendar_now(env);
         let show_title = cfg!(test) || crate::auralsle_ai_status::config::get().show_island_page_title;
+        let btn_y = if cfg!(test) { 9.0 } else { 15.0 };
         if cfg!(test) {
-            c.fill(37.0,9.0,54.0,18.0,8.0,Color32::from_rgb(30,30,33));
+            c.fill(37.0,btn_y,54.0,18.0,8.0,Color32::from_rgb(30,30,33));
             source_icon(c,Source::Calendar(None),43.0,13.0,10.0);
             c.centered_text(69.0,18.0,"日程",10.0,W::Semibold,theme::WHITE,H::Center);
-            if c.hit(37.0,9.0,54.0,18.0,"calendar-today").on_hover_text("回到今天").clicked(){self.select_calendar_day(today);}
+            if c.hit(37.0,btn_y,54.0,18.0,"calendar-today").on_hover_text("回到今天").clicked(){self.select_calendar_day(today);}
         } else {
-            let (today_r, today_b) = paint::capsule(c, 40.0, 9.0, 56.0, 18.0, "calendar-today", Color32::from_white_alpha(14), theme::BTN_HOVER);
-            today_b.centered_text(68.0, 18.0, "回到今天", 8.8, W::Semibold, accent, H::Center);
+            let (today_r, today_b) = paint::capsule(c, 40.0, btn_y, 56.0, 18.0, "calendar-today", Color32::from_white_alpha(14), theme::BTN_HOVER);
+            today_b.centered_text(68.0, btn_y + 9.0, "回到今天", 8.8, W::Semibold, accent, H::Center);
             if today_r.on_hover_text("点击回到今天").clicked() {
                 self.select_calendar_day(today);
             }
         }
         let add_x = if cfg!(test) { 101.0 } else { 102.0 };
-        let (add,b)=paint::capsule(c,add_x,9.0,46.0,18.0,"calendar-add-local",theme::BTN,theme::BTN_HOVER);
-        b.centered_text(add_x + 23.0,18.0,"＋ 新增",9.0,W::Semibold,theme::WHITE,H::Center);
+        let (add,b)=paint::capsule(c,add_x,btn_y,46.0,18.0,"calendar-add-local",theme::BTN,theme::BTN_HOVER);
+        b.centered_text(add_x + 23.0,btn_y + 9.0,"＋ 新增",9.0,W::Semibold,theme::WHITE,H::Center);
         if add.clicked(){self.open_calendar_editor(None);return;}
-        let c_shifted = c.shifted(0.0, if cfg!(test) { 0.0 } else { 10.0 });
+        let c_shifted = c.shifted(0.0, if cfg!(test) { 0.0 } else { 15.0 });
         let c = &c_shifted;
         c.seg((155.0,36.0),(155.0,208.0),0.6,Color32::from_gray(38));
         let day=self.calendar.view.day;

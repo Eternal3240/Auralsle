@@ -456,14 +456,17 @@ impl App {
     pub(crate) fn draw_quota_bar(&mut self,c:&Card,cx:f32,layout:&crate::bar_layout::Layout){
         let indices=self.quota_bar_indices();let mut chosen=None;
         for (position,i)in indices.iter().enumerate(){
-            let alpha=layout.pet_clearance(crate::bar_layout::quota_slot(position));
+            let slot=crate::bar_layout::quota_slot(position);
+            let Some(slot_x)=layout.x.get(slot).copied().flatten() else {continue;};
+            let slot_w=layout.widths.get(slot).copied().unwrap_or(27.0);
+            let alpha=layout.pet_clearance(slot);
             let faded=c.faded(alpha);let faded=if alpha<0.8{faded.ghost()}else{faded};let c=&faded;
-            let a=&self.quota.config.accounts[*i];let x=cx+layout.x[crate::bar_layout::quota_slot(position)].unwrap();
+            let a=&self.quota.config.accounts[*i];let x=cx+slot_x;
             let snapshot=self.quota.rows.get(&a.id).and_then(|r|r.as_ref().ok());
             if a.provider.balance(){
                 // [ai-status-mod] 图标与「AI 工作」统一为 ICON 大小，间距统一为 GAP：
                 // 内容从槽位左缘起排（左缘由布局留位算出，所以两端间距都是 GAP）。
-                let wide=true;let extra=if wide{layout.widths[crate::bar_layout::quota_slot(position)]-27.0}else{0.0};
+                let wide=true;let extra=if wide{slot_w-27.0}else{0.0};
                 let left=x-(27.0+extra)/2.0;let icon_x=left+crate::auralsle_ai_status::ICON/2.0;
                 let icon_side=crate::auralsle_ai_status::ICON;let icon_cy=crate::auralsle_ai_status::ICON_CY;
                 let text_x=left+crate::auralsle_ai_status::ICON+crate::auralsle_ai_status::ICON_TEXT_GAP;
@@ -490,7 +493,7 @@ impl App {
                 if c.hit(left,1.0,27.0+extra,28.0,("quota-pin",&a.id)).clicked(){chosen=Some(a.id.clone());}continue;
             }
             // 有具体点数的额度（如 Kiro）在环右侧跟一段剩余点数，与余额类的排布一致。
-            let extra=(layout.widths[crate::bar_layout::quota_slot(position)]-27.0).max(0.0);
+            let extra=(slot_w-27.0).max(0.0);
             let x=if extra>0.0{x-extra/2.0}else{x};
             ring(c,a,snapshot,x,15.0,27.0,accent_colors(&self.quota.config,a));
             if extra>0.0{let stale=self.quota.stale.contains_key(&a.id);if let Some(text)=self.quota.tail_text(&a.id){c.text(x+15.5,21.0,&text,theme::size::PILL_CLOCK,W::Bold,if stale{theme::GRAY}else{theme::WHITE},H::Left);}}

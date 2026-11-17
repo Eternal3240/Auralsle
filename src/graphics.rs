@@ -12,9 +12,13 @@ pub struct GpuHardwareInfo {
     pub active_backend: String,
     /// 检测到的物理处理器名称（如 `Intel(R) Core(TM) Ultra 5 335`）。
     pub cpu_name: String,
-    /// 检测到的物理显卡名称（如 `Intel(R) Arc(TM) B370 GPU`）。
+    /// 检测到的物理显卡名称（如 `NVIDIA GeForce RTX 4050 Laptop GPU` / `Intel(R) Arc(TM) B370 GPU`）。
     pub adapter_name: String,
-    /// 显卡类型（`"Intel Arc Xe2 硬件加速 GPU"` / `"独立显卡"` / `"核芯显卡"`）。
+    /// 主显卡专用显存容量（字节，DXGI 实时探测；核显通常较小，独显 >= 2GB）。
+    pub adapter_vram_bytes: u64,
+    /// 当前主显卡是否为独立显卡（DXGI 专用显存 / 厂商判定）。
+    pub adapter_is_discrete: bool,
+    /// 显卡类型（`"独立显卡"` / `"Intel Arc 硬件加速 GPU"` / `"核芯显卡"`）。
     pub adapter_kind: String,
     /// 本机 Vulkan 硬件驱动状态与 API 版本。
     pub vulkan_status: String,
@@ -30,9 +34,11 @@ impl Default for GpuHardwareInfo {
     fn default() -> Self {
         Self {
             active_backend: "OpenGL 硬件加速 (WGL / GPU Hardware)".to_owned(),
-            cpu_name: "Intel(R) Core(TM) Ultra 5 335".to_owned(),
-            adapter_name: "Intel(R) Arc(TM) B370 GPU".to_owned(),
-            adapter_kind: "Intel Arc Xe2 架构显卡 (硬件加速直通)".to_owned(),
+            cpu_name: "未知处理器".to_owned(),
+            adapter_name: "硬件加速显卡".to_owned(),
+            adapter_vram_bytes: 0,
+            adapter_is_discrete: false,
+            adapter_kind: "硬件加速显卡 (Hardware GPU)".to_owned(),
             vulkan_status: "Vulkan 1.3 Hardware Pipeline Ready".to_owned(),
             opengl_status: "OpenGL 4.6 WGL Hardware Context Ready".to_owned(),
             vulkan_supported: true,
@@ -386,6 +392,71 @@ pub fn run(
 }
 
 #[cfg(windows)]
+unsafe fn probe_dxgi_adapters() -> Vec<(u32, u64, String)> {
+    use core::ffi::c_void;
+    use windows::core::{GUID, PCSTR};
+    use windows::Win32::Foundation::FreeLibrary;
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+
+    #[repr(C)]
+    struct DxgiAdapterDesc1 {
+        description: [u16; 128],
+        vendor_id: u32,
+        device_id: u32,
+        sub_sys_id: u32,
+        revision: u32,
+        dedicated_video_memory: usize,
+        dedicated_system_memory: usize,
+        shared_system_memory: usize,
+        adapter_luid: [u32; 2],
+        flags: u32,
+    }
+
+    let Ok(dxgi_lib) = LoadLibraryA(PCSTR(b"dxgi.dll\x00".as_ptr())) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(proc_fn) = GetProcAddress(dxgi_lib, PCSTR(b"CreateDXGIFactory1\x00".as_ptr())) {
+        type FnCreateFactory1 = unsafe extern "system" fn(*const GUID, *mut *mut c_void) -> i32;
+        let create_factory1: FnCreateFactory1 = core::mem::transmute(proc_fn);
+        let iid_factory1 = GUID::from_u128(0x770aae78_f26f_4dba_a829_253c83d1b387);
+        let mut factory: *mut c_void = core::ptr::null_mut();
+        if create_factory1(&iid_factory1, &mut factory) >= 0 && !factory.is_null() {
+            let vtbl = *(factory as *const *const *const c_void);
+            type FnEnumAdapters1 = unsafe extern "system" fn(*mut c_void, u32, *mut *mut c_void) -> i32;
+            type FnRelease = unsafe extern "system" fn(*mut c_void) -> u32;
+            let enum_adapters1: FnEnumAdapters1 = core::mem::transmute(*vtbl.add(12));
+            let release_factory: FnRelease = core::mem::transmute(*vtbl.add(2));
+            for i in 0..8u32 {
+                let mut adapter: *mut c_void = core::ptr::null_mut();
+                if enum_adapters1(factory, i, &mut adapter) < 0 || adapter.is_null() {
+                    break;
+                }
+                let avtbl = *(adapter as *const *const *const c_void);
+                type FnGetDesc1 = unsafe extern "system" fn(*mut c_void, *mut DxgiAdapterDesc1) -> i32;
+                let get_desc1: FnGetDesc1 = core::mem::transmute(*avtbl.add(10));
+                let release_adapter: FnRelease = core::mem::transmute(*avtbl.add(2));
+                let mut desc: DxgiAdapterDesc1 = core::mem::zeroed();
+                if get_desc1(adapter, &mut desc) >= 0 {
+                    // 跳过软件光栅化适配器 (DXGI_ADAPTER_FLAG_SOFTWARE = 2) 与 Microsoft Basic Render Driver (0x1414)
+                    if (desc.flags & 2) == 0 && desc.vendor_id != 0x1414 {
+                        let len = desc.description.iter().position(|&c| c == 0).unwrap_or(desc.description.len());
+                        let name = String::from_utf16_lossy(&desc.description[..len]).trim().to_owned();
+                        if !name.is_empty() {
+                            out.push((desc.vendor_id, desc.dedicated_video_memory as u64, name));
+                        }
+                    }
+                }
+                release_adapter(adapter);
+            }
+            release_factory(factory);
+        }
+    }
+    let _ = FreeLibrary(dxgi_lib);
+    out
+}
+
+#[cfg(windows)]
 fn probe_gpu_hardware_info_uncached(cfg_mode: u8) -> GpuHardwareInfo {
     use windows::core::{PCSTR, PCWSTR};
     use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
@@ -398,8 +469,7 @@ fn probe_gpu_hardware_info_uncached(cfg_mode: u8) -> GpuHardwareInfo {
         _ => "自动选择 (Auto · OpenGL/Vulkan 双栈硬件 GPU 加速)".to_owned(),
     };
 
-    // 1. 零内存开销读取显卡型号：优先从当前已加载的 opengl32.dll 读取 GL_RENDERER，
-    // 绝不调用 vkCreateInstance（避免将 200MB+ 的 NVIDIA/AMD Vulkan ICD 驱动堆映射进进程工作集）
+    let mut gl_renderer: Option<String> = None;
     unsafe {
         if let Ok(gl_lib) = GetModuleHandleA(PCSTR(b"opengl32.dll\x00".as_ptr())) {
             info.opengl_supported = true;
@@ -427,7 +497,8 @@ fn probe_gpu_hardware_info_uncached(cfg_mode: u8) -> GpuHardwareInfo {
                     } else {
                         "Hardware WGL".to_owned()
                     };
-                    if !r_name.is_empty() {
+                    if !r_name.is_empty() && !r_name.eq_ignore_ascii_case("GDI Generic") {
+                        gl_renderer = Some(r_name.clone());
                         info.adapter_name = r_name.clone();
                         info.opengl_status = format!("已就绪 · OpenGL {} ({})", v_name, r_name);
                     }
@@ -435,7 +506,7 @@ fn probe_gpu_hardware_info_uncached(cfg_mode: u8) -> GpuHardwareInfo {
             }
         }
 
-        // 2. 读取本机 CPU 处理器真实型号（如 Intel(R) Core(TM) Ultra 5 335）
+        // 2. 读取当前主机 CPU 处理器真实型号
         {
             let cpu_sub: Vec<u16> = r"HARDWARE\Description\System\CentralProcessor\0"
                 .encode_utf16()
@@ -463,66 +534,110 @@ fn probe_gpu_hardware_info_uncached(cfg_mode: u8) -> GpuHardwareInfo {
             }
         }
 
-        // 3. 从注册表遍历 0000..0006 显示适配器，优先选择 Intel Arc / 真实物理硬件 GPU（过滤虚拟显示器与残留驱动项）
-        let mut best_desc: Option<(i32, String)> = None;
-        for sub in [
-            r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000",
-            r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0001",
-            r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0002",
-            r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0003",
-            r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0004",
-        ] {
-            let sub_w: Vec<u16> = sub.encode_utf16().chain(Some(0)).collect();
-            let val_w: Vec<u16> = "DriverDesc".encode_utf16().chain(Some(0)).collect();
-            let mut buf = [0u16; 256];
-            let mut sz = (buf.len() * 2) as u32;
-            if RegGetValueW(
-                HKEY_LOCAL_MACHINE,
-                PCWSTR(sub_w.as_ptr()),
-                PCWSTR(val_w.as_ptr()),
-                RRF_RT_REG_SZ,
-                None,
-                Some(buf.as_mut_ptr().cast()),
-                Some(&mut sz),
-            )
-            .is_ok()
-            {
-                let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-                let desc = String::from_utf16_lossy(&buf[..len]).trim().to_owned();
-                if desc.is_empty() {
-                    continue;
-                }
-                let low = desc.to_ascii_lowercase();
-                if low.contains("virtual") || low.contains("basic") || low.contains("indirect") || low.contains("oray") || low.contains("parsec") {
-                    continue;
-                }
-                let score = if low.contains("arc") || low.contains("b370") {
-                    100
-                } else if low.contains("intel") || low.contains("nvidia") || low.contains("geforce") {
-                    85
-                } else {
-                    40
-                };
-                if best_desc.as_ref().map_or(true, |(s, _)| score > *s) {
-                    best_desc = Some((score, desc));
-                }
+        // 3. 实时枚举 DXGI 物理显示适配器：准确识别当前电脑独立显卡（如 RTX 4050）与显存容量，绝不使用过时静态默认值。
+        let dxgi_adapters = probe_dxgi_adapters();
+        let mut best_dxgi: Option<(i32, bool, u64, String)> = None;
+        for (vendor_id, dedicated_vram, name) in dxgi_adapters {
+            let low = name.to_ascii_lowercase();
+            if low.contains("virtual") || low.contains("basic") || low.contains("indirect") || low.contains("oray") || low.contains("parsec") {
+                continue;
+            }
+            let is_discrete = dedicated_vram >= 512 * 1024 * 1024
+                && (vendor_id == 0x10DE
+                    || vendor_id == 0x1002
+                    || low.contains("rtx")
+                    || low.contains("gtx")
+                    || low.contains("geforce")
+                    || low.contains("radeon rx")
+                    || (low.contains("arc") && !low.contains("graphics")));
+            let vram_bonus = ((dedicated_vram >> 28).min(64)) as i32;
+            let base = if is_discrete {
+                if vendor_id == 0x10DE || vendor_id == 0x1002 { 400 } else { 360 }
+            } else if low.contains("arc") {
+                220
+            } else {
+                150
+            };
+            let score = base + vram_bonus;
+            if best_dxgi.as_ref().map_or(true, |(s, ..)| score > *s) {
+                best_dxgi = Some((score, is_discrete, dedicated_vram, name));
             }
         }
-        if let Some((_, desc)) = best_desc {
-            // 若 GL_RENDERER 未返回有效型号或返回了非 Intel Arc 名称，则优先使用匹配的物理适配器名称
-            if !info.adapter_name.to_ascii_lowercase().contains("arc") {
-                info.adapter_name = desc;
+
+        if let Some((_, is_discrete, vram_bytes, name)) = best_dxgi {
+            info.adapter_name = name;
+            info.adapter_vram_bytes = vram_bytes;
+            info.adapter_is_discrete = is_discrete;
+        } else {
+            // 若 DXGI 不可用，则退回注册表读取当前物理显示驱动（独显优先，不再硬编码偏袒 B370）
+            let mut best_desc: Option<(i32, bool, String)> = None;
+            for sub in [
+                r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000",
+                r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0001",
+                r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0002",
+                r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0003",
+                r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0004",
+            ] {
+                let sub_w: Vec<u16> = sub.encode_utf16().chain(Some(0)).collect();
+                let val_w: Vec<u16> = "DriverDesc".encode_utf16().chain(Some(0)).collect();
+                let mut buf = [0u16; 256];
+                let mut sz = (buf.len() * 2) as u32;
+                if RegGetValueW(
+                    HKEY_LOCAL_MACHINE,
+                    PCWSTR(sub_w.as_ptr()),
+                    PCWSTR(val_w.as_ptr()),
+                    RRF_RT_REG_SZ,
+                    None,
+                    Some(buf.as_mut_ptr().cast()),
+                    Some(&mut sz),
+                )
+                .is_ok()
+                {
+                    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                    let desc = String::from_utf16_lossy(&buf[..len]).trim().to_owned();
+                    if desc.is_empty() {
+                        continue;
+                    }
+                    let low = desc.to_ascii_lowercase();
+                    if low.contains("virtual") || low.contains("basic") || low.contains("indirect") || low.contains("oray") || low.contains("parsec") {
+                        continue;
+                    }
+                    let is_disc = low.contains("rtx") || low.contains("gtx") || low.contains("geforce") || low.contains("radeon rx");
+                    let score = if is_disc {
+                        120
+                    } else if low.contains("arc") {
+                        95
+                    } else if low.contains("intel") || low.contains("amd") || low.contains("radeon") {
+                        80
+                    } else {
+                        40
+                    };
+                    if best_desc.as_ref().map_or(true, |(s, ..)| score > *s) {
+                        best_desc = Some((score, is_disc, desc));
+                    }
+                }
+            }
+            if let Some((_, is_disc, desc)) = best_desc {
+                if gl_renderer.is_none() || info.adapter_name == "硬件加速显卡" {
+                    info.adapter_name = desc;
+                }
+                info.adapter_is_discrete = is_disc;
             }
         }
     }
 
     let low_name = info.adapter_name.to_ascii_lowercase();
-    info.adapter_kind = if low_name.contains("arc") {
-        "Intel Arc Xe2 架构显卡 (Intel(R) Arc(TM) GPU · 硬件直通加速)".to_owned()
-    } else if low_name.contains("rtx") || low_name.contains("gtx") {
+    if !info.adapter_is_discrete
+        && (low_name.contains("rtx") || low_name.contains("gtx") || low_name.contains("geforce") || low_name.contains("radeon rx"))
+    {
+        info.adapter_is_discrete = true;
+    }
+    info.adapter_kind = if info.adapter_is_discrete {
         "独立显卡 (Discrete GPU · 硬件直通)".to_owned()
-    } else if low_name.contains("iris") || low_name.contains("uhd") || low_name.contains("intel") {
-        "Intel 锐炬/核芯显卡 (Integrated GPU · 硬件加速)".to_owned()
+    } else if low_name.contains("arc") {
+        "Intel Arc 架构显卡 (硬件加速)".to_owned()
+    } else if low_name.contains("iris") || low_name.contains("uhd") || low_name.contains("intel") || low_name.contains("radeon") {
+        "核芯显卡 (Integrated GPU · 硬件加速)".to_owned()
     } else {
         "硬件加速显卡 (Hardware GPU)".to_owned()
     };

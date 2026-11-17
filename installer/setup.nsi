@@ -39,6 +39,8 @@ Var DesktopCheckbox
 Var AutoStartCheckbox
 Var DesktopChoice
 Var AutoStartChoice
+Var RunningNoticeLabel
+Var CloseRunningBtn
 Page custom InstallPage InstallPageLeave
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_TITLE "灵屿 AuraIsle 已安装"
@@ -104,35 +106,69 @@ Function InstallPage
   Pop $0
   InitPluginsDir
   File /oname=$PLUGINSDIR\brand.ico "${PROJECT_DIR}\assets\auralsle.ico"
-  ${NSD_CreateIcon} 0 6u 44u 44u ""
+  ${NSD_CreateIcon} 0 4u 42u 42u ""
   Pop $0
   System::Call 'user32::LoadImageW(p 0, w "$PLUGINSDIR\brand.ico", i 1, i 64, i 64, i 0x10) p .r1'
   StrCpy $BrandIcon $1
   SendMessage $0 0x170 $1 0
-  ${NSD_CreateLabel} 58u 8u 240u 22u "灵屿 AuraIsle"
+  ${NSD_CreateLabel} 56u 6u 240u 22u "灵屿 AuraIsle"
   Pop $0
   CreateFont $1 "Microsoft YaHei UI" 18 700
   SendMessage $0 ${WM_SETFONT} $1 0
-  ${NSD_CreateLabel} 58u 30u 240u 14u "v${APP_VERSION} · 升级保留全部设置和历史数据"
+  ${NSD_CreateLabel} 56u 28u 240u 14u "v${APP_VERSION} · 升级保留全部设置和历史数据"
   Pop $0
-  ${NSD_CreateLabel} 0 58u 300u 16u "音乐歌词 · 硬件监控 · 剪贴板 · AI 状态 · 日程与天气"
+  ${NSD_CreateLabel} 0 54u 300u 14u "音乐歌词 · 硬件监控 · 剪贴板 · AI 状态 · 日程与天气"
   Pop $0
-  ${NSD_CreateLabel} 0 80u 300u 12u "安装位置"
+  ${NSD_CreateLabel} 0 72u 300u 12u "安装位置"
   Pop $0
-  ${NSD_CreateDirRequest} 0 96u 245u 16u "$INSTDIR"
+  ${NSD_CreateDirRequest} 0 86u 245u 16u "$INSTDIR"
   Pop $PathInput
-  ${NSD_CreateBrowseButton} 250u 96u 50u 16u "浏览…"
+  ${NSD_CreateBrowseButton} 250u 86u 50u 16u "浏览…"
   Pop $0
   ${NSD_OnClick} $0 BrowseDirectory
-  ${NSD_CreateCheckbox} 0 122u 150u 14u "创建桌面快捷方式"
+  ${NSD_CreateCheckbox} 0 110u 150u 14u "创建桌面快捷方式"
   Pop $DesktopCheckbox
   ${NSD_SetState} $DesktopCheckbox $DesktopChoice
-  ${NSD_CreateCheckbox} 165u 122u 135u 14u "开机自启"
+  ${NSD_CreateCheckbox} 165u 110u 135u 14u "开机自启"
   Pop $AutoStartCheckbox
   ${NSD_SetState} $AutoStartCheckbox $AutoStartChoice
+  ${NSD_CreateLabel} 0 132u 212u 14u ""
+  Pop $RunningNoticeLabel
+  ${NSD_CreateButton} 216u 129u 84u 16u "关闭程序"
+  Pop $CloseRunningBtn
+  ${NSD_OnClick} $CloseRunningBtn CloseRunningApp
+  ShowWindow $RunningNoticeLabel ${SW_HIDE}
+  ShowWindow $CloseRunningBtn ${SW_HIDE}
+  Call RefreshRunningState
   GetDlgItem $0 $HWNDPARENT 1
   SendMessage $0 ${WM_SETTEXT} 0 "STR:一键安装"
   nsDialogs::Show
+FunctionEnd
+
+Function RefreshRunningState
+  System::Call 'kernel32::OpenMutexW(i 0x100000, i 0, w "Local\${APP_ID}.SingleInstance") p .r0'
+!if "${APP_ID}" == "AuraIsle"
+  ${If} $0 == 0
+    System::Call 'kernel32::OpenMutexW(i 0x100000, i 0, w "Local\${LEGACY_APP_ID}.SingleInstance") p .r0'
+  ${EndIf}
+!endif
+  ${If} $0 != 0
+    System::Call 'kernel32::CloseHandle(p r0)'
+    ${NSD_SetText} $RunningNoticeLabel "检测到${APP_NAME}正在运行，请先关闭后再安装"
+    ShowWindow $RunningNoticeLabel ${SW_SHOW}
+    ShowWindow $CloseRunningBtn ${SW_SHOW}
+  ${Else}
+    ShowWindow $RunningNoticeLabel ${SW_HIDE}
+    ShowWindow $CloseRunningBtn ${SW_HIDE}
+  ${EndIf}
+FunctionEnd
+
+Function CloseRunningApp
+  ExecWait '"$SYSDIR\taskkill.exe" /F /IM AuraIsle.exe /IM auralsle.exe /IM daozai.exe /T'
+  Sleep 350
+  Call RefreshRunningState
+  ${NSD_SetText} $RunningNoticeLabel "已关闭运行中的程序，可以点击「一键安装」"
+  ShowWindow $RunningNoticeLabel ${SW_SHOW}
 FunctionEnd
 
 Function CheckFolderPath
@@ -250,9 +286,17 @@ Function ${Prefix}CheckClosed
 !endif
   ${If} $0 != 0
     System::Call 'kernel32::CloseHandle(p r0)'
-    MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "请先从系统托盘退出${APP_NAME}，然后点击重试。" /SD IDCANCEL IDRETRY retry
+    ${If} ${Silent}
+      SetErrorLevel 2
+      Abort
+    ${EndIf}
+    MessageBox MB_YESNOCANCEL|MB_ICONQUESTION "检测到${APP_NAME}正在运行。$\r$\n点击「是」立即关闭程序并继续，点击「否」重试检测，点击「取消」退出。" IDYES kill_app IDNO retry
     SetErrorLevel 2
     Abort
+    kill_app:
+    ExecWait '"$SYSDIR\taskkill.exe" /F /IM AuraIsle.exe /IM auralsle.exe /IM daozai.exe /T'
+    Sleep 400
+    Goto retry
   ${EndIf}
 FunctionEnd
 !macroend

@@ -218,12 +218,12 @@ fn request(agent: &ureq::Agent, url: &url::Url, service: &str, route: &str) -> R
     result
 }
 
-fn network_proxy() -> Option<String> {
+pub(crate) fn network_proxy() -> Option<String> {
     ["HTTPS_PROXY","https_proxy","ALL_PROXY","all_proxy","HTTP_PROXY","http_proxy"].iter()
         .find_map(|key|std::env::var(key).ok().filter(|value|!value.is_empty())).or_else(crate::quota::system_proxy)
 }
 
-fn http_agent_for(proxy: Option<&str>) -> ureq::Agent {
+pub(crate) fn http_agent_for(proxy: Option<&str>) -> ureq::Agent {
     let mut builder=ureq::AgentBuilder::new().try_proxy_from_env(false).timeout_connect(Duration::from_secs(4)).timeout(Duration::from_secs(12));
     if let Some(proxy)=proxy.and_then(|value|ureq::Proxy::new(value).ok()){builder=builder.proxy(proxy);}
     builder.build()
@@ -231,8 +231,20 @@ fn http_agent_for(proxy: Option<&str>) -> ureq::Agent {
 
 fn http_agent() -> ureq::Agent {http_agent_for(None)}
 
-/// 按网络出口定位；国内常见出口能拿到中文城市名。
+/// 按硬件 Wi-Fi/GPS 或多源网络出口定位；国内常见出口能拿到中文城市名。
 pub fn locate(agent: &ureq::Agent) -> Result<Position, String> {
+    #[cfg(windows)]
+    if !cfg!(test) {
+        if let Some((lat, lon, city, street)) = crate::auralsle_ai_status::plugins::geolocate_precise() {
+            let label = if !city.is_empty() { city } else { street };
+            if !label.is_empty() {
+                let pos = Position { lat, lon, label, region: String::new() };
+                if pos.valid() {
+                    return Ok(pos);
+                }
+            }
+        }
+    }
     locate_with_sources(agent,&[("https://ipwho.is/?lang=zh-CN",false),("https://free.freeipapi.com/api/v1/json",true)],network_proxy().as_deref())
 }
 

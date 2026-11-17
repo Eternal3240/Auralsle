@@ -242,11 +242,8 @@ fn url_encode_utf8(s: &str) -> String {
 
 /// 一键自动定位到当前街道（通过本机公网/网络定位 + OpenStreetMap Nominatim `zoom=18` 街道级逆地理编码）。
 
-fn ureq_get_json(url: &str, timeout_secs: u64) -> Option<serde_json::Value> {
+fn ureq_get_json_with_agent(agent: &ureq::Agent, url: &str) -> Option<serde_json::Value> {
     use std::io::Read;
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .build();
     let resp = agent
         .get(url)
         .set("User-Agent", "AuralsleDynamicIsland/1.0")
@@ -256,6 +253,24 @@ fn ureq_get_json(url: &str, timeout_secs: u64) -> Option<serde_json::Value> {
     let mut bytes = Vec::new();
     resp.into_reader().take(512 * 1024).read_to_end(&mut bytes).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+fn ureq_get_json(url: &str, timeout_secs: u64) -> Option<serde_json::Value> {
+    let direct = ureq::AgentBuilder::new()
+        .try_proxy_from_env(false)
+        .timeout_connect(std::time::Duration::from_secs(timeout_secs.min(4)))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build();
+    if let Some(v) = ureq_get_json_with_agent(&direct, url) {
+        return Some(v);
+    }
+    if let Some(proxy) = crate::weather::network_proxy() {
+        let proxied = crate::weather::http_agent_for(Some(&proxy));
+        if let Some(v) = ureq_get_json_with_agent(&proxied, url) {
+            return Some(v);
+        }
+    }
+    None
 }
 
 fn ureq_post_json(
@@ -288,12 +303,226 @@ fn ureq_post_json(
     serde_json::from_slice(&bytes).ok()
 }
 
+fn json_as_f64(v: &serde_json::Value) -> Option<f64> {
+    v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+}
+
+#[cfg(windows)]
+fn windows_winrt_geolocate() -> Option<(f64, f64)> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = r#"
+try {
+  Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null
+  $asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+  })[0]
+  $null = [Windows.Devices.Geolocation.Geolocator,Windows.Foundation,ContentType=WindowsRuntime]
+  $geo = [Windows.Devices.Geolocation.Geolocator]::new()
+  $geo.DesiredAccuracy = [Windows.Devices.Geolocation.PositionAccuracy]::High
+  $op = $geo.GetGeopositionAsync()
+  $task = $asTask.MakeGenericMethod([Windows.Devices.Geolocation.Geoposition]).Invoke($null, @($op))
+  if ($task.Wait(4500)) {
+    $p = $task.Result.Coordinate.Point.Position
+    "$($p.Latitude),$($p.Longitude)"
+  }
+} catch {}
+"#;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().map(str::trim).find(|l| l.contains(','))?;
+    let (a, b) = line.split_once(',')?;
+    let lat = a.trim().parse::<f64>().ok()?;
+    let lon = b.trim().parse::<f64>().ok()?;
+    if (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon) && (lat.abs() > 0.05 || lon.abs() > 0.05) {
+        Some((lat, lon))
+    } else {
+        None
+    }
+}
+
+/// 综合 Windows Wi-Fi/GPS 定位与多源 IP/逆地理定位，返回 `(lat, lon, city, street)`。
+pub(crate) fn geolocate_precise() -> Option<(f64, f64, String, String)> {
+    let mut lat = 0.0_f64;
+    let mut lon = 0.0_f64;
+    let mut city = String::new();
+    let mut street = String::new();
+    let mut has_coords = false;
+
+    #[cfg(windows)]
+    if let Some((la, lo)) = windows_winrt_geolocate() {
+        lat = la;
+        lon = lo;
+        has_coords = true;
+    }
+
+    if !has_coords {
+        // 1) 国内直连优先：百度云 IP 区县级定位（中文 city + district + lat/lng）
+        if let Some(v) = ureq_get_json("https://qifu-api.baidubce.com/ip/local/geo/v1/district", 4) {
+            if let Some(d) = v.get("data") {
+                if let (Some(la), Some(lo)) = (
+                    d.get("lat").and_then(json_as_f64),
+                    d.get("lng").and_then(json_as_f64),
+                ) {
+                    if la.abs() > 0.05 || lo.abs() > 0.05 {
+                        lat = la;
+                        lon = lo;
+                        has_coords = true;
+                    }
+                }
+                if let Some(c) = d.get("city").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                    city = c.to_owned();
+                } else if let Some(p) = d.get("prov").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                    city = p.to_owned();
+                }
+                if let Some(dist) = d.get("district").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                    street = dist.to_owned();
+                }
+            }
+        }
+    }
+
+    if !has_coords {
+        if let Some(v) = ureq_get_json("https://ipwho.is/?lang=zh-CN", 4) {
+            if v.get("success").and_then(|x| x.as_bool()).unwrap_or(false) {
+                if let (Some(la), Some(lo)) = (
+                    v.get("latitude").and_then(json_as_f64),
+                    v.get("longitude").and_then(json_as_f64),
+                ) {
+                    lat = la;
+                    lon = lo;
+                    has_coords = true;
+                }
+                if let Some(c) = v.get("city").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                    city = c.to_owned();
+                }
+            }
+        }
+    }
+
+    if !has_coords {
+        if let Some(v) = ureq_get_json("http://ip-api.com/json/?lang=zh-CN&fields=status,lat,lon,city,district", 4) {
+            if v.get("status").and_then(|x| x.as_str()) == Some("success") {
+                if let (Some(la), Some(lo)) = (
+                    v.get("lat").and_then(json_as_f64),
+                    v.get("lon").and_then(json_as_f64),
+                ) {
+                    lat = la;
+                    lon = lo;
+                    has_coords = true;
+                }
+                if let Some(c) = v.get("city").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                    city = c.to_owned();
+                }
+                if let Some(dist) = v.get("district").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                    street = dist.to_owned();
+                }
+            }
+        }
+    }
+
+    if !has_coords {
+        if let Some(v) = ureq_get_json("https://free.freeipapi.com/api/v1/json", 4) {
+            if let (Some(la), Some(lo)) = (
+                v.get("latitude").and_then(json_as_f64),
+                v.get("longitude").and_then(json_as_f64),
+            ) {
+                lat = la;
+                lon = lo;
+                has_coords = true;
+            }
+            if let Some(c) = v.get("cityName").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                city = c.to_owned();
+            }
+        }
+    }
+
+    if !has_coords {
+        return None;
+    }
+
+    // 逆地理编码：优先 OpenStreetMap Nominatim (zoom=18) 获取具体区县 + 街道/路名，
+    // 不可达时由 BigDataCloud 中文逆地理兜底，避免只停在省/市级。
+    let mut rev_ok = false;
+    let nom_url = format!(
+        "https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={lat:.5}&lon={lon:.5}&zoom=18&addressdetails=1&accept-language=zh-CN"
+    );
+    if let Some(v) = ureq_get_json(&nom_url, 5) {
+        if let Some(addr) = v.get("address") {
+            let c_str = addr
+                .get("city")
+                .or_else(|| addr.get("municipality"))
+                .or_else(|| addr.get("county"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            if !c_str.is_empty() {
+                city = c_str.to_owned();
+            }
+            let dist = addr
+                .get("suburb")
+                .or_else(|| addr.get("city_district"))
+                .or_else(|| addr.get("district"))
+                .or_else(|| addr.get("town"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            let rd = addr
+                .get("road")
+                .or_else(|| addr.get("neighbourhood"))
+                .or_else(|| addr.get("quarter"))
+                .or_else(|| addr.get("pedestrian"))
+                .or_else(|| addr.get("Subdistrict"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            let combined = match (!dist.is_empty(), !rd.is_empty()) {
+                (true, true) => format!("{dist} · {rd}"),
+                (true, false) => dist.to_owned(),
+                (false, true) => rd.to_owned(),
+                (false, false) => String::new(),
+            };
+            if !combined.is_empty() {
+                street = combined;
+                rev_ok = true;
+            }
+        }
+    }
+
+    if !rev_ok || city.is_empty() || street.is_empty() {
+        let bdc_url = format!(
+            "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={lat:.5}&longitude={lon:.5}&localityLanguage=zh"
+        );
+        if let Some(v) = ureq_get_json(&bdc_url, 4) {
+            let c_str = v.get("city").and_then(|x| x.as_str()).unwrap_or("");
+            let loc_str = v.get("locality").and_then(|x| x.as_str()).unwrap_or("");
+            if !c_str.is_empty() && city.is_empty() {
+                city = c_str.to_owned();
+            }
+            if city.is_empty() {
+                if let Some(sub) = v.get("principalSubdivision").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                    city = sub.to_owned();
+                }
+            }
+            if !loc_str.is_empty() && (street.is_empty() || !rev_ok) {
+                street = loc_str.to_owned();
+            }
+        }
+    }
+
+    Some((lat, lon, city, street))
+}
+
 pub fn locate_street_async() {
     if STREET_LOCATING.swap(true, Ordering::SeqCst) {
         return;
     }
     if let Ok(mut slot) = WISLAND_WEATHER.get_or_init(|| Mutex::new(WislandWeatherState::default())).lock() {
-        slot.locate_status = "正在定位到当前街道…".into();
+        slot.locate_status = "正在高精度定位当前位置…".into();
     }
     std::thread::spawn(move || {
         let cfg = config::get();
@@ -303,94 +532,16 @@ pub fn locate_street_async() {
         let mut street = cfg.weather_street.clone();
         let mut resolved = false;
 
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            // 1) 通过内置 ureq 获取当前本机经纬度与城市（不拉起外部 curl.exe 子进程）
-            {
-                {
-                    if let Some(v) = ureq_get_json("http://ip-api.com/json/?lang=zh-CN", 3) {
-                        if let (Some(la), Some(lo)) = (
-                            v.get("lat").and_then(|x| x.as_f64()),
-                            v.get("lon").and_then(|x| x.as_f64()),
-                        ) {
-                            lat = la;
-                            lon = lo;
-                        }
-                        if let Some(c) = v.get("city").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
-                            city = c.to_owned();
-                        }
-                    }
-                }
+        if let Some((la, lo, c_out, s_out)) = geolocate_precise() {
+            lat = la;
+            lon = lo;
+            if !c_out.is_empty() {
+                city = c_out;
             }
-
-            // 2) 通过 OpenStreetMap Nominatim (zoom=18) 或 BigDataCloud 逆地理编码精确到区/县 + 街道/路名
-            let nom_url = format!(
-                "https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={lat:.5}&lon={lon:.5}&zoom=18&addressdetails=1&accept-language=zh-CN"
-            );
-            {
-                {
-                    if let Some(v) = ureq_get_json(&nom_url, 4) {
-                        if let Some(addr) = v.get("address") {
-                            let c_str = addr
-                                .get("city")
-                                .or_else(|| addr.get("municipality"))
-                                .or_else(|| addr.get("county"))
-                                .and_then(|x| x.as_str())
-                                .unwrap_or("");
-                            if !c_str.is_empty() {
-                                city = c_str.to_owned();
-                            }
-                            let dist = addr
-                                .get("suburb")
-                                .or_else(|| addr.get("city_district"))
-                                .or_else(|| addr.get("district"))
-                                .or_else(|| addr.get("town"))
-                                .and_then(|x| x.as_str())
-                                .unwrap_or("");
-                            let rd = addr
-                                .get("road")
-                                .or_else(|| addr.get("neighbourhood"))
-                                .or_else(|| addr.get("quarter"))
-                                .or_else(|| addr.get("pedestrian"))
-                                .or_else(|| addr.get("Subdistrict"))
-                                .and_then(|x| x.as_str())
-                                .unwrap_or("");
-                            let combined = match (!dist.is_empty(), !rd.is_empty()) {
-                                (true, true) => format!("{dist} · {rd}"),
-                                (true, false) => dist.to_owned(),
-                                (false, true) => rd.to_owned(),
-                                (false, false) => String::new(),
-                            };
-                            if !combined.is_empty() {
-                                street = combined;
-                                resolved = true;
-                            }
-                        }
-                    }
-                }
+            if !s_out.is_empty() {
+                street = s_out;
             }
-
-            if !resolved {
-                let bdc_url = format!(
-                    "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={lat:.5}&longitude={lon:.5}&localityLanguage=zh"
-                );
-                {
-                    {
-                        if let Some(v) = ureq_get_json(&bdc_url, 3) {
-                            let c_str = v.get("city").and_then(|x| x.as_str()).unwrap_or("");
-                            let loc_str = v.get("locality").and_then(|x| x.as_str()).unwrap_or("");
-                            if !c_str.is_empty() {
-                                city = c_str.to_owned();
-                            }
-                            if !loc_str.is_empty() {
-                                street = loc_str.to_owned();
-                                resolved = true;
-                            }
-                        }
-                    }
-                }
-            }
+            resolved = !city.is_empty();
         }
 
         if !resolved {
@@ -399,6 +550,12 @@ pub fn locate_street_async() {
                 street = p_street.to_owned();
                 lat = p_lat;
                 lon = p_lon;
+            } else {
+                if let Ok(mut slot) = WISLAND_WEATHER.get_or_init(|| Mutex::new(WislandWeatherState::default())).lock() {
+                    slot.locate_status = "自动定位失败，请检查网络/系统定位权限或手动搜索城市".into();
+                }
+                STREET_LOCATING.store(false, Ordering::SeqCst);
+                return;
             }
         }
 
@@ -413,7 +570,11 @@ pub fn locate_street_async() {
             slot.street = street.clone();
             slot.lat = lat;
             slot.lon = lon;
-            slot.locate_status = format!("已精准定位：{city} {street} ({lat:.4}, {lon:.4})");
+            slot.locate_status = if street.is_empty() {
+                format!("已定位：{city} ({lat:.4}, {lon:.4})")
+            } else {
+                format!("已精准定位：{city} · {street} ({lat:.4}, {lon:.4})")
+            };
         }
         STREET_LOCATING.store(false, Ordering::SeqCst);
         refresh_weather_async(city);
@@ -1209,7 +1370,8 @@ pub fn eval_win_widget(id: u8, s: &sysmon::Sample, _cfg: &config::Config, _ppp: 
     let acc = active_accent_color();
     let ded_vram = s.vram.unwrap_or(0);
     let sh_vram = s.vram_shared.unwrap_or(0);
-    let is_igpu = ded_vram < 512 * 1024 * 1024;
+    let hw = crate::graphics::probe_gpu_hardware_info();
+    let is_igpu = !hw.adapter_is_discrete && !hw.adapter_name.is_empty();
 
     match id {
         0 => ("时间", format!("{:02}:{:02}", now.hour(), now.minute()), format!("{:02}秒", now.second()), acc, None),
@@ -1218,11 +1380,25 @@ pub fn eval_win_widget(id: u8, s: &sysmon::Sample, _cfg: &config::Config, _ppp: 
             ("日期", format!("{}月{}日", now.month(), now.day()), wd.to_owned(), Color32::from_rgb(251, 146, 60), None)
         }
         12 => {
-            let hw = crate::graphics::probe_gpu_hardware_info();
-            let cpu_short = if hw.cpu_name.contains("Ultra 5 335") {
-                format!("Ultra 5 335 · {}核", s.cores.len().max(1))
-            } else if let Some(idx) = hw.cpu_name.find("Ultra") {
-                format!("{} · {}核", hw.cpu_name[idx..].trim(), s.cores.len().max(1))
+            let clean_cpu = hw
+                .cpu_name
+                .replace("(R)", "")
+                .replace("(TM)", "")
+                .replace("CPU @", "")
+                .replace("with Radeon Graphics", "")
+                .replace("Processor", "")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let short_cpu = clean_cpu
+                .strip_prefix("Intel ")
+                .or_else(|| clean_cpu.strip_prefix("AMD "))
+                .unwrap_or(&clean_cpu)
+                .trim();
+            let short_cpu = short_cpu.strip_prefix("Core ").unwrap_or(short_cpu).trim();
+            let cpu_short = if !short_cpu.is_empty() && short_cpu != "未知处理器" {
+                let abbr: String = short_cpu.chars().take(18).collect();
+                format!("{} · {}核", abbr.trim_end(), s.cores.len().max(1))
             } else {
                 format!("{} 逻辑核心", s.cores.len().max(1))
             };
@@ -1231,19 +1407,27 @@ pub fn eval_win_widget(id: u8, s: &sysmon::Sample, _cfg: &config::Config, _ppp: 
         13 => ("主频", s.cpu_mhz.map(sysmon::mhz).unwrap_or_else(|| "3.6 GHz".to_owned()), format!("CPU {:.0}%", s.cpu), Color32::from_rgb(96, 165, 250), Some(s.cpu / 100.0)),
         14 => ("温度", sysmon::opt(s.temp_c, "℃", 0), "CPU 封装".to_owned(), Color32::from_rgb(249, 115, 22), s.temp_c.map(|t| (t / 100.0).clamp(0.0, 1.0))),
         15 => {
-            let hw = crate::graphics::probe_gpu_hardware_info();
-            let gpu_short = if hw.adapter_name.contains("B370") {
-                "Intel Arc B370".to_owned()
-            } else if hw.adapter_name.contains("Arc") {
-                "Intel Arc GPU".to_owned()
+            let clean_gpu = hw
+                .adapter_name
+                .replace("(R)", "")
+                .replace("(TM)", "")
+                .replace("NVIDIA GeForce ", "")
+                .replace("AMD Radeon ", "Radeon ")
+                .replace("Laptop GPU", "")
+                .replace("GPU", "")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let gpu_short = if !clean_gpu.is_empty() && clean_gpu != "硬件加速显卡" {
+                clean_gpu.chars().take(20).collect::<String>().trim_end().to_owned()
             } else if is_igpu {
-                "Intel 核显 3D".to_owned()
+                "核芯显卡 3D".to_owned()
             } else {
-                "独显 3D".to_owned()
+                "独立显卡 3D".to_owned()
             };
             (
                 "GPU",
-                s.gpu.map(|g| format!("{g:.0}%")).unwrap_or_else(|| "4%".to_owned()),
+                s.gpu.map(|g| format!("{g:.0}%")).unwrap_or_else(|| "0%".to_owned()),
                 gpu_short,
                 Color32::from_rgb(168, 85, 247),
                 s.gpu.map(|g| g / 100.0),
@@ -1262,9 +1446,24 @@ pub fn eval_win_widget(id: u8, s: &sysmon::Sample, _cfg: &config::Config, _ppp: 
                 } else {
                     None
                 };
-                ("Arc 显存", val_str, "Intel Arc 共享显存".to_owned(), Color32::from_rgb(192, 132, 252), ratio)
+                let igpu_sub = if hw.adapter_name.to_ascii_lowercase().contains("arc") {
+                    "Intel Arc 共享显存".to_owned()
+                } else {
+                    "核显共享系统显存".to_owned()
+                };
+                ("显存", val_str, igpu_sub, Color32::from_rgb(192, 132, 252), ratio)
             } else {
-                ("显存", sysmon::bytes(ded_vram), format!("共享 {}", sysmon::bytes(sh_vram)), Color32::from_rgb(192, 132, 252), None)
+                let ratio = if hw.adapter_vram_bytes > 0 {
+                    Some((ded_vram as f32 / hw.adapter_vram_bytes as f32).clamp(0.02, 1.0))
+                } else {
+                    None
+                };
+                let sub = if hw.adapter_vram_bytes > 0 {
+                    format!("总计 {}", sysmon::bytes(hw.adapter_vram_bytes))
+                } else {
+                    format!("共享 {}", sysmon::bytes(sh_vram))
+                };
+                ("显存", sysmon::bytes(ded_vram), sub, Color32::from_rgb(192, 132, 252), ratio)
             }
         }
         17 => {
@@ -1633,7 +1832,8 @@ fn draw_win_widgets_settings_inner(ui: &mut egui::Ui, cfg: &mut config::Config) 
 
     if show_grid_sec {
     // ── 3) 已启用插件排序与独立尺寸定制（彻底修复图二右侧卡片被切掉的问题）──
-    settings_label(ui, "组件库开关与尺寸编排（拖拽顶部标签排序 · 点击下方卡片启用或停用）");
+    settings_label(ui, "组件库开关与尺寸编排");
+    crate::extras::settings_hint(ui, "拖拽顶部标签排序 · 点击下方卡片启用或停用");
     crate::extras::settings_card(ui, |ui| {
         let card_avail_w = crate::extras::layout_avail_w(ui).max(180.0);
         ui.set_width(card_avail_w);
@@ -3584,13 +3784,34 @@ pub fn draw_weather_settings_page(ui: &mut egui::Ui) {
         ui.label(RichText::new(&w_st.locate_status).size(10.5).color(Color32::from_rgb(56, 189, 248)));
     });
 
-    // 3) 天气源管理与自定义接入天气源
-    settings_label(ui, "天气源切换与自定义接入");
+    // 3) 天气源管理与自定义接入天气源（与图三设备胶囊视觉方案统一的 Fluent 双列选卡）
+    settings_label(ui, "天气数据源与自定义接入");
     crate::extras::settings_card(ui, |ui| {
-        let card_w = (crate::extras::layout_avail_w(ui) - 8.0).max(160.0);
-        for (src_id, src_title, src_desc) in WEATHER_SOURCES {
+        let avail_w = crate::extras::layout_avail_w(ui).max(160.0);
+        let dark = ui.ctx().style().visuals.dark_mode;
+        let gap = 10.0_f32;
+        let per_row: usize = if avail_w >= 400.0 { 2 } else { 1 };
+        let card_w = if per_row == 2 {
+            ((avail_w - gap) * 0.5).floor().max(160.0)
+        } else {
+            avail_w
+        };
+        let card_h = 62.0_f32;
+        let rows = (WEATHER_SOURCES.len() + per_row - 1) / per_row;
+        let stage_h = rows as f32 * card_h + (rows.saturating_sub(1) as f32) * gap;
+        let (stage_r, _) = ui.allocate_exact_size(egui::vec2(avail_w, stage_h), Sense::hover());
+        let title_col = if dark { Color32::WHITE } else { Color32::from_rgb(24, 26, 32) };
+        let sub_col = if dark { Color32::from_gray(165) } else { Color32::from_gray(95) };
+        let hint_col = if dark { Color32::from_gray(160) } else { Color32::from_gray(105) };
+
+        for (idx, &(src_id, src_title, src_desc)) in WEATHER_SOURCES.iter().enumerate() {
+            let col = idx % per_row;
+            let row = idx / per_row;
+            let x = stage_r.left() + col as f32 * (card_w + gap);
+            let y = stage_r.top() + row as f32 * (card_h + gap);
+            let rect = Rect::from_min_size(Pos2::new(x, y), egui::vec2(card_w, card_h));
+            let resp = ui.interact(rect, ui.make_persistent_id(("weather-src-card", src_id)), Sense::click());
             let selected = cfg.weather_source == src_id;
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(card_w, 42.0), Sense::click());
             if resp.clicked() {
                 cfg.weather_source = src_id;
                 config::update(|c| c.weather_source = src_id);
@@ -3599,79 +3820,115 @@ pub fn draw_weather_settings_page(ui: &mut egui::Ui) {
                 }
                 refresh_weather_async(cfg.weather_city.clone());
             }
-            let bg = if selected {
-                Color32::from_rgb(51, 51, 51)
-            } else if resp.hovered() {
-                Color32::from_rgb(51, 51, 51)
+            let hovered = resp.hovered();
+            let bg = if dark {
+                if selected {
+                    Color32::from_rgb(0x2B, 0x33, 0x42)
+                } else if hovered {
+                    Color32::from_rgb(0x2B, 0x2C, 0x31)
+                } else {
+                    Color32::from_rgb(0x23, 0x24, 0x28)
+                }
+            } else if selected {
+                Color32::from_rgb(0xEA, 0xF1, 0xFD)
+            } else if hovered {
+                Color32::from_rgb(0xF5, 0xF6, 0xFA)
             } else {
-                Color32::from_rgb(43, 43, 43)
+                Color32::from_rgb(0xFA, 0xFB, 0xFE)
             };
-            ui.painter().rect_filled(rect, 8.0, bg);
-            ui.painter().rect_stroke(
+            let stroke_col = if selected {
+                acc
+            } else if dark {
+                if hovered { Color32::from_gray(96) } else { Color32::from_rgb(0x36, 0x37, 0x3F) }
+            } else if hovered {
+                Color32::from_rgb(180, 188, 204)
+            } else {
+                Color32::from_rgb(220, 224, 232)
+            };
+            ui.painter().rect(
                 rect,
                 8.0,
-                Stroke::new(if selected { 1.5 } else { 0.8 }, if selected { acc } else { Color32::from_white_alpha(18) }),
+                bg,
+                Stroke::new(if selected { 1.5 } else { 1.0 }, stroke_col),
                 egui::StrokeKind::Inside,
             );
+
+            let tag_w = 46.0_f32;
+            let tag_r = Rect::from_min_size(Pos2::new(rect.right() - tag_w - 10.0, rect.top() + 9.0), egui::vec2(tag_w, 17.0));
+            let tag_bg = if selected {
+                acc
+            } else if dark {
+                Color32::from_rgb(0x33, 0x35, 0x3C)
+            } else {
+                Color32::from_rgb(0xE8, 0xEB, 0xF2)
+            };
+            ui.painter().rect_filled(tag_r, 8.5, tag_bg);
             ui.painter().text(
-                Pos2::new(rect.left() + 12.0, rect.top() + 13.0),
+                tag_r.center(),
+                egui::Align2::CENTER_CENTER,
+                if selected { "当前" } else { "切换" },
+                egui::FontId::proportional(9.2),
+                if selected { Color32::WHITE } else { hint_col },
+            );
+
+            let title_clip = Rect::from_min_max(rect.min, Pos2::new(tag_r.left() - 6.0, rect.bottom()));
+            ui.painter().with_clip_rect(title_clip).text(
+                Pos2::new(rect.left() + 12.0, rect.top() + 18.0),
                 egui::Align2::LEFT_CENTER,
                 src_title,
                 egui::FontId::proportional(11.8),
-                Color32::WHITE,
+                title_col,
             );
-            ui.painter().text(
-                Pos2::new(rect.left() + 12.0, rect.bottom() - 11.5),
+            ui.painter().with_clip_rect(rect.shrink2(egui::vec2(10.0, 0.0))).text(
+                Pos2::new(rect.left() + 12.0, rect.bottom() - 15.0),
                 egui::Align2::LEFT_CENTER,
                 src_desc,
-                egui::FontId::proportional(9.8),
-                Color32::from_gray(168),
-            );
-            ui.painter().text(
-                Pos2::new(rect.right() - 12.0, rect.center().y),
-                egui::Align2::RIGHT_CENTER,
-                if selected { "● 当前使用" } else { "切换" },
-                egui::FontId::proportional(10.5),
-                if selected { Color32::from_rgb(56, 189, 248) } else { Color32::from_gray(140) },
+                egui::FontId::proportional(10.0),
+                sub_col,
             );
         }
 
-        crate::extras::twinkle_card_break(ui);
-        ui.label(RichText::new("自定义天气接口配置").size(11.5).strong());
-        let avail_w = crate::extras::layout_avail_w(ui);
-        ui.horizontal_wrapped(|ui| {
-            ui.set_max_width(avail_w);
-            ui.label(RichText::new("数据源名称：").size(11.0));
-            ui.add_sized([110.0, 24.0], egui::TextEdit::singleline(&mut cfg.weather_custom_name).hint_text("如：和风街道源"));
-            ui.label(RichText::new("API Key / Token：").size(11.0));
-            ui.add_sized(
-                [180.0_f32.min((avail_w - 110.0).max(96.0)), 24.0],
-                egui::TextEdit::singleline(&mut cfg.weather_api_key)
-                    .password(true)
-                    .hint_text("选填，用于替换模板中的 {key}"),
-            );
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.set_max_width(avail_w);
-            ui.label(RichText::new("接口 URL 模板：").size(11.0));
-            let w = (avail_w - 220.0).max(110.0);
-            ui.add_sized(
-                [w, 24.0],
-                egui::TextEdit::singleline(&mut cfg.weather_custom_url)
-                    .hint_text("https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m"),
-            );
-            if ui.button("⚡ 测试并接入").clicked() {
-                cfg.weather_source = 4;
-                let city = cfg.weather_city.clone();
-                config::update(|c| *c = cfg.clone());
-                refresh_weather_async(city);
+        if cfg.weather_source == 3 || cfg.weather_source == 4 {
+            crate::extras::twinkle_card_break(ui);
+            ui.label(RichText::new(if cfg.weather_source == 3 { "彩云天气 Token 配置" } else { "自定义天气接口配置" }).size(11.5).strong());
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(avail_w);
+                if cfg.weather_source == 4 {
+                    ui.label(RichText::new("数据源名称：").size(11.0));
+                    ui.add_sized([110.0, 24.0], egui::TextEdit::singleline(&mut cfg.weather_custom_name).hint_text("如：自建气象源"));
+                }
+                ui.label(RichText::new("API Key / Token：").size(11.0));
+                ui.add_sized(
+                    [200.0_f32.min((avail_w - 110.0).max(96.0)), 24.0],
+                    egui::TextEdit::singleline(&mut cfg.weather_api_key)
+                        .password(true)
+                        .hint_text("填写接口密钥 / Token"),
+                );
+            });
+            if cfg.weather_source == 4 {
+                ui.horizontal_wrapped(|ui| {
+                    ui.set_max_width(avail_w);
+                    ui.label(RichText::new("接口 URL 模板：").size(11.0));
+                    let w = (avail_w - 220.0).max(110.0);
+                    ui.add_sized(
+                        [w, 24.0],
+                        egui::TextEdit::singleline(&mut cfg.weather_custom_url)
+                            .hint_text("https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m"),
+                    );
+                    if ui.button("⚡ 测试并接入").clicked() {
+                        cfg.weather_source = 4;
+                        let city = cfg.weather_city.clone();
+                        config::update(|c| *c = cfg.clone());
+                        refresh_weather_async(city);
+                    }
+                });
+                ui.label(
+                    RichText::new("支持占位符：{lat} 街道纬度 · {lon} 街道经度 · {city} 城市 · {street} 街道名 · {key} API密钥")
+                        .size(10.0)
+                        .color(dim_text(ui)),
+                );
             }
-        });
-        ui.label(
-            RichText::new("支持占位符：{lat} 街道纬度 · {lon} 街道经度 · {city} 城市 · {street} 街道名 · {key} API密钥")
-                .size(10.0)
-                .color(dim_text(ui)),
-        );
+        }
     });
 
     // 4) 显示信息自由勾选

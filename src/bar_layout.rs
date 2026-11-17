@@ -109,10 +109,10 @@ impl Layout {
         quota*self.pet_clearance(slot)
     }
     pub fn pet_clearance(&self,slot:usize)->f32 {
-        match (self.x[slot],self.x[PET]) {
-            (Some(x),Some(pet))=>smoothstep(self.widths[slot]/2.0+14.0,self.widths[slot]/2.0+24.0,(x-pet).abs()),
-            _=>1.0,
-        }
+        let Some(slot_x) = self.x.get(slot).copied().flatten() else { return 1.0; };
+        let Some(pet) = self.x.get(PET).copied().flatten() else { return 1.0; };
+        let slot_w = self.widths.get(slot).copied().unwrap_or(27.0);
+        smoothstep(slot_w/2.0+14.0,slot_w/2.0+24.0,(slot_x-pet).abs())
     }
 }
 

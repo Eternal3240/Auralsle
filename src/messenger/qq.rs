@@ -65,6 +65,26 @@ fn ready_with_paths(target:Target,paths:&[String])->bool{
     })
 }
 
+pub(crate) fn is_pc_qq_logged_in() -> bool {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static CACHE: OnceLock<Mutex<Option<(Instant, bool)>>> = OnceLock::new();
+    let lock = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = lock.lock() {
+        if let Some((at, running)) = *guard {
+            if at.elapsed() < Duration::from_secs(2) {
+                return running;
+            }
+        }
+    }
+    let p = paths();
+    let found = accounts(&p).is_some_and(|v| !v.is_empty());
+    if let Ok(mut guard) = lock.lock() {
+        *guard = Some((Instant::now(), found));
+    }
+    found
+}
+
 pub(crate) fn accounts(paths:&[String])->Option<Vec<Target>>{unsafe{
     use windows::Win32::Foundation::BOOL;
     struct Search<'a>{paths:&'a [String],hosts:Vec<HWND>,mains:Vec<HWND>}

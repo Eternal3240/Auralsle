@@ -2548,25 +2548,24 @@ impl App {
     }
     pub(crate) fn mail_list_bounds(&self)->Rect {
         let left=if self.visible_mail_code().is_some(){182.0}else{36.0};
-        let bot = if cfg!(test) { 178.0 } else { 196.0 };
+        let bot = if cfg!(test) { 178.0 } else { 204.0 };
         Rect::from_min_max(Pos2::new(left,54.0),Pos2::new(380.0,bot))
     }
     pub(crate) fn page_mail(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
-        if !cfg!(test) {
-            let msg_mode = crate::auralsle_ai_status::config::get().msg_island_filter;
-            if msg_mode < 10 {
-                self.draw_fly_message_island(c, cmds);
-                return;
-            }
-            // 经典邮箱模式下在次栏右上提供「返回消息岛」胶囊按钮
-            let (sw_r, sw_b) = capsule(c, 258.0, 33.0, 58.0, 19.0, "fly-msg-hub-switch", theme::BTN, theme::BTN_HOVER);
-            sw_b.text(287.0, 46.2, "返回消息岛", 8.2, W::Semibold, Color32::from_rgb(110, 231, 183), H::Center);
-            if sw_r.clicked() {
-                crate::auralsle_ai_status::config::update(|cfg| cfg.msg_island_filter = 0);
-                return;
-            }
-        }
         if self.mail.accounts.is_empty() {
+            if !cfg!(test) {
+                let msg_mode = crate::auralsle_ai_status::config::get().msg_island_filter;
+                if msg_mode < 10 {
+                    self.draw_fly_message_island(c, cmds);
+                    return;
+                }
+                let (sw_r, sw_b) = capsule(c, 316.0, 33.0, 64.0, 19.0, "fly-msg-hub-switch", theme::BTN, theme::BTN_HOVER);
+                sw_b.text(348.0, 46.2, "返回消息岛", 8.2, W::Semibold, Color32::from_rgb(110, 231, 183), H::Center);
+                if sw_r.clicked() {
+                    crate::auralsle_ai_status::config::update(|cfg| cfg.msg_island_filter = 0);
+                    return;
+                }
+            }
             c.text(42.0, 60.0, "还没有邮箱", 13.0, W::Bold, theme::WHITE, H::Left);
             let hint = c.fit("在设置 → 邮箱里添加；授权码只存进系统凭据管理器", 10.5, W::Regular, 344.0);
             c.text(42.0, 77.0, &hint, 10.5, W::Regular, theme::GRAY, H::Left);
@@ -2576,6 +2575,13 @@ impl App {
                 self.open_mail_settings();
             }
             return;
+        }
+        if !cfg!(test) {
+            let msg_mode = crate::auralsle_ai_status::config::get().msg_island_filter;
+            if msg_mode < 10 {
+                self.draw_fly_message_island(c, cmds);
+                return;
+            }
         }
 
         self.mail_manage_tick();
@@ -2611,7 +2617,7 @@ impl App {
         }
         use crate::mail_manage::{Action,Folder};
         let folder=self.mail.manage.folder();let trash=folder==Folder::Trash;
-        let list_bounds=self.mail_list_bounds();let list_x=list_bounds.left();let row_w=list_bounds.width()-12.0;
+        let list_bounds=self.mail_list_bounds();let list_x=list_bounds.left();let row_w=list_bounds.width()-14.0;
         let compact=code.is_none();let row_h=if compact{21.5}else{34.0};
         let all_count=self.mail.recent.len();
         let unread=self.mail.recent.iter().filter(|m|self.mail_seen(m,Folder::Inbox)==Some(false)).count();
@@ -2620,42 +2626,61 @@ impl App {
             c.text(375.0,47.0,"返回邮件",10.0,W::Regular,theme::BLUE,H::Right);
             if c.hit(322.0,33.0,56.0,19.0,"mail-trash-back").clicked(){self.mail_toggle_trash();return;}
         }else{
+            let tab_w=if compact{52.0}else{45.0};let tab_gap=if compact{56.0}else{48.0};
             for (x,width,label,selected,id) in [
-                (list_x,52.0,format!("全部 {all_count}"),!self.mail.manage.unread_only,"mail-all"),
-                (list_x+56.0,52.0,format!("未读 {unread}"),self.mail.manage.unread_only,"mail-unread"),
+                (list_x,tab_w,format!("全部 {all_count}"),!self.mail.manage.unread_only,"mail-all"),
+                (list_x+tab_gap,tab_w,format!("未读 {unread}"),self.mail.manage.unread_only,"mail-unread"),
             ]{
                 if selected{c.fill(x,33.0,width,19.0,6.0,theme::BTN);}
                 c.text(x+width/2.0,47.0,&label,10.0,W::Semibold,if selected{theme::WHITE}else{theme::GRAY},H::Center);
                 if c.hit(x,33.0,width,19.0,id).on_hover_text("当前加载的最近邮件").clicked(){self.mail.manage.unread_only=id=="mail-unread";}
             }
-            c.text(307.0,46.0,if self.settings.mail_sync_operations{"同步"}else{"仅本机"},8.0,W::Regular,theme::DIM,H::Center);
+            if !cfg!(test) {
+                let hub_x = if compact { 262.0 } else { 278.0 };
+                let hub_w = if compact { 58.0 } else { 52.0 };
+                let (sw_r, sw_b) = capsule(c, hub_x, 33.0, hub_w, 19.0, "fly-msg-hub-switch", theme::BTN, theme::BTN_HOVER);
+                sw_b.text(hub_x + hub_w * 0.5, 46.2, "返回消息岛", if compact { 8.2 } else { 7.8 }, W::Semibold, Color32::from_rgb(110, 231, 183), H::Center);
+                if sw_r.clicked() {
+                    crate::auralsle_ai_status::config::update(|cfg| cfg.msg_island_filter = 0);
+                    return;
+                }
+            } else {
+                c.text(307.0,46.0,if self.settings.mail_sync_operations{"同步"}else{"仅本机"},8.0,W::Regular,theme::DIM,H::Center);
+            }
             let ready=self.mail.manage.pending.is_empty()&&self.mail.accounts.iter().any(|a|a.enabled&&self.mail.manage.data.contains_key(&(crate::mail::key(a),Folder::Inbox))&&self.mail.manage.identities.get(&crate::mail::key(a))==Some(a));
-            c.text(375.0,47.0,"全部已读",10.0,W::Regular,if ready{theme::BLUE}else{theme::DIM},H::Right);
-            if c.hit(325.0,33.0,53.0,19.0,"mail-read-all").on_hover_text(if self.settings.mail_sync_operations{"将已连接邮箱的未读邮件全部标为已读"}else{"仅将灵屿 AuraIsle 当前加载的邮件标为已读，不更改邮箱"}).clicked()&&ready{
+            c.text(377.0,47.0,"全部已读",10.0,W::Regular,if ready{theme::BLUE}else{theme::DIM},H::Right);
+            if c.hit(333.0,33.0,47.0,19.0,"mail-read-all").on_hover_text(if self.settings.mail_sync_operations{"将已连接邮箱的未读邮件全部标为已读"}else{"仅将灵屿 AuraIsle 当前加载的邮件标为已读，不更改邮箱"}).clicked()&&ready{
                 self.mail_manage_request(None,Folder::Inbox,Action::ReadAll);
             }
         }
-        // [ai-status-mod] 邮件底部控件：列表拉长后，回收站与同步状态一起下移。
+        // 底部控件跟随列表底边：放进状态提示、同步模式与回收站入口，避免与列表及页面指示条挤在一起。
+        let foot_top = if cfg!(test) { 186.0 } else { list_bounds.bottom() + 4.0 };
+        let foot_text_y = foot_top + 11.5;
         if !trash{
-            let hit=c.hit(359.0,186.0,22.0,17.0,"mail-trash").on_hover_text("回收站");
-            crate::mail_manage_ui::trash_icon(c,370.0,194.0,if hit.hovered(){theme::WHITE}else{theme::GRAY});
+            if !cfg!(test) {
+                c.text(350.0, foot_text_y, if self.settings.mail_sync_operations{"邮箱同步"}else{"仅本机"}, 8.2, W::Regular, theme::DIM, H::Right);
+            }
+            let hit=c.hit(359.0,foot_top,22.0,17.0,"mail-trash").on_hover_text("回收站");
+            crate::mail_manage_ui::trash_icon(c,370.0,foot_top+8.0,if hit.hovered(){theme::WHITE}else{theme::GRAY});
             if hit.clicked(){self.mail_toggle_trash();return;}
         }
         if !self.mail.manage.message.is_empty(){
-            c.text(42.0,197.0,&c.fit(&self.mail.manage.message,8.0,W::Regular,125.0),8.0,W::Regular,theme::GRAY,H::Left);
-            if c.hit(40.0,186.0,130.0,16.0,"mail-manage-status").on_hover_text(format!("{}\n点击刷新邮件状态",self.mail.manage.message)).clicked(){self.mail_manage_request(None,folder,Action::Load);}
+            let status_x = if cfg!(test) { 42.0 } else { list_x + 4.0 };
+            let status_w = if cfg!(test) { 125.0 } else { (304.0 - status_x).max(80.0) };
+            c.text(status_x,foot_text_y,&c.fit(&self.mail.manage.message,8.0,W::Regular,status_w),8.0,W::Regular,theme::GRAY,H::Left);
+            if c.hit(status_x-2.0,foot_top,status_w+4.0,16.0,"mail-manage-status").on_hover_text(format!("{}\n点击刷新邮件状态",self.mail.manage.message)).clicked(){self.mail_manage_request(None,folder,Action::Load);}
         }
         let cached_mail_rows = self.mail_rows().to_vec();
         let indices:Vec<_>=cached_mail_rows.iter().enumerate().filter(|(_,m)|trash||!self.mail.manage.unread_only||self.mail_seen(m,folder)==Some(false)).map(|(i,_)|i).collect();
         if indices.is_empty(){
             let message=if !self.mail.manage.pending.is_empty(){"正在同步邮件…"}else if trash{"回收站为空"}else if self.mail.manage.unread_only{"没有未读邮件"}else{"还没有收到邮件"};
-            c.text(list_x+6.0,list_bounds.center().y+4.0,message,11.0,W::Regular,theme::GRAY,H::Left);return;  // [ai-status-mod] 随列表高度居中
+            c.text(list_x+6.0,list_bounds.center().y+4.0,message,11.0,W::Regular,theme::GRAY,H::Left);return;
         }
         let mut content=egui::Ui::new(c.ui.ctx().clone(),egui::Id::new(("mail-list",c.live)),
             egui::UiBuilder::new().max_rect(c.rect(list_bounds.left(),list_bounds.top(),list_bounds.width(),list_bounds.height())).layer_id(c.painter.layer_id()).style(c.ui.style().clone()));
         content.set_clip_rect(c.rect(list_bounds.left(),list_bounds.top(),list_bounds.width(),list_bounds.height()).intersect(c.painter.clip_rect()));
         content.set_opacity(c.painter.opacity());if !c.live{content.disable();}
-        content.spacing_mut().item_spacing.y=0.0;content.spacing_mut().scroll.floating=false;content.spacing_mut().scroll.bar_width=4.0*c.s;
+        content.spacing_mut().item_spacing.y=0.0;content.spacing_mut().scroll.floating=false;content.spacing_mut().scroll.bar_width=4.0*c.s;content.spacing_mut().scroll.bar_inner_margin=4.0*c.s;
         content.visuals_mut().widgets.inactive.bg_fill=Color32::from_gray(80);
         egui::ScrollArea::vertical().id_salt(("mail-list-scroll",trash,self.mail.manage.unread_only)).max_height(list_bounds.height()*c.s).auto_shrink([false,false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).show_rows(&mut content,row_h*c.s,indices.len(),|ui,range|{
             let rows:Vec<_>=range.map(|i|cached_mail_rows[indices[i]].clone()).collect();
@@ -2671,23 +2696,23 @@ impl App {
                 let ink=if seen==Some(true){theme::GRAY}else{theme::WHITE};
                 if compact{
                     row.text(12.0,14.0,&row.fit(&item.from,11.0,W::Semibold,57.0),11.0,W::Semibold,ink,H::Left);
-                    let subject_w=(row_w-128.0-if hidden{32.0}else{0.0}).max(10.0);
+                    let subject_w=(row_w-134.0-if hidden{32.0}else{0.0}).max(10.0);
                     let width=row.text(76.0,14.0,&row.fit(&item.subject,10.5,W::Regular,subject_w),10.5,W::Regular,if seen==Some(true){theme::GRAY}else{Color32::from_gray(210)},H::Left);
                     if hidden{row.fill(80.0+width,5.0,29.0,12.0,3.0,theme::BTN);row.text(94.5+width,14.0,"已隐藏",8.0,W::Regular,theme::GRAY,H::Center);}
                 }else{
                     row.text(12.0,12.0,&row.fit(&item.from,11.0,W::Semibold,row_w-65.0),11.0,W::Semibold,ink,H::Left);
                     row.text(12.0,27.0,&row.fit(&item.subject,10.0,W::Regular,row_w-20.0),10.0,W::Regular,theme::GRAY,H::Left);
                 }
-                let cy=if compact{10.0}else{8.0};let mut acted=false;
+                let cy=if compact{10.5}else{8.5};let mut acted=false;
                 if actions{
                     if trash{
-                        row.text(row_w-5.0,cy+4.0,"恢复",10.0,W::Regular,if ready{theme::BLUE}else{theme::DIM},H::Right);
-                        if row.hit(row_w-39.0,0.0,36.0,20.0,("mail-restore",item.uid,item.account.as_str())).clicked()&&ready{self.mail_manage_request(Some(&item.account),folder,Action::Move{uid:item.uid});acted=true;}
+                        row.text(row_w-6.0,cy+4.0,"恢复",10.0,W::Regular,if ready{theme::BLUE}else{theme::DIM},H::Right);
+                        if row.hit(row_w-40.0,0.0,36.0,20.0,("mail-restore",item.uid,item.account.as_str())).clicked()&&ready{self.mail_manage_request(Some(&item.account),folder,Action::Move{uid:item.uid});acted=true;}
                     }else{
-                        row.ring(row_w-35.0,cy,4.7,1.1,theme::GRAY);paint::check(&row,row_w-35.0,cy,6.0,if seen==Some(true){1.0}else{0.0},1.1,theme::GRAY);
-                        if row.hit(row_w-45.0,0.0,20.0,20.0,("mail-seen",item.uid,item.account.as_str())).on_hover_text(if seen==Some(true){"标为未读"}else{"标为已读"}).clicked(){self.mail_manage_request(Some(&item.account),folder,Action::Read{uid:item.uid,seen:seen!=Some(true)});acted=true;}
-                        let remove=row.hit(row_w-24.0,0.0,21.0,20.0,("mail-delete",item.uid,item.account.as_str())).on_hover_text(if self.settings.mail_sync_operations{"移到邮箱回收站"}else{"移到本机回收站，不更改邮箱"});
-                        crate::mail_manage_ui::trash_icon(&row,row_w-14.0,cy,if remove.hovered(){theme::RED}else{theme::GRAY});
+                        row.ring(row_w-34.0,cy,4.7,1.1,theme::GRAY);paint::check(&row,row_w-34.0,cy,6.0,if seen==Some(true){1.0}else{0.0},1.1,theme::GRAY);
+                        if row.hit(row_w-44.0,0.0,20.0,20.0,("mail-seen",item.uid,item.account.as_str())).on_hover_text(if seen==Some(true){"标为未读"}else{"标为已读"}).clicked(){self.mail_manage_request(Some(&item.account),folder,Action::Read{uid:item.uid,seen:seen!=Some(true)});acted=true;}
+                        let remove=row.hit(row_w-23.0,0.0,21.0,20.0,("mail-delete",item.uid,item.account.as_str())).on_hover_text(if self.settings.mail_sync_operations{"移到邮箱回收站"}else{"移到本机回收站，不更改邮箱"});
+                        crate::mail_manage_ui::trash_icon(&row,row_w-13.0,cy,if remove.hovered(){theme::RED}else{theme::GRAY});
                         if remove.clicked(){self.mail_manage_request(Some(&item.account),folder,Action::Move{uid:item.uid});acted=true;}
                     }
                 }else{row.text(row_w-6.0,cy+4.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,theme::GRAY,H::Right);}
@@ -3356,10 +3381,10 @@ impl App {
             content.disable();
         }
         content.spacing_mut().item_spacing.y = 0.0;
-        content.spacing_mut().scroll.floating = true;
+        content.spacing_mut().scroll.floating = false;
         content.spacing_mut().scroll.bar_width = 4.0 * c.s;
-        content.spacing_mut().scroll.floating_width = 4.0 * c.s;
-        content.spacing_mut().scroll.bar_outer_margin = 1.0 * c.s;
+        content.spacing_mut().scroll.bar_inner_margin = 4.0 * c.s;
+        content.spacing_mut().scroll.bar_outer_margin = 2.0 * c.s;
         content.spacing_mut().scroll.foreground_color = false;
 
         let scroll_out = egui::ScrollArea::vertical()
@@ -3370,7 +3395,7 @@ impl App {
                 let vp_r = ui.clip_rect();
                 let fade_zone = 20.0 * c.s;
                 for r_idx in range {
-                    let total_w = list_rect.width() - 8.0;
+                    let total_w = list_rect.width() - 14.0;
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(total_w * c.s, row_h * c.s), egui::Sense::hover());
                     let top_vis = ((rect.bottom() - vp_r.top()) / fade_zone).clamp(0.0, 1.0);
                     let bot_vis = ((vp_r.bottom() - rect.top()) / fade_zone).clamp(0.0, 1.0);

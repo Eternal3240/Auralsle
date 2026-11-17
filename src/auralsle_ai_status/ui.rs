@@ -801,7 +801,7 @@ fn course_looks(cfg: &config::Config) -> CourseLooks {
 
 fn piece_width(c: &Card, p: &Piece) -> f32 {
     match p.kind {
-        PieceKind::Text => c.text_w(&p.text, p.size, W::Regular) + 3.0,
+        PieceKind::Text => c.text_w(&p.text, p.size, W::Semibold) + 4.0,
         PieceKind::Button => c.text_w(&p.text, 9.5, W::Semibold) + 22.0,
         PieceKind::Progress => 120.0,
     }
@@ -973,14 +973,30 @@ fn draw_course_text(
             } else {
                 w - 28.0
             };
+            let left_end = bx + 14.0 + left_max_w;
             for (pi, p) in line.left.iter().enumerate() {
-                let rem_w = (bx + 14.0 + left_max_w - x).max(24.0);
+                let tail_need: f32 = line.left[pi + 1..]
+                    .iter()
+                    .map(|tp| piece_width(c, tp) + 6.0)
+                    .sum();
+                let avail_here = (left_end - x).max(0.0);
+                if avail_here < 10.0 {
+                    break;
+                }
+                let rem_w = if tail_need > 0.0 {
+                    (avail_here - tail_need.min(avail_here * 0.45)).max(44.0).min(avail_here)
+                } else {
+                    avail_here
+                };
                 draw_piece(c, p, x, cy, rem_w, a, cfg);
                 x += piece_width(c, p).min(rem_w) + if pi + 1 < line.left.len() { 6.0 } else { 0.0 };
             }
             let mut rx = (bx + w - 14.0 - right_total).max(x + 6.0);
             for p in &line.right {
-                let rem_w = (bx + w - 14.0 - rx).max(24.0);
+                let rem_w = (bx + w - 14.0 - rx).max(0.0);
+                if rem_w < 10.0 {
+                    break;
+                }
                 draw_piece(c, p, rx, cy, rem_w, a, cfg);
                 rx += piece_width(c, p).min(rem_w);
             }
@@ -2297,53 +2313,59 @@ pub fn draw_page(c: &Card, _cmds: &mut Vec<Cmd>) {
     const LEFT: f32 = 44.0;
     const NX: f32 = 60.0;
     const RIGHT: f32 = 380.0;
-    if !cfg.enabled || agents.is_empty() {
-        c.text(LEFT, 88.0, "没有正在进行的 AI 任务", size::BODY, W::Semibold, theme::WHITE, H::Left);
-        c.text(
-            LEFT,
-            108.0,
-            "在 AI 工具里开始工作后，这里会显示它在做什么",
-            size::TINY,
-            W::Regular,
-            theme::GRAY,
-            H::Left,
-        );
+    if !cfg.enabled || !cfg.mod_ai_status_enabled || agents.is_empty() {
+        let title_txt = if !cfg.enabled || !cfg.mod_ai_status_enabled {
+            "AI 工作状态模块已关闭"
+        } else {
+            "没有正在进行的 AI 任务"
+        };
         if !cfg!(test) {
-            // [fly-island 风格 AgentAI 状态灯与审批面板]
+            // [fly-island 风格 AgentAI 状态灯与审批面板，紧凑居中且与底部页面点留足呼吸间距]
             let box_x = LEFT - 6.0;
             let box_w = RIGHT - LEFT + 12.0;
-            c.fill(box_x, 38.0, box_w, 30.0, 8.5, Color32::from_white_alpha(12));
-            // 6 个助手等宽铺满：豆包排第一（本机用户主力就是豆包，之前这里没有它，
-            // 于是「AI 工作」页永远显示「没有正在进行的 AI 任务」）。
-            let chips: [(&str, &str, Color32); 6] = [
-                ("doubao", "豆包", Color32::from_rgb(62, 109, 240)),
-                ("antigravity", "Antigravity", Color32::from_rgb(99, 102, 241)),
-                ("claude", "Claude", Color32::from_rgb(255, 122, 69)),
-                ("codex", "Codex", Color32::from_rgb(168, 85, 247)),
-                ("workbuddy", "WorkBuddy", Color32::from_rgb(52, 211, 153)),
-                ("gemini", "Gemini", Color32::from_rgb(79, 140, 255)),
+            c.fill(box_x, 21.0, box_w, 26.0, 8.0, Color32::from_white_alpha(12));
+            let chips: [(&str, &str, Color32, f32); 6] = [
+                ("doubao", "豆包", Color32::from_rgb(62, 109, 240), 42.0),
+                ("antigravity", "Antigravity", Color32::from_rgb(99, 102, 241), 66.0),
+                ("claude", "Claude", Color32::from_rgb(255, 122, 69), 50.0),
+                ("codex", "Codex", Color32::from_rgb(168, 85, 247), 48.0),
+                ("workbuddy", "WorkBuddy", Color32::from_rgb(52, 211, 153), 64.0),
+                ("gemini", "Gemini", Color32::from_rgb(79, 140, 255), 50.0),
             ];
             let gap = 4.0;
-            let n = chips.len() as f32;
-            let chip_w = ((box_w - 12.0 - gap * (n - 1.0)) / n).max(40.0);
-            for (idx, (k_id, k_name, k_col)) in chips.iter().enumerate() {
-                let px = box_x + 6.0 + idx as f32 * (chip_w + gap);
-                c.fill(px, 43.0, chip_w, 20.0, 6.0, Color32::from_white_alpha(12));
-                c.circle(px + 6.5, 53.0, 2.6, *k_col);
-                c.text(px + 11.0, 56.2, k_name, 7.4, W::Semibold, theme::WHITE, H::Left);
-                if c.hit(px, 43.0, chip_w, 20.0, ("fly-agent-chip", *k_id))
+            let inner_w = box_w - 12.0 - gap * (chips.len() as f32 - 1.0);
+            let sum_w: f32 = chips.iter().map(|(_, _, _, w)| *w).sum();
+            let scale_w = (inner_w / sum_w).max(0.8);
+            let mut px = box_x + 6.0;
+            for (k_id, k_name, k_col, base_w) in chips {
+                let chip_w = base_w * scale_w;
+                c.fill(px, 24.0, chip_w, 20.0, 6.0, Color32::from_white_alpha(12));
+                c.circle(px + 6.5, 34.0, 2.5, k_col);
+                c.text(px + 11.5, 37.2, &c.fit(k_name, 7.2, W::Semibold, (chip_w - 14.5).max(18.0)), 7.2, W::Semibold, theme::WHITE, H::Left);
+                if c.hit(px, 24.0, chip_w, 20.0, ("fly-agent-chip", k_id))
                     .clicked()
                 {
                     launch_specific_agent(c.ui.ctx(), k_id);
                 }
+                px += chip_w + gap;
             }
-            c.fill(box_x, 122.0, box_w, 46.0, 9.5, Color32::from_white_alpha(11));
-            c.stroke(box_x, 122.0, box_w, 46.0, 9.5, 0.8, Color32::from_white_alpha(20));
-            c.circle(box_x + 11.0, 136.0, 3.5, theme::SOFT_GREEN);
-            c.text(box_x + 20.0, 139.5, "全量 AI Agent 钩子与实时窗口/会话探测已就绪", 8.4, W::Semibold, theme::WHITE, H::Left);
-            c.text(box_x + 20.0, 156.5, "快捷键：Ctrl+Alt+Y 允许  ·  Ctrl+Alt+N 拒绝  ·  Ctrl+Alt+T 交回终端", 8.0, W::Regular, theme::GRAY, H::Left);
-            let (r_sim, b_sim) = paint::capsule(c, RIGHT - 66.0, 143.0, 64.0, 18.0, "fly-sim-approve", Color32::from_rgb(37, 99, 235), theme::BTN_HOVER);
-            b_sim.text(RIGHT - 34.0, 155.2, "模拟待审批", 8.0, W::Bold, Color32::WHITE, H::Center);
+            c.text(LEFT, 63.0, title_txt, size::BODY, W::Semibold, theme::WHITE, H::Left);
+            c.text(
+                LEFT,
+                78.0,
+                "在 AI 工具里开始工作后，这里会显示它在做什么",
+                size::TINY,
+                W::Regular,
+                theme::GRAY,
+                H::Left,
+            );
+            c.fill(box_x, 88.0, box_w, 37.0, 9.0, Color32::from_white_alpha(11));
+            c.stroke(box_x, 88.0, box_w, 37.0, 9.0, 0.8, Color32::from_white_alpha(20));
+            c.circle(box_x + 11.0, 99.5, 3.0, theme::SOFT_GREEN);
+            c.text(box_x + 19.0, 103.0, "AI Agent 钩子与实时探测已就绪", 8.4, W::Semibold, theme::WHITE, H::Left);
+            c.text(box_x + 19.0, 117.5, "快捷键：Ctrl+Alt+Y 允许 · Ctrl+Alt+N 拒绝 · Ctrl+Alt+T 终端", 7.8, W::Regular, theme::GRAY, H::Left);
+            let (r_sim, b_sim) = paint::capsule(c, RIGHT - 64.0, 91.5, 62.0, 17.0, "fly-sim-approve", Color32::from_rgb(37, 99, 235), theme::BTN_HOVER);
+            b_sim.text(RIGHT - 33.0, 103.2, "模拟待审批", 7.8, W::Bold, Color32::WHITE, H::Center);
             if r_sim.clicked() {
                 let demo = serde_json::json!({
                     "agent": "workbuddy",
@@ -2363,75 +2385,77 @@ pub fn draw_page(c: &Card, _cmds: &mut Vec<Cmd>) {
                     let _ = std::fs::write(dir.join("workbuddy.json"), &payload);
                 }
             }
+        } else {
+            c.text(LEFT, 75.0, title_txt, size::BODY, W::Semibold, theme::WHITE, H::Left);
+            c.text(
+                LEFT,
+                92.0,
+                "在 AI 工具里开始工作后，这里会显示它在做什么",
+                size::TINY,
+                W::Regular,
+                theme::GRAY,
+                H::Left,
+            );
         }
         return;
     }
-    let any_waiting = !cfg!(test) && cfg.agent_hook_approval && agents.iter().any(|a| a.phase == state::Phase::Waiting);
-    let rows = if any_waiting { agents.len().min(2) } else { agents.len().min(3) };
-    let mut y_cursor = 42.0_f32;
-    for (index, a) in agents.iter().take(rows).enumerate() {
-        let y = y_cursor;
-        // 仅在识别到有需要用户批准的命令/文件操作 (Phase::Waiting) 时按需显示底部三个审批按钮！
+
+    let draw_agent_row = |row_c: &Card, x_base: f32, y: f32, a: &state::Agent, show_divider: bool| {
         let can_approve = !cfg!(test) && cfg.agent_hook_approval && a.phase == state::Phase::Waiting;
-        y_cursor += if can_approve { 68.0 } else { 44.0 };
         let color = phase_color(a.phase);
         let nx = if cfg!(test) {
-            draw_icon(c, &a.key, LEFT, y + 9.5, ICON, color);
-            NX
+            draw_icon(row_c, &a.key, x_base, y + 9.5, ICON, color);
+            x_base + (NX - LEFT)
         } else {
-            // [修复图五 AI 工作图标位置与反相问题]：32x32 圆角容器中心为 (LEFT - 2.0 + 16.0 = 58.0, y + 18.0)，图标严格居中且保持原彩
-            c.fill(LEFT - 2.0, y + 2.0, 32.0, 32.0, 8.0, Color32::from_white_alpha(14));
-            c.stroke(LEFT - 2.0, y + 2.0, 32.0, 32.0, 8.0, 0.9, Color32::from_white_alpha(26));
-            draw_icon(c, &a.key, LEFT + 14.0, y + 18.0, 20.0, color);
-            82.0
+            row_c.fill(x_base - 2.0, y + 2.0, 32.0, 32.0, 8.0, Color32::from_white_alpha(14));
+            row_c.stroke(x_base - 2.0, y + 2.0, 32.0, 32.0, 8.0, 0.9, Color32::from_white_alpha(26));
+            draw_icon(row_c, &a.key, x_base + 14.0, y + 18.0, 20.0, color);
+            x_base + (82.0 - LEFT)
         };
-        let name = c.fit(&a.name, size::BODY, W::Semibold, 150.0);
-        let name_w = c.text(nx, y + 13.5, &name, size::BODY, W::Semibold, theme::WHITE, H::Left);
+        let r_edge = x_base + (RIGHT - LEFT);
+        let name = row_c.fit(&a.name, size::BODY, W::Semibold, 150.0);
+        let name_w = row_c.text(nx, y + 13.5, &name, size::BODY, W::Semibold, theme::WHITE, H::Left);
         let label = a.phase.label();
         let label_color = if a.quiet { theme::GRAY } else { color };
-        c.text(nx + name_w + 7.0, y + 13.5, label, size::TINY, W::Semibold, label_color, H::Left);
+        row_c.text(nx + name_w + 7.0, y + 13.5, label, size::TINY, W::Semibold, label_color, H::Left);
         let show_btn = !can_approve && cfg.return_button && auralsle_ai_status::needs_return(a.phase);
-        let time_right = if show_btn { 306.0 } else { RIGHT };
+        let time_right = if show_btn { r_edge - 74.0 } else { r_edge };
         let time = if a.phase.active() { elapsed_text(a.elapsed) } else { format!("{} 秒前", a.age_secs) };
-        c.text(time_right, y + 13.5, &time, size::TINY, W::Regular, theme::GRAY, H::Right);
+        row_c.text(time_right, y + 13.5, &time, size::TINY, W::Regular, theme::GRAY, H::Right);
 
-        // 第二行：正在做什么 + 实时检测的 AI 任务进度百分比徽章
         let (est_prog, prog_badge) = if cfg!(test) {
             let st = a.step_text();
             (a.progress, st)
         } else {
             estimate_agent_progress(a)
         };
-        let step_w = if prog_badge.is_empty() { 0.0 } else { c.text_w(&prog_badge, size::TINY, W::Semibold) + 12.0 };
-        let doing = c.fit(&a.doing(), size::TINY, W::Regular, time_right - nx - step_w);
-        c.text(nx, y + 28.0, &doing, size::TINY, W::Regular, theme::GRAY, H::Left);
+        let step_w = if prog_badge.is_empty() { 0.0 } else { row_c.text_w(&prog_badge, size::TINY, W::Semibold) + 12.0 };
+        let doing = row_c.fit(&a.doing(), size::TINY, W::Regular, time_right - nx - step_w);
+        row_c.text(nx, y + 28.0, &doing, size::TINY, W::Regular, theme::GRAY, H::Left);
         if !prog_badge.is_empty() {
-            c.text(time_right, y + 28.0, &prog_badge, size::TINY, W::Semibold, color, H::Right);
+            row_c.text(time_right, y + 28.0, &prog_badge, size::TINY, W::Semibold, color, H::Right);
         }
 
-        // 第三行：全宽流光进度条
         let draw_bar = if cfg!(test) { a.progress >= 0.0 } else { est_prog >= 0.0 };
         if draw_bar {
-            let w = RIGHT - nx;
+            let w = r_edge - nx;
             let bar_h = if cfg!(test) { 2.0 } else { 3.5 };
-            c.fill(nx, y + 35.0, w, bar_h, bar_h * 0.5, Color32::from_white_alpha(20));
+            row_c.fill(nx, y + 35.0, w, bar_h, bar_h * 0.5, Color32::from_white_alpha(20));
             let filled = (w * est_prog.clamp(0.0, 1.0)).max(2.0);
-            c.fill(nx, y + 35.0, filled, bar_h, bar_h * 0.5, color);
-        } else if index + 1 < rows {
-            c.seg((nx, y + 36.0), (RIGHT, y + 36.0), 1.0, Color32::from_white_alpha(12));
+            row_c.fill(nx, y + 35.0, filled, bar_h, bar_h * 0.5, color);
+        } else if show_divider {
+            row_c.seg((nx, y + 36.0), (r_edge, y + 36.0), 1.0, Color32::from_white_alpha(12));
         }
 
-        let row = c
-            .hit(42.0, y, 340.0, 36.0, format!("ai-status-row-{}", a.key))
-            .on_hover_text(format!("打开 {}
-{}", a.name, a.doing()));
+        let row = row_c
+            .hit(x_base - 2.0, y, 340.0, 36.0, format!("ai-status-row-{}", a.key))
+            .on_hover_text(format!("打开 {}\n{}", a.name, a.doing()));
         if row.clicked() {
-            launch(c.ui.ctx(), &a.key);
+            launch(row_c.ui.ctx(), &a.key);
         }
 
-        // 第四行（图二下方红框处 y + 43.0）：紧挨进度条下方并排放置「允许 / 拒绝 / 交回终端」三个 Shadcn 风格按钮，纯矢量图标无乱码方框
         if can_approve {
-            let ctx = c.ui.ctx();
+            let ctx = row_c.ui.ctx();
             let mut decision: Option<&'static str> = None;
             ctx.input(|i| {
                 if i.modifiers.ctrl && i.modifiers.alt {
@@ -2454,9 +2478,8 @@ pub fn draw_page(c: &Card, _cmds: &mut Vec<Cmd>) {
             let deny_bg = if is_waiting { Color32::from_rgb(220, 38, 38) } else { Color32::from_rgba_unmultiplied(239, 68, 68, 44) };
             let term_bg = Color32::from_rgba_unmultiplied(59, 130, 246, 52);
 
-            // 1) 允许按钮 (x = nx)
             let x1 = nx;
-            let (r_allow, b_allow) = paint::capsule(c, x1, btn_y, btn_w, btn_h, &format!("ai-approve-allow-{}", a.key), allow_bg, Color32::from_rgb(16, 185, 129));
+            let (r_allow, b_allow) = paint::capsule(row_c, x1, btn_y, btn_w, btn_h, &format!("ai-approve-allow-{}", a.key), allow_bg, Color32::from_rgb(16, 185, 129));
             b_allow.stroke(x1, btn_y, btn_w, btn_h, btn_h * 0.5, 0.85, Color32::from_rgba_unmultiplied(52, 211, 153, 120));
             paint::check(&b_allow, x1 + 17.0, btn_y + btn_h * 0.5, 6.5, 1.0, 1.4, Color32::WHITE);
             b_allow.text(x1 + btn_w * 0.5 + 5.0, btn_y + 14.5, "允许 (Y)", 9.0, W::Bold, Color32::WHITE, H::Center);
@@ -2464,9 +2487,8 @@ pub fn draw_page(c: &Card, _cmds: &mut Vec<Cmd>) {
                 decision = Some("allow");
             }
 
-            // 2) 拒绝按钮 (x = nx + btn_w + gap)
             let x2 = nx + btn_w + gap;
-            let (r_deny, b_deny) = paint::capsule(c, x2, btn_y, btn_w, btn_h, &format!("ai-approve-deny-{}", a.key), deny_bg, Color32::from_rgb(220, 38, 38));
+            let (r_deny, b_deny) = paint::capsule(row_c, x2, btn_y, btn_w, btn_h, &format!("ai-approve-deny-{}", a.key), deny_bg, Color32::from_rgb(220, 38, 38));
             b_deny.stroke(x2, btn_y, btn_w, btn_h, btn_h * 0.5, 0.85, Color32::from_rgba_unmultiplied(248, 113, 113, 120));
             paint::close(&b_deny, x2 + 17.0, btn_y + btn_h * 0.5, 2.7, Color32::WHITE);
             b_deny.text(x2 + btn_w * 0.5 + 5.0, btn_y + 14.5, "拒绝 (N)", 9.0, W::Bold, Color32::WHITE, H::Center);
@@ -2474,11 +2496,9 @@ pub fn draw_page(c: &Card, _cmds: &mut Vec<Cmd>) {
                 decision = Some("deny");
             }
 
-            // 3) 交回终端按钮 (x = nx + (btn_w + gap) * 2)
             let x3 = nx + (btn_w + gap) * 2.0;
-            let (r_term, b_term) = paint::capsule(c, x3, btn_y, btn_w, btn_h, &format!("ai-approve-term-{}", a.key), term_bg, Color32::from_rgb(59, 130, 246));
+            let (r_term, b_term) = paint::capsule(row_c, x3, btn_y, btn_w, btn_h, &format!("ai-approve-term-{}", a.key), term_bg, Color32::from_rgb(59, 130, 246));
             b_term.stroke(x3, btn_y, btn_w, btn_h, btn_h * 0.5, 0.85, Color32::from_rgba_unmultiplied(96, 165, 250, 130));
-            // 纯矢量终端 >_ 图标
             let tx_ic = x3 + 13.0;
             let ty_ic = btn_y + btn_h * 0.5;
             b_term.seg((tx_ic, ty_ic - 2.6), (tx_ic + 3.0, ty_ic), 1.3, Color32::WHITE);
@@ -2487,7 +2507,7 @@ pub fn draw_page(c: &Card, _cmds: &mut Vec<Cmd>) {
             b_term.text(x3 + btn_w * 0.5 + 6.0, btn_y + 14.5, "交回终端", 9.0, W::Bold, Color32::WHITE, H::Center);
             if r_term.clicked() {
                 decision = Some("terminal");
-                launch(c.ui.ctx(), &a.key);
+                launch(row_c.ui.ctx(), &a.key);
             }
 
             if let Some(dec) = decision {
@@ -2495,8 +2515,8 @@ pub fn draw_page(c: &Card, _cmds: &mut Vec<Cmd>) {
             }
         } else if show_btn {
             let (r, b) = paint::capsule(
-                c,
-                314.0,
+                row_c,
+                r_edge - 66.0,
                 y + 1.0,
                 64.0,
                 20.0,
@@ -2504,13 +2524,63 @@ pub fn draw_page(c: &Card, _cmds: &mut Vec<Cmd>) {
                 theme::BTN,
                 theme::BTN_HOVER,
             );
-            b.text(346.0, y + 14.5, "回到 AI", size::TINY, W::Semibold, theme::WHITE, H::Center);
+            b.text(r_edge - 34.0, y + 14.5, "回到 AI", size::TINY, W::Semibold, theme::WHITE, H::Center);
             if r.on_hover_text(format!("回到 {}", a.name)).clicked() {
-                launch(c.ui.ctx(), &a.key);
+                launch(row_c.ui.ctx(), &a.key);
             }
         }
+    };
+
+    if !cfg!(test) && agents.len() >= 2 {
+        let list_x = LEFT - 6.0;
+        let list_y = 38.0;
+        let list_w = (RIGHT - LEFT) + 16.0;
+        let list_h = 200.0;
+        let area_rect = c.rect(list_x, list_y, list_w, list_h);
+        let mut content = egui::Ui::new(
+            c.ui.ctx().clone(),
+            egui::Id::new(("ai-agents-list", c.live)),
+            egui::UiBuilder::new()
+                .max_rect(area_rect)
+                .layer_id(c.painter.layer_id())
+                .style(c.ui.style().clone()),
+        );
+        content.set_clip_rect(area_rect.intersect(c.painter.clip_rect()));
+        content.set_opacity(c.painter.opacity());
+        if !c.live {
+            content.disable();
+        }
+        content.spacing_mut().item_spacing.y = 4.0;
+        content.spacing_mut().scroll.floating = true;
+        content.spacing_mut().scroll.bar_width = 3.5 * c.s;
+        content.spacing_mut().scroll.bar_inner_margin = 2.0 * c.s;
+        egui::ScrollArea::vertical()
+            .id_salt("ai-status-agents-scroll")
+            .max_height(list_h * c.s)
+            .auto_shrink([false, false])
+            .show(&mut content, |ui| {
+                for (idx, a) in agents.iter().enumerate() {
+                    let can_approve = cfg.agent_hook_approval && a.phase == state::Phase::Waiting;
+                    let row_h = if can_approve { 68.0 } else { 44.0 };
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2((RIGHT - LEFT + 8.0) * c.s, row_h * c.s), egui::Sense::hover());
+                    let mut row_c = Card::new(ui, rect.min, ui.clip_rect());
+                    row_c.s = c.s;
+                    row_c.live = c.live;
+                    draw_agent_row(&row_c, 6.0, 0.0, a, idx + 1 < agents.len());
+                }
+            });
+        return;
     }
-    if agents.len() > rows {
+
+    let any_waiting = !cfg!(test) && cfg.agent_hook_approval && agents.iter().any(|a| a.phase == state::Phase::Waiting);
+    let rows = if any_waiting { agents.len().min(2) } else { agents.len().min(3) };
+    let mut y_cursor = 42.0_f32;
+    for (index, a) in agents.iter().take(rows).enumerate() {
+        let can_approve = !cfg!(test) && cfg.agent_hook_approval && a.phase == state::Phase::Waiting;
+        draw_agent_row(c, LEFT, y_cursor, a, index + 1 < rows);
+        y_cursor += if can_approve { 68.0 } else { 44.0 };
+    }
+    if cfg!(test) && agents.len() > rows {
         c.text(
             NX,
             44.0 + rows as f32 * 42.0 + 2.0,
@@ -2746,7 +2816,7 @@ pub fn draw_pill_settings(ui: &mut egui::Ui) {
         } else {
             avail_w
         };
-        let card_h = 84.0_f32;
+        let card_h = 90.0_f32;
         let rows = (4usize + per_row - 1) / per_row;
         let stage_h = rows as f32 * card_h + (rows as f32 - 1.0) * gap;
         let (stage_r, _) = ui.allocate_exact_size(egui::vec2(avail_w, stage_h), egui::Sense::hover());
@@ -2800,23 +2870,23 @@ pub fn draw_pill_settings(ui: &mut egui::Ui) {
             let hovered = hit.hovered();
             let card_bg = if dark {
                 if selected {
-                    Color32::from_rgb(38, 44, 56)
+                    Color32::from_rgb(0x2B, 0x33, 0x42)
                 } else if hovered {
-                    Color32::from_rgb(36, 38, 45)
+                    Color32::from_rgb(0x2B, 0x2C, 0x31)
                 } else {
-                    Color32::from_rgb(30, 31, 36)
+                    Color32::from_rgb(0x23, 0x24, 0x28)
                 }
             } else if selected {
-                Color32::from_rgb(236, 243, 255)
+                Color32::from_rgb(0xEA, 0xF1, 0xFD)
             } else if hovered {
-                Color32::from_rgb(245, 246, 250)
+                Color32::from_rgb(0xF5, 0xF6, 0xFA)
             } else {
-                Color32::from_rgb(252, 253, 255)
+                Color32::from_rgb(0xFA, 0xFB, 0xFE)
             };
             let card_stroke = if selected {
                 acc
             } else if dark {
-                if hovered { Color32::from_gray(96) } else { Color32::from_rgb(52, 54, 62) }
+                if hovered { Color32::from_gray(96) } else { Color32::from_rgb(0x36, 0x37, 0x3F) }
             } else if hovered {
                 Color32::from_rgb(180, 188, 204)
             } else {
@@ -2824,28 +2894,41 @@ pub fn draw_pill_settings(ui: &mut egui::Ui) {
             };
             let title_col = if dark { Color32::WHITE } else { Color32::from_rgb(24, 26, 32) };
             let sub_col = if dark { Color32::from_gray(165) } else { Color32::from_gray(95) };
-            let hint_col = if dark { Color32::from_gray(138) } else { Color32::from_gray(115) };
+            let hint_col = if dark { Color32::from_gray(160) } else { Color32::from_gray(105) };
             stage_card.fill(cx, cy, card_w, card_h, 8.0, card_bg);
-            stage_card.stroke(cx, cy, card_w, card_h, 8.0, if selected { 1.4 } else { 1.0 }, card_stroke);
+            stage_card.stroke(cx, cy, card_w, card_h, 8.0, if selected { 1.5 } else { 1.0 }, card_stroke);
 
-            // 头部样式名 + 当前选中胶囊徽标 + 一句视觉特点
+            // 头部样式名 + 统一胶囊徽标 + 描述
             stage_card.text(cx + 12.0, cy + 20.0, st_name, 12.0, W::Bold, title_col, H::Left);
-            if selected {
-                let tag_w = 42.0_f32;
-                let tag_x = cx + card_w - tag_w - 10.0;
-                stage_card.fill(tag_x, cy + 9.0, tag_w, 16.0, 8.0, acc);
-                stage_card.text(tag_x + tag_w * 0.5, cy + 20.0, "当前", 9.0, W::Bold, Color32::WHITE, H::Center);
+            let tag_w = 44.0_f32;
+            let tag_x = cx + card_w - tag_w - 10.0;
+            let tag_bg = if selected {
+                acc
+            } else if dark {
+                Color32::from_rgb(0x33, 0x35, 0x3C)
             } else {
-                stage_card.text(cx + card_w - 10.0, cy + 20.0, &format!("方案 {}", idx + 1), 9.5, W::Regular, hint_col, H::Right);
-            }
+                Color32::from_rgb(0xE8, 0xEB, 0xF2)
+            };
+            let tag_fg = if selected { Color32::WHITE } else { hint_col };
+            stage_card.fill(tag_x, cy + 8.5, tag_w, 16.0, 8.0, tag_bg);
+            let tag_txt = if selected { "当前".to_owned() } else { format!("方案{}", idx + 1) };
+            stage_card.text(
+                tag_x + tag_w * 0.5,
+                cy + 19.5,
+                &tag_txt,
+                9.0,
+                if selected { W::Bold } else { W::Regular },
+                tag_fg,
+                H::Center,
+            );
             let desc = style_descs[idx];
             let fit_desc = stage_card.fit(desc, 10.0, W::Regular, (card_w - 24.0).max(80.0));
-            stage_card.text(cx + 12.0, cy + 35.0, &fit_desc, 10.0, W::Regular, sub_col, H::Left);
+            stage_card.text(cx + 12.0, cy + 36.0, &fit_desc, 10.0, W::Regular, sub_col, H::Left);
 
-            // 下半部真实桌面胶囊预览（与主岛统一 14px 圆角与磨砂玻璃质地）
-            let pill_w = (card_w - 24.0).min(126.0).max(96.0);
+            // 下半部真实桌面胶囊预览（Fluent 居中舞台槽）
+            let pill_w = (card_w - 24.0).min(132.0).max(96.0);
             let px = cx + (card_w - pill_w) * 0.5;
-            let py = cy + 44.0;
+            let py = cy + 48.0;
             let pr = pill_style_corner_radius(st_id, DEVICE_PILL_STD_H);
             stage_card.fill(px, py, pill_w, DEVICE_PILL_STD_H, pr, Color32::from_rgba_unmultiplied(20, 23, 30, 235));
             stage_card.vgrad(

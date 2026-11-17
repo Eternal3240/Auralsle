@@ -314,11 +314,19 @@ pub struct Config {
     pub clip_notes: Vec<(String, String)>,
     pub todo_sub_tab: u8,
     pub nav_bar_style: u8,
+    /// 页面指示点悬浮页名位置：0 = 指示点正上方（预留底距），1 = 底栏右侧留白区
+    pub nav_badge_pos: u8,
     pub pet_user_configured: bool,
     pub minimal_pill_width: u8,
     pub custom_font_path: String,
     /// 极简药丸状态下，来消息时在右侧显示与药丸等高缩略的未读消息悬浮球（点击或展开药丸时丝滑过渡放大）。
     pub minimal_pill_msg_badge: bool,
+    /// 收起态胶囊/刘海是否显示音乐频谱与歌词。
+    pub pill_show_music: bool,
+    /// 收起态胶囊/刘海是否显示番茄专注计时。
+    pub pill_show_focus: bool,
+    /// 收起态胶囊/刘海是否显示 AI 额度进度条。
+    pub pill_show_quota: bool,
     /// 识别到复制文本后，是否在 N 秒内打开岛默认第一展开剪贴板。
     pub copy_auto_open_clipboard: bool,
     /// 识别到复制文本后默认优先展开剪贴板的有效时间窗口（秒，默认 10 秒）。
@@ -387,6 +395,23 @@ pub struct Config {
     pub mod_widgets_sysmon_enabled: bool,
     pub mod_weather_translate_enabled: bool,
     pub mod_display_bt_enabled: bool,
+    /// 细分功能模块独立开关（由「功能模块」页单独控制启停）
+    pub mod_focus_enabled: bool,
+    pub mod_health_enabled: bool,
+    pub mod_shelf_enabled: bool,
+    pub mod_clipboard_enabled: bool,
+    pub mod_mail_enabled: bool,
+    pub mod_calendar_enabled: bool,
+    pub mod_course_enabled: bool,
+    pub mod_ai_status_enabled: bool,
+    pub mod_ai_quota_enabled: bool,
+    pub mod_weather_enabled: bool,
+    pub mod_translate_enabled: bool,
+    pub mod_display_brightness_enabled: bool,
+    pub mod_bt_devices_enabled: bool,
+    /// 是否开启后台定时自动检查更新，以及检查周期（小时）。
+    pub auto_check_updates: bool,
+    pub update_check_interval_hours: u32,
 }
 
 impl Default for Config {
@@ -502,7 +527,7 @@ impl Default for Config {
             plugin_show_sub: true,
             plugin_show_bar: true,
             plugin_sizes: vec![0; 34],
-            gpu_backend: 0,
+            gpu_backend: 2,
             battery_style: 0,
             wechat_read_content: true,
             wechat_camera_guard: false,
@@ -539,10 +564,14 @@ impl Default for Config {
             clip_notes: Vec::new(),
             todo_sub_tab: 0,
             nav_bar_style: 2,
+            nav_badge_pos: 1,
             pet_user_configured: false,
             minimal_pill_width: 62,
             custom_font_path: String::new(),
             minimal_pill_msg_badge: true,
+            pill_show_music: true,
+            pill_show_focus: true,
+            pill_show_quota: true,
             copy_auto_open_clipboard: true,
             copy_auto_open_secs: 10,
             plugin_ui_mode: 0,
@@ -580,6 +609,21 @@ impl Default for Config {
             mod_widgets_sysmon_enabled: true,
             mod_weather_translate_enabled: true,
             mod_display_bt_enabled: true,
+            mod_focus_enabled: true,
+            mod_health_enabled: true,
+            mod_shelf_enabled: true,
+            mod_clipboard_enabled: true,
+            mod_mail_enabled: true,
+            mod_calendar_enabled: true,
+            mod_course_enabled: true,
+            mod_ai_status_enabled: true,
+            mod_ai_quota_enabled: true,
+            mod_weather_enabled: true,
+            mod_translate_enabled: true,
+            mod_display_brightness_enabled: true,
+            mod_bt_devices_enabled: true,
+            auto_check_updates: true,
+            update_check_interval_hours: 24,
         }
     }
 }
@@ -907,10 +951,14 @@ impl Config {
             }).unwrap_or_default(),
             todo_sub_tab: i64_or(field(&v, "todo_sub_tab"), d.todo_sub_tab as i64).clamp(0, 2) as u8,
             nav_bar_style: i64_or(field(&v, "nav_bar_style"), d.nav_bar_style as i64).clamp(1, 2) as u8,
+            nav_badge_pos: i64_or(field(&v, "nav_badge_pos"), d.nav_badge_pos as i64).clamp(0, 1) as u8,
             pet_user_configured: bool_or(field(&v, "pet_user_configured"), d.pet_user_configured),
             minimal_pill_width: i64_or(field(&v, "minimal_pill_width"), d.minimal_pill_width as i64).clamp(48, 128) as u8,
             custom_font_path: str_or(field(&v, "custom_font_path"), &d.custom_font_path),
             minimal_pill_msg_badge: bool_or(field(&v, "minimal_pill_msg_badge"), d.minimal_pill_msg_badge),
+            pill_show_music: bool_or(field(&v, "pill_show_music"), d.pill_show_music),
+            pill_show_focus: bool_or(field(&v, "pill_show_focus"), d.pill_show_focus),
+            pill_show_quota: bool_or(field(&v, "pill_show_quota"), d.pill_show_quota),
             copy_auto_open_clipboard: bool_or(field(&v, "copy_auto_open_clipboard"), d.copy_auto_open_clipboard),
             copy_auto_open_secs: i64_or(field(&v, "copy_auto_open_secs"), d.copy_auto_open_secs as i64).clamp(1, 60) as u32,
             plugin_ui_mode: i64_or(field(&v, "plugin_ui_mode"), d.plugin_ui_mode as i64).clamp(0, 1) as u8,
@@ -1027,6 +1075,21 @@ impl Config {
             mod_widgets_sysmon_enabled: bool_or(field(&v, "mod_widgets_sysmon_enabled"), d.mod_widgets_sysmon_enabled),
             mod_weather_translate_enabled: bool_or(field(&v, "mod_weather_translate_enabled"), d.mod_weather_translate_enabled),
             mod_display_bt_enabled: bool_or(field(&v, "mod_display_bt_enabled"), d.mod_display_bt_enabled),
+            mod_focus_enabled: bool_or(field(&v, "mod_focus_enabled"), bool_or(field(&v, "mod_focus_health_enabled"), true)),
+            mod_health_enabled: bool_or(field(&v, "mod_health_enabled"), bool_or(field(&v, "mod_focus_health_enabled"), true)),
+            mod_shelf_enabled: bool_or(field(&v, "mod_shelf_enabled"), bool_or(field(&v, "mod_shelf_clipboard_enabled"), true)),
+            mod_clipboard_enabled: bool_or(field(&v, "mod_clipboard_enabled"), bool_or(field(&v, "mod_shelf_clipboard_enabled"), true)),
+            mod_mail_enabled: bool_or(field(&v, "mod_mail_enabled"), bool_or(field(&v, "mod_mail_calendar_enabled"), true)),
+            mod_calendar_enabled: bool_or(field(&v, "mod_calendar_enabled"), bool_or(field(&v, "mod_mail_calendar_enabled"), true)),
+            mod_course_enabled: bool_or(field(&v, "mod_course_enabled"), true),
+            mod_ai_status_enabled: bool_or(field(&v, "mod_ai_status_enabled"), bool_or(field(&v, "mod_ai_suite_enabled"), true)),
+            mod_ai_quota_enabled: bool_or(field(&v, "mod_ai_quota_enabled"), bool_or(field(&v, "mod_ai_suite_enabled"), true)),
+            mod_weather_enabled: bool_or(field(&v, "mod_weather_enabled"), bool_or(field(&v, "mod_weather_translate_enabled"), true)),
+            mod_translate_enabled: bool_or(field(&v, "mod_translate_enabled"), bool_or(field(&v, "mod_weather_translate_enabled"), true)),
+            mod_display_brightness_enabled: bool_or(field(&v, "mod_display_brightness_enabled"), bool_or(field(&v, "mod_display_bt_enabled"), true)),
+            mod_bt_devices_enabled: bool_or(field(&v, "mod_bt_devices_enabled"), bool_or(field(&v, "mod_display_bt_enabled"), true)),
+            auto_check_updates: bool_or(field(&v, "auto_check_updates"), d.auto_check_updates),
+            update_check_interval_hours: i64_or(field(&v, "update_check_interval_hours"), d.update_check_interval_hours as i64).clamp(1, 720) as u32,
         }
     }
 
@@ -1108,10 +1171,14 @@ impl Config {
             head.insert("clip_notes".to_owned(), Value::Object(self.clip_notes.iter().map(|(k, val)| (k.clone(), Value::String(val.clone()))).collect()));
             head.insert("todo_sub_tab".to_owned(), json!(self.todo_sub_tab));
             head.insert("nav_bar_style".to_owned(), json!(self.nav_bar_style));
+            head.insert("nav_badge_pos".to_owned(), json!(self.nav_badge_pos));
             head.insert("pet_user_configured".to_owned(), json!(self.pet_user_configured));
             head.insert("minimal_pill_width".to_owned(), json!(self.minimal_pill_width));
             head.insert("custom_font_path".to_owned(), json!(self.custom_font_path));
             head.insert("minimal_pill_msg_badge".to_owned(), json!(self.minimal_pill_msg_badge));
+            head.insert("pill_show_music".to_owned(), json!(self.pill_show_music));
+            head.insert("pill_show_focus".to_owned(), json!(self.pill_show_focus));
+            head.insert("pill_show_quota".to_owned(), json!(self.pill_show_quota));
             head.insert("copy_auto_open_clipboard".to_owned(), json!(self.copy_auto_open_clipboard));
             head.insert("copy_auto_open_secs".to_owned(), json!(self.copy_auto_open_secs));
             head.insert("plugin_ui_mode".to_owned(), json!(self.plugin_ui_mode));
@@ -1180,6 +1247,21 @@ impl Config {
             head.insert("mod_widgets_sysmon_enabled".to_owned(), json!(self.mod_widgets_sysmon_enabled));
             head.insert("mod_weather_translate_enabled".to_owned(), json!(self.mod_weather_translate_enabled));
             head.insert("mod_display_bt_enabled".to_owned(), json!(self.mod_display_bt_enabled));
+            head.insert("mod_focus_enabled".to_owned(), json!(self.mod_focus_enabled));
+            head.insert("mod_health_enabled".to_owned(), json!(self.mod_health_enabled));
+            head.insert("mod_shelf_enabled".to_owned(), json!(self.mod_shelf_enabled));
+            head.insert("mod_clipboard_enabled".to_owned(), json!(self.mod_clipboard_enabled));
+            head.insert("mod_mail_enabled".to_owned(), json!(self.mod_mail_enabled));
+            head.insert("mod_calendar_enabled".to_owned(), json!(self.mod_calendar_enabled));
+            head.insert("mod_course_enabled".to_owned(), json!(self.mod_course_enabled));
+            head.insert("mod_ai_status_enabled".to_owned(), json!(self.mod_ai_status_enabled));
+            head.insert("mod_ai_quota_enabled".to_owned(), json!(self.mod_ai_quota_enabled));
+            head.insert("mod_weather_enabled".to_owned(), json!(self.mod_weather_enabled));
+            head.insert("mod_translate_enabled".to_owned(), json!(self.mod_translate_enabled));
+            head.insert("mod_display_brightness_enabled".to_owned(), json!(self.mod_display_brightness_enabled));
+            head.insert("mod_bt_devices_enabled".to_owned(), json!(self.mod_bt_devices_enabled));
+            head.insert("auto_check_updates".to_owned(), json!(self.auto_check_updates));
+            head.insert("update_check_interval_hours".to_owned(), json!(self.update_check_interval_hours));
             head.insert("border_effect".to_owned(), json!(self.border_effect));
             head.insert("border_plays_on".to_owned(), json!(self.border_plays_on));
             head.insert("border_interval".to_owned(), json!(self.border_interval));

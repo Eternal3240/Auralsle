@@ -1,5 +1,8 @@
 name: SignPath 发布签名与打包
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -28,7 +31,15 @@ jobs:
         shell: pwsh
         run: |
           $ver = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "([^"]+)"').Groups[1].Value
-          $tag = if ("${{ github.event_name }}" -eq "release") { "${{ github.event.release.tag_name }}" } elseif ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v$ver" }
+          $tag = if ("${{ github.event_name }}" -eq "release") {
+            "${{ github.event.release.tag_name }}"
+          } elseif ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}") {
+            "${{ github.ref_name }}"
+          } elseif ("${{ inputs.tag }}") {
+            "${{ inputs.tag }}"
+          } else {
+            "v$ver"
+          }
           "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: 安装 Rust stable
@@ -117,11 +128,14 @@ jobs:
           github-artifact-id: '${{ needs.package-installer.outputs.setup-artifact-id }}'
           wait-for-completion: true
           output-artifact-directory: '${{ github.workspace }}/signed-setup'
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: signed-portable-zip
           path: '${{ github.workspace }}/release-assets'
-      - name: 汇总签名产物并更新 GitHub Release
+      - name: 提取更新日志并发布 GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.build-unsigned-exe.outputs.tag }}
@@ -130,8 +144,78 @@ jobs:
           cp "${{ github.workspace }}/signed-setup/AuraIsle-Setup-v${VER}-x64.exe" "${{ github.workspace }}/release-assets/"
           cd "${{ github.workspace }}/release-assets"
           sha256sum "AuraIsle-Setup-v${VER}-x64.exe" "AuraIsle-v${VER}-windows-x64.zip" > SHA256SUMS.txt
+
+          python3 - "$TAG" "${{ github.workspace }}/CHANGELOG.md" > release-notes.md <<'PY'
+          import re, sys
+          tag, path = sys.argv[1], sys.argv[2]
+          try:
+              text = open(path, encoding="utf-8").read()
+              m = re.search(rf"(?ms)^##\s+{re.escape(tag)}\b.*?(?=^##\s+|\Z)", text)
+              body = m.group(0).strip() if m else f"灵屿 AuraIsle {tag}"
+          except Exception:
+              body = f"灵屿 AuraIsle {tag}"
+          print(body)
+          PY
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "灵屿 AuraIsle $TAG" --notes-file release-notes.md
+          else
+            gh release create "$TAG" --title "灵屿 AuraIsle $TAG" --notes-file release-notes.md
+          fi
           gh release upload "$TAG" \
             "AuraIsle-Setup-v${VER}-x64.exe" \
             "AuraIsle-v${VER}-windows-x64.zip" \
             "SHA256SUMS.txt" \
             --clobber
+      - name: 同步代码与 Release 至 Gitee
+        if: ${{ secrets.GITEE_TOKEN != '' }}
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_REPO: ${{ vars.GITEE_REPO || 'Tang1727/auralsle' }}
+          TAG: ${{ needs.build-unsigned-exe.outputs.tag }}
+          VER: ${{ needs.build-unsigned-exe.outputs.version }}
+        run: |
+          set -euo pipefail
+          git push "https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_REPO}.git" "HEAD:refs/heads/main" "refs/tags/${TAG}:refs/tags/${TAG}" --force
+
+          cd "${{ github.workspace }}/release-assets"
+          REL_ID=$(python3 - "$GITEE_REPO" "$GITEE_TOKEN" "$TAG" <<'PY'
+          import json, sys, urllib.request, urllib.error, urllib.parse
+          repo, token, tag = sys.argv[1], sys.argv[2], sys.argv[3]
+          notes = open("release-notes.md", encoding="utf-8").read().strip() or f"灵屿 AuraIsle {tag}"
+          base = f"https://gitee.com/api/v5/repos/{repo}/releases"
+          q = urllib.parse.urlencode({"access_token": token})
+          rel_id = None
+          try:
+              with urllib.request.urlopen(f"{base}/tags/{urllib.parse.quote(tag)}?{q}") as r:
+                  rel_id = json.loads(r.read().decode()).get("id")
+          except urllib.error.HTTPError as e:
+              if e.code != 404:
+                  raise
+          if rel_id is None:
+              data = urllib.parse.urlencode({
+                  "access_token": token,
+                  "tag_name": tag,
+                  "name": f"灵屿 AuraIsle {tag}",
+                  "body": notes,
+                  "target_commitish": "main",
+              }).encode()
+              req = urllib.request.Request(base, data=data, method="POST")
+              with urllib.request.urlopen(req) as r:
+                  rel_id = json.loads(r.read().decode())["id"]
+          print(rel_id)
+          PY
+          )
+
+          ATTACH_JSON=$(curl -fsSL "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases/${REL_ID}/attach_files?access_token=${GITEE_TOKEN}")
+          for f in "AuraIsle-Setup-v${VER}-x64.exe" "AuraIsle-v${VER}-windows-x64.zip" "SHA256SUMS.txt"; do
+            OLD_IDS=$(python3 -c 'import json,sys; fname=sys.argv[1]; items=json.load(sys.stdin); print(" ".join(str(x["id"]) for x in items if x.get("name")==fname))' "$f" <<< "$ATTACH_JSON")
+            for oid in $OLD_IDS; do
+              curl -fsSL -X DELETE "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases/${REL_ID}/attach_files/${oid}?access_token=${GITEE_TOKEN}" >/dev/null
+            done
+            curl -fsSL -X POST \
+              -F "access_token=${GITEE_TOKEN}" \
+              -F "file=@${f}" \
+              "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases/${REL_ID}/attach_files" >/dev/null
+          done
+          echo "已同步发布至 Gitee Release: https://gitee.com/${GITEE_REPO}/releases/tag/${TAG}"

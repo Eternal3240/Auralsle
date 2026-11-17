@@ -168,7 +168,6 @@ jobs:
             "SHA256SUMS.txt" \
             --clobber
       - name: 同步代码与 Release 至 Gitee
-        if: ${{ secrets.GITEE_TOKEN != '' }}
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_REPO: ${{ vars.GITEE_REPO || 'Tang1727/auralsle' }}
@@ -176,6 +175,10 @@ jobs:
           VER: ${{ needs.build-unsigned-exe.outputs.version }}
         run: |
           set -euo pipefail
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "::warning::未配置 GITEE_TOKEN Secret，已跳过同步 Gitee Release。"
+            exit 0
+          fi
           git push "https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_REPO}.git" "HEAD:refs/heads/main" "refs/tags/${TAG}:refs/tags/${TAG}" --force
 
           cd "${{ github.workspace }}/release-assets"

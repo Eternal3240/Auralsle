@@ -96,9 +96,9 @@ pub fn set_compact_tail(width: f32) {
     COMPACT_TAIL_BITS.store(width.max(0.0).to_bits(), Ordering::Relaxed);
 }
 pub fn compact_tail() -> f32 { f32::from_bits(COMPACT_TAIL_BITS.load(Ordering::Relaxed)) }
-/// 未读区需要的宽度（含与左侧控件的间距），`icons` = 同屏最多两个来源。
+/// 未读与健康徽章区需要的宽度（含与左侧控件的间距）。
 pub fn compact_tail_width(icons: usize) -> f32 {
-    if icons == 0 { 0.0 } else { COMPACT_UNREAD_W + COMPACT_UNREAD_GAP + COMPACT_UNREAD_STEP * (icons.min(2) as f32 - 1.0) }
+    if icons == 0 { 0.0 } else { COMPACT_UNREAD_W + COMPACT_UNREAD_GAP + COMPACT_UNREAD_STEP * (icons as f32 - 1.0) }
 }
 /// 图标中心 y：与状态文字的光学中心对齐。
 pub const ICON_CY: f32 = 15.8;

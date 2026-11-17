@@ -1,5 +1,13 @@
 # 更新记录
 
+## v2.2.5
+
+- **收起态胶囊徽章布局修复**：
+  - 修复在收起态大胶囊中开启喝水/久坐等健康提醒微标时，`compact_tail_width` 未计入健康提醒徽章宽度导致水杯图标与右侧天气温度（如 `14°`）重叠的问题，并为多未读来源与健康徽章共存时预留完整尾部空间。
+- **GitHub Actions 与 Gitee 同步发布修复**：
+  - 修复 GitHub Actions 发布工作流在构建未签名安装包前未预拉取 Cargo 依赖（导致 `--offline` 构建报 `no matching package named base64` 失败）的问题。
+  - 将 Gitee Release 同步步骤改为原生 PowerShell 实现，避免 Windows Runner 上 `python3` 环境差异导致的同步中断。
+
 ## v2.2.1
 
 - **岛体布局与交互体验全面优化**：

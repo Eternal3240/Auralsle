@@ -42,6 +42,8 @@ jobs:
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: 安装 Rust stable
         run: rustup toolchain install stable --profile minimal
+      - name: 预拉取 Cargo 依赖
+        run: cargo +stable fetch --locked --target x86_64-pc-windows-msvc
       - name: 构建未签名安装包与便携版
         shell: pwsh
         run: |
@@ -77,58 +79,57 @@ jobs:
           }
           gh release upload $TAG $setup $zip $sums --clobber
       - name: 同步代码与 Release 至 Gitee
-        shell: bash
+        shell: pwsh
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_REPO: ${{ vars.GITEE_REPO || 'Tang1727/auralsle' }}
           TAG: ${{ steps.meta.outputs.tag }}
           VER: ${{ steps.meta.outputs.version }}
         run: |
-          set -euo pipefail
-          if [ -z "$GITEE_TOKEN" ]; then
-            echo "::warning::未配置 GITEE_TOKEN Secret，已跳过同步 Gitee Release。"
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:GITEE_TOKEN) {
+            Write-Warning "未配置 GITEE_TOKEN Secret，已跳过同步 Gitee Release。"
             exit 0
-          fi
-          git push "https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_REPO}.git" "HEAD:refs/heads/main" "refs/tags/${TAG}:refs/tags/${TAG}" --force
+          }
+          $remote = "https://oauth2:$($env:GITEE_TOKEN)@gitee.com/$($env:GITEE_REPO).git"
+          git push $remote "HEAD:refs/heads/main" "refs/tags/$($env:TAG):refs/tags/$($env:TAG)" --force
+          if ($LASTEXITCODE -ne 0) { throw "推送到 Gitee 失败" }
 
-          cd dist
-          REL_ID=$(python3 - "$GITEE_REPO" "$GITEE_TOKEN" "$TAG" <<'PY'
-          import json, sys, urllib.request, urllib.error, urllib.parse
-          repo, token, tag = sys.argv[1], sys.argv[2], sys.argv[3]
-          notes = open("release-notes.md", encoding="utf-8-sig").read().strip() or f"灵屿 AuraIsle {tag}"
-          base = f"https://gitee.com/api/v5/repos/{repo}/releases"
-          q = urllib.parse.urlencode({"access_token": token})
-          rel_id = None
-          try:
-              with urllib.request.urlopen(f"{base}/tags/{urllib.parse.quote(tag)}?{q}") as r:
-                  rel_id = json.loads(r.read().decode()).get("id")
-          except urllib.error.HTTPError as e:
-              if e.code != 404:
-                  raise
-          if rel_id is None:
-              data = urllib.parse.urlencode({
-                  "access_token": token,
-                  "tag_name": tag,
-                  "name": f"灵屿 AuraIsle {tag}",
-                  "body": notes,
-                  "target_commitish": "main",
-              }).encode()
-              req = urllib.request.Request(base, data=data, method="POST")
-              with urllib.request.urlopen(req) as r:
-                  rel_id = json.loads(r.read().decode())["id"]
-          print(rel_id)
-          PY
+          $notes = (Get-Content dist/release-notes.md -Raw -Encoding utf8).Trim()
+          if (-not $notes) { $notes = "灵屿 AuraIsle $($env:TAG)" }
+          $base = "https://gitee.com/api/v5/repos/$($env:GITEE_REPO)/releases"
+          $encodedTag = [uri]::EscapeDataString($env:TAG)
+          $relId = $null
+          try {
+            $existing = Invoke-RestMethod -Uri "$base/tags/$($encodedTag)?access_token=$($env:GITEE_TOKEN)" -Method Get
+            $relId = $existing.id
+          } catch {
+            if ($_.Exception.Response.StatusCode.value__ -ne 404) { throw }
+          }
+          if (-not $relId) {
+            $created = Invoke-RestMethod -Uri $base -Method Post -Body @{
+              access_token = $env:GITEE_TOKEN
+              tag_name = $env:TAG
+              name = "灵屿 AuraIsle $($env:TAG)"
+              body = $notes
+              target_commitish = "main"
+            }
+            $relId = $created.id
+          }
+
+          $attachUrl = "$base/$relId/attach_files"
+          $attachList = Invoke-RestMethod -Uri "$($attachUrl)?access_token=$($env:GITEE_TOKEN)" -Method Get
+          $files = @(
+            "dist/AuraIsle-Setup-v$($env:VER)-x64.exe",
+            "dist/AuraIsle-v$($env:VER)-windows-x64.zip",
+            "dist/SHA256SUMS.txt"
           )
-
-          ATTACH_JSON=$(curl -fsSL "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases/${REL_ID}/attach_files?access_token=${GITEE_TOKEN}")
-          for f in "AuraIsle-Setup-v${VER}-x64.exe" "AuraIsle-v${VER}-windows-x64.zip" "SHA256SUMS.txt"; do
-            OLD_IDS=$(python3 -c 'import json,sys; fname=sys.argv[1]; items=json.load(sys.stdin); print(" ".join(str(x["id"]) for x in items if x.get("name")==fname))' "$f" <<< "$ATTACH_JSON")
-            for oid in $OLD_IDS; do
-              curl -fsSL -X DELETE "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases/${REL_ID}/attach_files/${oid}?access_token=${GITEE_TOKEN}" >/dev/null
-            done
-            curl -fsSL -X POST \
-              -F "access_token=${GITEE_TOKEN}" \
-              -F "file=@${f}" \
-              "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases/${REL_ID}/attach_files" >/dev/null
-          done
-          echo "已同步发布至 Gitee Release: https://gitee.com/${GITEE_REPO}/releases/tag/${TAG}"
+          foreach ($path in $files) {
+            $name = Split-Path $path -Leaf
+            foreach ($item in ($attachList | Where-Object { $_.name -eq $name })) {
+              Invoke-RestMethod -Uri "$attachUrl/$($item.id)?access_token=$($env:GITEE_TOKEN)" -Method Delete | Out-Null
+            }
+            curl.exe -fsSL -X POST -F "access_token=$($env:GITEE_TOKEN)" -F "file=@$path" $attachUrl | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "上传 $name 到 Gitee 失败" }
+          }
+          Write-Host "已同步发布至 Gitee Release: https://gitee.com/$($env:GITEE_REPO)/releases/tag/$($env:TAG)"

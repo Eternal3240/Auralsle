@@ -2269,8 +2269,9 @@ impl App {
     }
     fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
     fn lyric_unread_space(&self)->f32 {
-        if !self.open && !self.effective_minimal() && !self.minimal_pill_msg_badge_active() && !self.pending_messengers.is_empty() {
-            crate::auralsle_ai_status::compact_tail_width(self.unread_sources().len())
+        let icons = self.compact_badge_count();
+        if !self.open && !self.effective_minimal() && !self.minimal_pill_msg_badge_active() && icons > 0 {
+            crate::auralsle_ai_status::compact_tail_width(icons)
         } else {
             0.0
         }
@@ -3451,9 +3452,12 @@ impl App {
     }
     fn messenger_stack_appear(&self)->f32 {1.0-smoothstep(0.04,0.30,self.progress())}
     /// 收起态给未读图标预留的宽度（图标 + 与左侧控件的间距）。
+    fn compact_badge_count(&self)->usize {
+        self.unread_sources().len().min(2)+self.health_badges().len()
+    }
     fn compact_tail_width(&self)->f32 {
         if self.open || self.effective_minimal() || self.minimal_pill_msg_badge_active() || self.island_lyrics_active() {return 0.0;}
-        crate::auralsle_ai_status::compact_tail_width(self.unread_sources().len())
+        crate::auralsle_ai_status::compact_tail_width(self.compact_badge_count())
     }
     /// 同一来源有多个账号时给图标编号（1、2…）；只有一个账号不编号。
     pub(crate) fn unread_tag(&self,i:usize)->Option<usize>{
@@ -3486,7 +3490,7 @@ impl App {
     }
     /// 收起时叠放区沿胶囊方向的长度。
     fn unread_stack_len(&self,horizontal:bool)->f32 {
-        let icons=(self.unread_sources().len().min(2)+self.health_badges().len()) as f32;
+        let icons=self.compact_badge_count() as f32;
         if horizontal {
             // [ai-status-mod] 横排时长度就是图标本体的宽度，右端由 `RIGHT_PAD` 决定留白。
             crate::auralsle_ai_status::COMPACT_UNREAD_W

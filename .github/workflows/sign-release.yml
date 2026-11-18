@@ -56,28 +56,28 @@ jobs:
           TAG: ${{ steps.meta.outputs.tag }}
           VER: ${{ steps.meta.outputs.version }}
         run: |
-          $setup = "dist/AuraIsle-Setup-v$VER-x64.exe"
-          $zip = "dist/AuraIsle-v$VER-windows-x64.zip"
+          $setup = "dist/AuraIsle-Setup-v$env:VER-x64.exe"
+          $zip = "dist/AuraIsle-v$env:VER-windows-x64.zip"
           $sums = "dist/SHA256SUMS.txt"
-          $h1 = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower() + "  AuraIsle-Setup-v$VER-x64.exe"
-          $h2 = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  AuraIsle-v$VER-windows-x64.zip"
+          $h1 = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower() + "  AuraIsle-Setup-v$env:VER-x64.exe"
+          $h2 = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  AuraIsle-v$env:VER-windows-x64.zip"
           @($h1, $h2) | Set-Content -Path $sums -Encoding utf8
 
           $changelog = Get-Content CHANGELOG.md -Raw -Encoding utf8
-          $pattern = "(?ms)^##\s+" + [regex]::Escape($TAG) + "\b.*?(?=^##\s+|\z)"
+          $pattern = "(?ms)^##\s+" + [regex]::Escape($env:TAG) + "\b.*?(?=^##\s+|\z)"
           $m = [regex]::Match($changelog, $pattern)
-          $notes = if ($m.Success) { $m.Value.Trim() } else { "灵屿 AuraIsle $TAG" }
+          $notes = if ($m.Success) { $m.Value.Trim() } else { "灵屿 AuraIsle $env:TAG" }
           $notes | Set-Content -Path dist/release-notes.md -Encoding utf8
 
           $exists = $true
-          gh release view $TAG *> $null
+          gh release view $env:TAG *> $null
           if ($LASTEXITCODE -ne 0) { $exists = $false }
           if ($exists) {
-            gh release edit $TAG --title "灵屿 AuraIsle $TAG" --notes-file dist/release-notes.md
+            gh release edit $env:TAG --title "灵屿 AuraIsle $env:TAG" --notes-file dist/release-notes.md
           } else {
-            gh release create $TAG --title "灵屿 AuraIsle $TAG" --notes-file dist/release-notes.md
+            gh release create $env:TAG --title "灵屿 AuraIsle $env:TAG" --notes-file dist/release-notes.md
           }
-          gh release upload $TAG $setup $zip $sums --clobber
+          gh release upload $env:TAG $setup $zip $sums --clobber
       - name: 同步代码与 Release 至 Gitee
         shell: pwsh
         env:

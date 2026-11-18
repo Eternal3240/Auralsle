@@ -2303,6 +2303,333 @@ fn estimate_agent_progress(a: &state::Agent) -> (f32, String) {
     }
 }
 
+/// 绘制 fly-island 风格右侧动作小图标：
+/// - `kind == 0`: 桌面窗口图标 `[▢]`
+/// - `kind == 1`: CLI 终端图标 `[>_]`
+/// - `kind == 2`: 归档盒图标 `[box]`
+fn paint_fly_action_icon(c: &Card, cx: f32, cy: f32, kind: u8, col: Color32) {
+    match kind {
+        0 => {
+            // 桌面窗口图标 `[▢]`
+            c.stroke(cx - 5.8, cy - 4.6, 11.6, 9.2, 1.8, 1.1, col);
+            c.seg((cx - 5.2, cy - 2.0), (cx + 5.2, cy - 2.0), 1.0, col);
+            c.seg((cx - 2.2, cy - 2.0), (cx - 2.2, cy + 4.2), 0.95, col);
+        }
+        1 => {
+            // 终端图标 `[>_]`
+            c.stroke(cx - 5.8, cy - 4.6, 11.6, 9.2, 1.8, 1.1, col);
+            c.seg((cx - 3.4, cy - 1.8), (cx - 1.2, cy + 0.2), 1.15, col);
+            c.seg((cx - 1.2, cy + 0.2), (cx - 3.4, cy + 2.2), 1.15, col);
+            c.seg((cx + 0.2, cy + 2.2), (cx + 3.2, cy + 2.2), 1.15, col);
+        }
+        _ => {
+            // 归档盒图标 `[box]`
+            c.stroke(cx - 5.6, cy - 4.5, 11.2, 3.0, 1.0, 1.05, col);
+            c.stroke(cx - 4.8, cy - 1.5, 9.6, 6.0, 1.2, 1.05, col);
+            c.seg((cx - 2.0, cy + 1.2), (cx + 2.0, cy + 1.2), 1.1, col);
+        }
+    }
+}
+
+/// 绘制 fly-island 会话行右侧的 AI 厂商徽标（1:1 对应图 1 的 OpenAI 白色圆标与 Claude 赤陶色星芒标）
+fn paint_fly_provider_badge(c: &Card, cx: f32, cy: f32, provider_key: &str) {
+    let pk = provider_key.to_ascii_lowercase();
+    if pk.contains("claude") {
+        // Claude 赤陶色圆角方标 `#D97757` + 白色星芒
+        let bg = Color32::from_rgb(217, 119, 87);
+        c.fill(cx - 6.2, cy - 6.2, 12.4, 12.4, 3.2, bg);
+        let s_col = Color32::WHITE;
+        for deg in [0.0_f32, 45.0, 90.0, 135.0, 30.0, 150.0] {
+            let rad = deg.to_radians();
+            let r = 3.8;
+            c.seg(
+                (cx - r * rad.cos(), cy - r * rad.sin()),
+                (cx + r * rad.cos(), cy + r * rad.sin()),
+                1.05,
+                s_col,
+            );
+        }
+    } else if pk.contains("codex") || pk.contains("openai") || pk.contains("gpt") {
+        // OpenAI / Codex 白色圆底 + 深色六角花结
+        c.circle(cx, cy, 6.2, Color32::from_rgb(240, 244, 248));
+        let ink = Color32::from_rgb(20, 22, 26);
+        c.ring(cx, cy, 2.3, 1.05, ink);
+        for i in 0..6 {
+            let a1 = (i as f32) * std::f32::consts::FRAC_PI_3;
+            let a2 = a1 + 0.85;
+            c.seg(
+                (cx + 2.1 * a1.cos(), cy + 2.1 * a1.sin()),
+                (cx + 4.6 * a2.cos(), cy + 4.6 * a2.sin()),
+                1.0,
+                ink,
+            );
+        }
+    } else if pk.contains("deepseek") || pk.contains("dsh") {
+        c.circle(cx, cy, 6.2, Color32::from_rgb(77, 107, 254));
+        c.centered_text(cx, cy, "D", 7.8, W::Bold, Color32::WHITE, H::Center);
+    } else {
+        c.circle(cx, cy, 6.2, Color32::from_rgb(52, 211, 153));
+        c.centered_text(cx, cy, "A", 7.8, W::Bold, Color32::BLACK, H::Center);
+    }
+}
+
+/// [方案 2 · flyl1u/fly-island 合并视图下半部]：
+/// 1:1 复刻图 1 (`image_f41ce3.png`) 红框 2 的多会话列表（等待确认 / 工作中双行卡片 + 已完成单行紧凑条 + 跳转窗口/终端 + 一键归档）。
+pub fn draw_fly_island_sessions_list(c: &Card, y_top: f32, list_h: f32) {
+    let cfg = config::get();
+    let (agents, _) = state::snapshot();
+    let left_x = 34.0_f32;
+    let row_w = 348.0_f32;
+
+    if !cfg.enabled || !cfg.mod_ai_status_enabled {
+        c.text(left_x + 4.0, y_top + 36.0, "AI 工作状态模块已关闭", size::BODY, W::Semibold, theme::WHITE, H::Left);
+        return;
+    }
+
+    if agents.is_empty() {
+        c.fill(left_x, y_top + 6.0, row_w, 54.0, 9.0, Color32::from_white_alpha(10));
+        c.stroke(left_x, y_top + 6.0, row_w, 54.0, 9.0, 0.85, Color32::from_white_alpha(18));
+        c.circle(left_x + 14.0, y_top + 24.0, 3.5, Color32::from_rgb(110, 118, 129));
+        c.text(left_x + 26.0, y_top + 28.0, "暂无正在进行的 AI 会话", 10.6, W::Bold, theme::WHITE, H::Left);
+        c.text(left_x + 26.0, y_top + 46.0, "在 Claude Code / Codex / WorkBuddy / DSH 中开始任务后自动同步显示", 9.2, W::Regular, theme::GRAY, H::Left);
+        return;
+    }
+
+    let draw_fly_row = |row_c: &Card, a: &state::Agent, row_h: f32| {
+        let is_done = a.phase == state::Phase::Done;
+        let is_waiting = matches!(a.phase, state::Phase::Waiting | state::Phase::Error);
+        let is_working = !is_done && !is_waiting;
+
+        let row_hit = row_c.hit(0.0, 0.0, row_w, row_h, ("fly-sess-row", &a.key));
+        let row_hov = row_hit.hovered();
+
+        // 工作中会话（或悬停时）绘制图 1 同款深灰圆角容器 `#16181D` + `1px` `#2A2E37` 描边
+        if is_working || row_hov {
+            let bg = if is_working {
+                Color32::from_rgb(24, 26, 31)
+            } else {
+                Color32::from_rgba_unmultiplied(28, 31, 38, 195)
+            };
+            let border = if is_working {
+                Color32::from_rgb(46, 50, 59)
+            } else {
+                Color32::from_rgb(38, 42, 50)
+            };
+            row_c.fill(0.0, 1.0, row_w, row_h - 2.0, 9.0, bg);
+            row_c.stroke(0.0, 1.0, row_w, row_h - 2.0, 9.0, 1.0, border);
+        }
+
+        let line1_cy = if is_done { row_h * 0.5 } else { 17.5 };
+        let line1_ty = line1_cy + 4.0;
+
+        // 1) 左侧状态圆点：红 (#F85149 等待确认) / 绿 (#3FB950 工作中) / 灰 (#6E7681 已完成)
+        let dot_col = if is_waiting {
+            Color32::from_rgb(248, 81, 73)
+        } else if is_working {
+            Color32::from_rgb(63, 185, 80)
+        } else {
+            Color32::from_rgb(110, 118, 129)
+        };
+        row_c.circle(12.0, line1_cy, 3.8, dot_col);
+
+        // 2) 右侧操作簇（从右往左：归档盒 [box] -> 厂商图标 -> 窗口/终端跳转 -> 耗时/状态 -> 模型·强度胶囊）
+        let arch_cx = row_w - 13.0;
+        let arch_hit = row_c
+            .hit(arch_cx - 8.0, line1_cy - 8.0, 16.0, 16.0, ("fly-arch", &a.key))
+            .on_hover_text("归档此会话（有新消息时自动恢复显示）");
+        let arch_col = if arch_hit.hovered() {
+            Color32::from_rgb(230, 237, 243)
+        } else {
+            Color32::from_rgb(139, 148, 158)
+        };
+        paint_fly_action_icon(row_c, arch_cx, line1_cy, 2, arch_col);
+        if arch_hit.clicked() {
+            state::archive_agent_session(&a.key, a.updated);
+        }
+
+        let prov_cx = row_w - 31.0;
+        let pk = if !a.provider_key.is_empty() { &a.provider_key } else { &a.key };
+        paint_fly_provider_badge(row_c, prov_cx, line1_cy, pk);
+
+        let jump_cx = row_w - 49.0;
+        let jump_hit = row_c
+            .hit(jump_cx - 8.0, line1_cy - 8.0, 16.0, 16.0, ("fly-jump", &a.key))
+            .on_hover_text(if a.is_cli { "跳转到对应 CLI 终端窗口" } else { "跳转到对应 AI 桌面窗口" });
+        let jump_col = if jump_hit.hovered() {
+            Color32::from_rgb(230, 237, 243)
+        } else {
+            Color32::from_rgb(139, 148, 158)
+        };
+        paint_fly_action_icon(row_c, jump_cx, line1_cy, if a.is_cli { 1 } else { 0 }, jump_col);
+        if jump_hit.clicked() {
+            launch(row_c.ui.ctx(), pk);
+        }
+
+        let mins = (a.elapsed.max(60) / 60).max(1);
+        let status_time_str = if is_waiting {
+            format!("等待确认 · {mins} 分")
+        } else {
+            format!("{mins} 分")
+        };
+        let status_time_col = if is_waiting {
+            Color32::from_rgb(248, 81, 73)
+        } else {
+            Color32::from_rgb(139, 148, 158)
+        };
+        let status_right_x = row_w - 61.0;
+        let st_w = row_c.text_w(&status_time_str, 9.6, if is_waiting { W::Semibold } else { W::Regular });
+        row_c.text(
+            status_right_x,
+            line1_ty,
+            &status_time_str,
+            9.6,
+            if is_waiting { W::Semibold } else { W::Regular },
+            status_time_col,
+            H::Right,
+        );
+
+        let mut left_limit_x = status_right_x - st_w - 8.0;
+
+        // 活跃/等待确认行展示 `[model · effort]` 胶囊徽标（如 `gpt-6-astra · Medium`、`Opus 5.5 · High`）
+        if !is_done && (!a.model.is_empty() || !a.effort.is_empty()) {
+            let badge_txt = if !a.model.is_empty() && !a.effort.is_empty() {
+                format!("{} · {}", a.model, a.effort)
+            } else if !a.model.is_empty() {
+                a.model.clone()
+            } else {
+                a.effort.clone()
+            };
+            let btw = row_c.text_w(&badge_txt, 8.4, W::Regular) + 12.0;
+            let bx = left_limit_x - btw;
+            let by = line1_cy - 8.2;
+            row_c.fill(bx, by, btw, 16.4, 4.8, Color32::from_rgb(38, 41, 48));
+            row_c.text(
+                bx + btw * 0.5,
+                line1_cy + 3.2,
+                &badge_txt,
+                8.4,
+                W::Regular,
+                Color32::from_rgb(175, 184, 196),
+                H::Center,
+            );
+            left_limit_x = bx - 8.0;
+        }
+
+        // 3) 左侧 `<project> · <title>` 标题
+        let proj = if !a.project.trim().is_empty() {
+            a.project.trim()
+        } else {
+            a.name.trim()
+        };
+        let title_part = if !a.title.trim().is_empty() {
+            a.title.trim().to_owned()
+        } else {
+            a.doing()
+        };
+        let full_title = format!("{proj} · {title_part}");
+        let max_title_w = (left_limit_x - 23.0).max(60.0);
+        let fitted_title = row_c.fit(&full_title, 10.6, if is_done { W::Semibold } else { W::Bold }, max_title_w);
+        let title_col = if is_done {
+            Color32::from_rgb(186, 194, 204)
+        } else {
+            theme::WHITE
+        };
+        row_c.text(
+            23.0,
+            line1_ty,
+            &fitted_title,
+            10.6,
+            if is_done { W::Semibold } else { W::Bold },
+            title_col,
+            H::Left,
+        );
+
+        // 4) 第二行：当前消息与待确认快捷允许/拒绝按钮（仅活跃或等待确认行显示）
+        if !is_done {
+            let line2_ty = 38.8;
+            let can_approve = cfg.agent_hook_approval && is_waiting;
+            let msg_max_w = if can_approve { row_w - 118.0 } else { row_w - 34.0 };
+            let msg_str = row_c.fit(&a.doing(), 9.5, W::Regular, msg_max_w.max(80.0));
+            row_c.text(
+                23.0,
+                line2_ty,
+                &msg_str,
+                9.5,
+                W::Regular,
+                Color32::from_rgb(177, 186, 196),
+                H::Left,
+            );
+            if can_approve {
+                let (r_ok, b_ok) = paint::capsule(
+                    row_c,
+                    row_w - 88.0,
+                    27.5,
+                    38.0,
+                    16.5,
+                    &format!("fly-inline-allow-{}", a.key),
+                    Color32::from_rgba_unmultiplied(16, 185, 129, 58),
+                    Color32::from_rgb(16, 185, 129),
+                );
+                b_ok.text(row_w - 69.0, 38.8, "允许", 8.2, W::Bold, Color32::WHITE, H::Center);
+                if r_ok.on_hover_text("允许执行 (Ctrl+Alt+Y)").clicked() {
+                    state::resolve_agent_approval(&a.key, "allow");
+                }
+                let (r_no, b_no) = paint::capsule(
+                    row_c,
+                    row_w - 46.0,
+                    27.5,
+                    38.0,
+                    16.5,
+                    &format!("fly-inline-deny-{}", a.key),
+                    Color32::from_rgba_unmultiplied(239, 68, 68, 54),
+                    Color32::from_rgb(220, 38, 38),
+                );
+                b_no.text(row_w - 27.0, 38.8, "拒绝", 8.2, W::Bold, Color32::WHITE, H::Center);
+                if r_no.on_hover_text("拒绝执行 (Ctrl+Alt+N)").clicked() {
+                    state::resolve_agent_approval(&a.key, "deny");
+                }
+            }
+        }
+
+        if row_hit.clicked() && !arch_hit.hovered() && !jump_hit.hovered() {
+            launch(row_c.ui.ctx(), pk);
+        }
+    };
+
+    let area_rect = c.rect(left_x, y_top, row_w + 6.0, list_h);
+    let mut content = egui::Ui::new(
+        c.ui.ctx().clone(),
+        egui::Id::new(("fly-island-sessions-ui", c.live)),
+        egui::UiBuilder::new()
+            .max_rect(area_rect)
+            .layer_id(c.painter.layer_id())
+            .style(c.ui.style().clone()),
+    );
+    content.set_clip_rect(area_rect.intersect(c.painter.clip_rect()));
+    content.set_opacity(c.painter.opacity());
+    if !c.live {
+        content.disable();
+    }
+    content.spacing_mut().item_spacing.y = 4.0 * c.s;
+    content.spacing_mut().scroll.floating = true;
+    content.spacing_mut().scroll.bar_width = 3.2 * c.s;
+    content.spacing_mut().scroll.bar_inner_margin = 1.5 * c.s;
+    egui::ScrollArea::vertical()
+        .id_salt("fly-island-merged-sessions-scroll")
+        .max_height(list_h * c.s)
+        .auto_shrink([false, false])
+        .show(&mut content, |ui| {
+            for a in &agents {
+                let row_h = if a.phase == state::Phase::Done { 27.0 } else { 49.0 };
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(row_w * c.s, row_h * c.s), egui::Sense::hover());
+                let mut row_c = Card::new(ui, rect.min, ui.clip_rect());
+                row_c.s = c.s;
+                row_c.live = c.live;
+                draw_fly_row(&row_c, a, row_h);
+            }
+        });
+}
+
 pub fn draw_page(c: &Card, _cmds: &mut Vec<Cmd>) {
     let c_shifted = c.shifted(0.0, if cfg!(test) { 0.0 } else { 10.0 });
     let c = &c_shifted;
@@ -3001,6 +3328,36 @@ pub fn draw_settings(ui: &mut egui::Ui) {
     });
 
     // [第 10 批 · 图八] 标题只留功能名，括注里的四个工具名已在下文说明里出现，删掉避免标题撑成两行。
+    settings_label(ui, "AI 工作状态检测源（两套方案共用）");
+    settings_card(ui, |ui| {
+        setting_row(
+            ui,
+            "Claude Code 多会话实时探测 (~/.claude/projects)",
+            "读取 Claude Code 本机 JSONL 会话流与生命周期 Hook，实时提取项目名、任务标题、模型档位与等待确认状态",
+            &mut cfg.fly_claude_sessions,
+        );
+        crate::extras::twinkle_card_break(ui);
+        setting_row(
+            ui,
+            "OpenAI Codex 多会话实时探测 (~/.codex/sessions)",
+            "读取 Codex CLI 与桌面端本机 JSONL 会话流与生命周期 Hook，同步推理进度与命令确认",
+            &mut cfg.fly_codex_sessions,
+        );
+        crate::extras::twinkle_card_break(ui);
+        setting_row(
+            ui,
+            "DeepSeek Harness (DSH) 会话实时探测 (~/.dsh/sessions)",
+            "读取 DSH 终端会话状态与生命周期 Hook",
+            &mut cfg.fly_dsh_sessions,
+        );
+        crate::extras::twinkle_card_break(ui);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("恢复所有已归档会话").clicked() {
+                state::clear_archived_sessions();
+            }
+        });
+    });
+
     settings_label(ui, "AI Agent 生命周期钩子管理");
     settings_card(ui, |ui| {
         ui.label(

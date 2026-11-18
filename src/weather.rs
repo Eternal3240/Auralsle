@@ -236,9 +236,9 @@ pub fn locate(agent: &ureq::Agent) -> Result<Position, String> {
     #[cfg(windows)]
     if !cfg!(test) {
         if let Some((lat, lon, city, street)) = crate::auralsle_ai_status::plugins::geolocate_precise() {
-            let label = if !city.is_empty() { city } else { street };
+            let label = if !city.is_empty() { city } else { street.clone() };
             if !label.is_empty() {
-                let pos = Position { lat, lon, label, region: String::new() };
+                let pos = Position { lat, lon, label, region: street };
                 if pos.valid() {
                     return Ok(pos);
                 }
@@ -411,16 +411,23 @@ fn fetch_at(agent: &ureq::Agent, city: &str, selected: Option<&Position>) -> Res
 }
 
 /// 已知坐标时只请求一次预报接口。
-fn fetch_forecast(agent: &ureq::Agent, position: Position) -> Result<Snapshot, String> {
+fn fetch_forecast(agent: &ureq::Agent, mut position: Position) -> Result<Snapshot, String> {
     let mut url = url::Url::parse("https://api.open-meteo.com/v1/forecast").map_err(|_| "天气服务地址无效")?;
     {
         let mut query = url.query_pairs_mut();
         query.append_pair("latitude", &format!("{:.4}", position.lat));
         query.append_pair("longitude", &format!("{:.4}", position.lon));
         query.append_pair("current", "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m");
+        query.append_pair("hourly", "temperature_2m");
         query.append_pair("daily", "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset");
         query.append_pair("timezone", "auto");
         query.append_pair("forecast_days", &FORECAST_DAYS.to_string());
+    }
+    if !cfg!(test) && !crate::auralsle_ai_status::plugins::is_valid_street_label(&position.region) {
+        let resolved_street = crate::auralsle_ai_status::plugins::resolve_street_for_position(&position.label, position.lat, position.lon);
+        if !resolved_street.is_empty() {
+            position.region = resolved_street;
+        }
     }
     let mut snapshot=parse(&position.label, &get(agent, &url, "天气预报")?)?;
     snapshot.position=Some(position);
@@ -464,6 +471,9 @@ pub fn parse(place: &str, value: &Value) -> Result<Snapshot, String> {
     // timezone=auto 时 daily.sunrise/sunset 就是当地时间，直接截 HH:MM。
     let hhmm = |list: Option<&Vec<Value>>| list.and_then(|items| items.get(0)).and_then(Value::as_str)
         .and_then(|s| s.get(11..16)).map(str::to_string);
+    if !cfg!(test) {
+        crate::auralsle_ai_status::plugins::record_open_meteo_hourly(place, temp, value);
+    }
     Ok(Snapshot {
         condition:None,attributions:Vec::new(),
         place: place.to_string(),
@@ -608,6 +618,28 @@ impl State {
             // 切回刚才请求过的城市：清掉记录，让城市变化重新触发刷新。
             self.last_city=None;
         }
+    }
+
+    /// 立即应用来自「街道级定位」的街道天气快照，确保预览卡、实况大卡与常驻胶囊实时联动更新。
+    pub fn apply_street_snapshot(&mut self, snapshot: Snapshot, city: &str, position: Position, t: f64) {
+        let city_trimmed = city.trim().to_string();
+        self.rx = None;
+        self.loading = false;
+        self.error = None;
+        self.failures = 0;
+        self.last_start = t;
+        self.manual_city = !city_trimmed.is_empty();
+        self.active_position = Some(position.clone());
+        self.last_city = Some(city_trimmed);
+        self.last_position = Some(position.clone());
+        self.cached.retain(|s| {
+            !(s.place == snapshot.place
+                || s.position.as_ref().is_some_and(|p| p.label == position.label))
+        });
+        self.cached.insert(0, snapshot.clone());
+        self.cached.truncate(CACHE_LIMIT);
+        self.persist();
+        self.snapshot = Some(snapshot);
     }
 
     /// 删除城市时一并清掉它的缓存。

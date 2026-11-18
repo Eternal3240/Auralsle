@@ -268,7 +268,7 @@ pub struct TwinkleConfig {
 impl Default for TwinkleConfig {
     fn default() -> Self {
         Self {
-            restore_on_startup: true,
+            restore_on_startup: false,
             disable_on_lock_screen: true,
             schedule_enabled: false,
             latitude: 31.23,
@@ -312,7 +312,10 @@ fn load_twinkle_cfg() -> TwinkleConfig {
     let Ok(txt) = std::fs::read_to_string(twinkle_cfg_path()) else {
         return TwinkleConfig::default();
     };
-    serde_json::from_str::<TwinkleConfig>(&txt).unwrap_or_default()
+    let mut cfg = serde_json::from_str::<TwinkleConfig>(&txt).unwrap_or_default();
+    // 启动或重新打开灵屿时始终只读取当前硬件屏幕亮度，绝不反向覆盖现有屏幕亮度
+    cfg.restore_on_startup = false;
+    cfg
 }
 
 pub fn get_twinkle_config() -> TwinkleConfig {
@@ -542,11 +545,8 @@ pub fn start() {
         .spawn(move || {
             let _ = load_monitor_rules();
             if MOD_ENABLED.load(Ordering::Relaxed) {
-                if get_twinkle_config().restore_on_startup && !is_write_blocked_by_lock() {
-                    restore_on_startup();
-                } else {
-                    refresh_now();
-                }
+                // 重新打开灵屿时仅读取当前屏幕硬件亮度并同步缓存，不改写当前亮度
+                refresh_now();
             }
             let mut last_sched_check = Instant::now();
             let mut dirty_save_at: Option<Instant> = None;
@@ -852,43 +852,10 @@ fn check_schedule_tick() {
     }
 }
 
+#[allow(dead_code)]
 fn restore_on_startup() {
-    let cfg = get_twinkle_config();
-    if !cfg.restore_on_startup || is_write_blocked_by_lock() {
-        return;
-    }
-    let rules_file = load_monitor_rules();
-    let saved = load_saved();
-    let (mut list, _) = probe();
-    store(list.clone(), None);
-    for m in &mut list {
-        if rules_file
-            .skip_reapply
-            .iter()
-            .any(|skip| !skip.is_empty() && m.raw_label.contains(skip))
-        {
-            continue;
-        }
-        // 优先使用 monitor-rules.json 中的 startup_brightness
-        if let Some(rule) = find_matching_rule(&rules_file, m.slot, &m.raw_label) {
-            if let Some(start_pct) = rule.startup_brightness {
-                let target = m.value_from_percent((start_pct.min(100) as f32) / 100.0);
-                if target != m.cur {
-                    write_vcp_now(m.slot, m.brightness_vcp, target as u16);
-                    m.cur = target;
-                }
-                continue;
-            }
-        }
-        if let Some((_, value)) = saved.iter().find(|(s, _)| *s == m.slot) {
-            let value = (*value).clamp(m.min, m.max);
-            if value != m.cur {
-                write_vcp_now(m.slot, m.brightness_vcp, value as u16);
-                m.cur = value;
-            }
-        }
-    }
-    store(list, None);
+    // 仅读取当前硬件屏幕亮度并同步状态，不在软件启动时覆盖现有屏幕亮度
+    refresh_now();
 }
 
 fn write_vcp_now(slot: usize, code: u8, value: u16) {

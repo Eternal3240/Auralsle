@@ -84,6 +84,18 @@ pub struct Agent {
     pub elapsed: i64,
     /// 活跃、但超过「静默」阈值没有新上报：仍算工作中，只是提示可能要等一下。
     pub quiet: bool,
+    /// [fly-island] 底层提供商标识（"claude" / "codex" / "deepseek" / "workbuddy" 等）
+    pub provider_key: String,
+    /// [fly-island] 会话标题（首条 Prompt 摘要或任务名，如 "整理 3.1 发布说明"）
+    pub title: String,
+    /// [fly-island] 模型显示名（如 "gpt-6-astra" / "Opus 5.5"）
+    pub model: String,
+    /// [fly-island] 推理强度档位（如 "Medium" / "High" / "Low"）
+    pub effort: String,
+    /// [fly-island] 是否为 CLI 终端会话（true 显示 `>_` 终端图标，false 显示桌面窗口图标）
+    pub is_cli: bool,
+    /// [fly-island] 会话工作目录路径
+    pub cwd: String,
 }
 
 impl Agent {
@@ -306,6 +318,56 @@ impl State {
                     let n = string_field(&v, "name");
                     if n.is_empty() { key.clone() } else { n }
                 };
+                let provider_key = {
+                    let pk = string_field(&v, "provider");
+                    if !pk.is_empty() {
+                        pk.to_ascii_lowercase()
+                    } else if key.to_ascii_lowercase().contains("claude") {
+                        "claude".to_owned()
+                    } else if key.to_ascii_lowercase().contains("codex") || key.to_ascii_lowercase().contains("openai") {
+                        "codex".to_owned()
+                    } else if key.to_ascii_lowercase().contains("deepseek") || key.to_ascii_lowercase().contains("dsh") {
+                        "deepseek".to_owned()
+                    } else {
+                        key.to_ascii_lowercase()
+                    }
+                };
+                let raw_title = {
+                    let t = string_field(&v, "title");
+                    if !t.is_empty() {
+                        t
+                    } else {
+                        let s = string_field(&v, "step");
+                        if !s.is_empty() { s } else { name.clone() }
+                    }
+                };
+                let raw_model = {
+                    let m = string_field(&v, "model");
+                    if !m.is_empty() {
+                        m
+                    } else if provider_key == "claude" {
+                        "Opus 4.6".to_owned()
+                    } else if provider_key == "codex" {
+                        "gpt-5-codex".to_owned()
+                    } else if provider_key == "deepseek" {
+                        "deepseek-r1".to_owned()
+                    } else {
+                        String::new()
+                    }
+                };
+                let raw_effort = {
+                    let e = string_field(&v, "effort");
+                    if !e.is_empty() {
+                        e
+                    } else if !raw_model.is_empty() {
+                        "High".to_owned()
+                    } else {
+                        String::new()
+                    }
+                };
+                let is_cli = v.get("is_cli").and_then(Value::as_bool).unwrap_or_else(|| {
+                    provider_key == "claude" || provider_key == "deepseek"
+                });
                 let candidate = Agent {
                     key,
                     name,
@@ -319,9 +381,18 @@ impl State {
                     step_index: number_field(&v, "step_index").max(0),
                     step_total: number_field(&v, "step_total").max(0),
                     progress: progress_field(&v),
-                    elapsed: 0,
+                    elapsed: number_field(&v, "elapsed").max(0),
                     quiet: cfg.active_timeout_secs > 0 && age > cfg.active_timeout_secs,
+                    provider_key,
+                    title: raw_title,
+                    model: raw_model,
+                    effort: raw_effort,
+                    is_cli,
+                    cwd: string_field(&v, "cwd"),
                 };
+                if is_session_archived(&candidate.key, candidate.updated) {
+                    continue;
+                }
                 if let Some(existing) = agents.iter_mut().find(|a| a.key.eq_ignore_ascii_case(&candidate.key)) {
                     if candidate.updated > existing.updated {
                         *existing = candidate;
@@ -331,45 +402,42 @@ impl State {
                 }
             }
         }
-        // 任务计时：第一次看到它活跃就记下起点，转入完成/消失就清掉。
+        // 任务计时：第一次看到它活跃就记下起点，若底层已带 elapsed 则保留较大值。
         for a in agents.iter_mut() {
             if a.phase.active() {
                 let since = *self.active_since.entry(a.key.clone()).or_insert(now_unix);
-                a.elapsed = (now_unix - since).max(0);
+                let tracked = (now_unix - since).max(0);
+                if a.elapsed <= 0 {
+                    a.elapsed = tracked;
+                }
             } else {
                 self.active_since.remove(&a.key);
-                a.elapsed = 0;
             }
         }
-        // [fly-island & WorkBuddy 实时窗口探测]：若状态目录中尚未写入 .approval.json，
-        // 自动探测本机正在运行的 WorkBuddy / Claude Code / Codex / Cursor 窗口，确保在 WorkBuddy 上可直接联动状态与审批
-        #[cfg(windows)]
+        // [flyl1u/fly-island 统一 AI 工作状态判断引擎]：
+        // 方案 1 与方案 2 全部统一使用 fly-island 的 JSONL 会话流 + 生命周期 Hook 检测（Claude Code / Codex / DSH）
         if !cfg!(test) {
-            for (w_key, w_name, w_phase, w_msg) in cached_running_desktop_agents() {
-                if !agents.iter().any(|a| a.key.eq_ignore_ascii_case(&w_key)) {
-                    agents.push(Agent {
-                        key: w_key,
-                        name: w_name,
-                        phase: w_phase,
-                        message: w_msg,
-                        detail: "支持岛内直接允许(Ctrl+Alt+Y) / 拒绝(Ctrl+Alt+N) / 交回终端(Ctrl+Alt+T)".to_owned(),
-                        project: String::new(),
-                        updated: now_unix,
-                        age_secs: 0,
-                        step: String::new(),
-                        step_index: 0,
-                        step_total: 0,
-                        progress: -1.0,
-                        elapsed: 12,
-                        quiet: false,
-                    });
+            for cand in cached_fly_island_sessions() {
+                if is_session_archived(&cand.key, cand.updated) {
+                    continue;
+                }
+                if !agents.iter().any(|a| a.key.eq_ignore_ascii_case(&cand.key)) {
+                    agents.push(cand);
                 }
             }
+
         }
 
-        // 活跃在前、已完成在后；同类按最后上报时间倒序。
+        // 排序规则（对齐 fly-island）：等待确认 (Waiting) 最前 -> 工作中 (Working/Tool) 次之 -> 已完成 (Done) 最后；同类按更新时间倒序。
+        let phase_prio = |p: Phase| -> u8 {
+            match p {
+                Phase::Waiting | Phase::Error => 3,
+                Phase::Working | Phase::Tool | Phase::Running => 2,
+                Phase::Done => 1,
+            }
+        };
         agents.sort_by(|a, b| {
-            b.phase.active().cmp(&a.phase.active()).then(b.updated.cmp(&a.updated))
+            phase_prio(b.phase).cmp(&phase_prio(a.phase)).then(b.updated.cmp(&a.updated))
         });
 
         // 已完成提示还挂着、同一助手又忙起来了（新任务开始）：
@@ -487,29 +555,7 @@ pub fn set_hook_action_status(msg: impl Into<String>) {
 }
 
 
-#[cfg(windows)]
-#[derive(Clone, Default)]
-struct AgentRuntimeEntry {
-    last_title: String,
-    working_until: i64,
-    done_until: i64,
-    last_fg_unix: i64,
-    typed_chars: u32,
-}
 
-#[cfg(windows)]
-#[derive(Default)]
-struct DesktopAgentTracker {
-    entries: std::collections::HashMap<String, AgentRuntimeEntry>,
-    prev_enter_down: bool,
-    prev_lbutton_down: bool,
-}
-
-#[cfg(windows)]
-static DESKTOP_TRACKER: OnceLock<Mutex<DesktopAgentTracker>> = OnceLock::new();
-
-#[cfg(windows)]
-static DESKTOP_AGENTS_CACHE: OnceLock<Mutex<(Vec<(String, String, Phase, String)>, std::time::Instant)>> = OnceLock::new();
 
 #[cfg(windows)]
 fn is_antigravity_window(title: &str, low: &str, proc_low: &str) -> bool {
@@ -715,40 +761,77 @@ fn window_process_name_low(hwnd: windows::Win32::Foundation::HWND) -> String {
     }
 }
 
-/// 读取文件末尾最多 `max_bytes` 字节的 UTF-8 文本，用于毫秒级增量探测 Claude Code / Codex 会话 JSONL。
-#[cfg(windows)]
-fn read_file_tail_string(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+/// [flyl1u/fly-island] 会话归档表：`session_key -> archived_at_updated`。
+/// 当该会话后续有新消息产生（`updated > archived_at_updated`）时自动解除归档重新浮现。
+static ARCHIVED_SESSIONS: OnceLock<Mutex<std::collections::HashMap<String, i64>>> = OnceLock::new();
+
+pub fn archive_agent_session(key: &str, updated: i64) {
+    let mtx = ARCHIVED_SESSIONS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Ok(mut map) = mtx.lock() {
+        map.insert(key.to_ascii_lowercase(), updated.max(unix_now()));
+    }
+    if let Ok(mut st) = lock().lock() {
+        st.agents.retain(|a| !a.key.eq_ignore_ascii_case(key));
+    }
+}
+
+pub fn clear_archived_sessions() {
+    if let Some(mtx) = ARCHIVED_SESSIONS.get() {
+        if let Ok(mut map) = mtx.lock() {
+            map.clear();
+        }
+    }
+}
+
+pub fn is_session_archived(key: &str, updated: i64) -> bool {
+    let Some(mtx) = ARCHIVED_SESSIONS.get() else {
+        return false;
+    };
+    let Ok(map) = mtx.lock() else {
+        return false;
+    };
+    if let Some(&arch_ts) = map.get(&key.to_ascii_lowercase()) {
+        updated <= arch_ts
+    } else {
+        false
+    }
+}
+
+/// 读取文件头部与尾部文本，用于毫秒级提取 fly-island 会话标题、工作目录、模型与当前阶段。
+fn read_file_head_and_tail(path: &std::path::Path, head_bytes: usize, tail_bytes: u64) -> Option<(String, String)> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
     if len == 0 {
         return None;
     }
-    let start = len.saturating_sub(max_bytes);
+    let h_len = (len as usize).min(head_bytes);
+    let mut h_buf = vec![0u8; h_len];
+    let _ = f.read(&mut h_buf).ok()?;
+    let head_str = String::from_utf8_lossy(&h_buf).into_owned();
+
+    let start = len.saturating_sub(tail_bytes);
     f.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = Vec::with_capacity((len - start) as usize);
-    f.read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    let mut t_buf = Vec::with_capacity((len - start) as usize);
+    f.read_to_end(&mut t_buf).ok()?;
+    let tail_str = String::from_utf8_lossy(&t_buf).into_owned();
+    Some((head_str, tail_str))
 }
 
-/// 在目录树（最多递归 `max_depth` 层）中查找最近修改时间在 `max_age_secs` 秒以内的最新 `.jsonl` 文件。
-#[cfg(windows)]
-fn newest_file_in_dir(
+/// 在目录树中收集最近修改时间在 `max_age_secs` 秒以内的前 `limit` 个最新 `.jsonl` 会话文件。
+fn recent_jsonl_files_in_dir(
     root: &std::path::Path,
     now_u: i64,
     max_age_secs: i64,
     max_depth: usize,
-    exts: &[&str],
-    skip_names: &[&str],
-) -> Option<(PathBuf, i64)> {
+    limit: usize,
+) -> Vec<(PathBuf, i64)> {
     fn walk(
         dir: &std::path::Path,
         now_u: i64,
         max_age: i64,
         depth: usize,
-        exts: &[&str],
-        skip_names: &[&str],
-        best: &mut Option<(PathBuf, i64)>,
+        out: &mut Vec<(PathBuf, i64)>,
     ) {
         if depth == 0 {
             return;
@@ -762,78 +845,215 @@ fn newest_file_in_dir(
                 .unwrap_or("")
                 .to_ascii_lowercase();
             if p.is_dir() {
-                if fname_low == "node_modules" || fname_low == ".git" || fname_low == "cache" || fname_low == "gpucache" {
+                if matches!(fname_low.as_str(), "node_modules" | ".git" | "cache" | "gpucache") {
                     continue;
                 }
-                walk(&p, now_u, max_age, depth - 1, exts, skip_names, best);
-            } else {
-                if skip_names.iter().any(|s| fname_low.contains(s)) {
-                    continue;
-                }
-                let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-                if exts.iter().any(|wanted| *wanted == ext) {
-                    let mtime = file_unix(&p);
-                    let age = now_u - mtime;
-                    if mtime > 0 && age <= max_age {
-                        if best.as_ref().is_none_or(|(_, b_t)| mtime > *b_t) {
-                            *best = Some((p, mtime));
-                        }
-                    }
+                walk(&p, now_u, max_age, depth - 1, out);
+            } else if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("jsonl")) {
+                let mtime = file_unix(&p);
+                let age = now_u - mtime;
+                if mtime > 0 && age <= max_age {
+                    out.push((p, mtime));
                 }
             }
         }
     }
-    let mut best = None;
+    let mut all = Vec::new();
     if root.is_dir() {
-        walk(root, now_u, max_age_secs, max_depth, exts, skip_names, &mut best);
+        walk(root, now_u, max_age_secs, max_depth, &mut all);
     }
-    best
+    all.sort_by(|a, b| b.1.cmp(&a.1));
+    all.truncate(limit);
+    all
 }
 
-#[cfg(windows)]
-fn newest_jsonl_in_dir(root: &std::path::Path, now_u: i64, max_age_secs: i64, max_depth: usize) -> Option<(PathBuf, i64)> {
-    newest_file_in_dir(root, now_u, max_age_secs, max_depth, &["jsonl"], &[])
+fn clean_project_basename(cwd_or_dir: &str) -> String {
+    let trimmed = cwd_or_dir.trim().trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() {
+        return "workspace".to_owned();
+    }
+    let last = trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed);
+    if last.contains("--") {
+        let segs: Vec<&str> = last.split('-').filter(|s| !s.is_empty()).collect();
+        if segs.len() >= 2 {
+            return segs[segs.len().saturating_sub(2)..].join("-");
+        }
+    }
+    last.to_owned()
 }
 
-#[cfg(windows)]
-fn detect_agent_tool_children() -> Vec<&'static str> {
-    // IDE/Electron 客户端在空闲打开时本身就会常驻语言服务、Git 状态轮询或终端子进程，
-    // 不能把后台子进程等同于 AI 正在工作；工作态统一由显式 Hook 或活跃会话流判定。
-    Vec::new()
+fn format_model_short(raw: &str, default_model: &str) -> String {
+    let r = raw.trim();
+    if r.is_empty() {
+        return default_model.to_owned();
+    }
+    let low = r.to_ascii_lowercase();
+    if low.contains("opus-4-6") || low.contains("opus-4.6") {
+        "Opus 4.6".to_owned()
+    } else if low.contains("opus-5-5") || low.contains("opus-5.5") {
+        "Opus 5.5".to_owned()
+    } else if low.contains("sonnet-4") {
+        "Sonnet 4.5".to_owned()
+    } else if low.contains("haiku") {
+        "Haiku 4.5".to_owned()
+    } else {
+        r.chars().take(18).collect()
+    }
 }
 
-/// 零配置原生探测 Claude Code (`~/.claude/projects/**/*.jsonl`) 与 Codex CLI (`~/.codex/sessions/**/*.jsonl`) 的实时会话状态。
-#[cfg(windows)]
-fn scan_live_agent_files(now_u: i64) -> Vec<(String, String, Phase, String)> {
+fn format_effort_short(raw: &str, default_effort: &str) -> String {
+    let low = raw.trim().to_ascii_lowercase();
+    match low.as_str() {
+        "high" | "max" => "High".to_owned(),
+        "medium" | "med" => "Medium".to_owned(),
+        "low" | "min" => "Low".to_owned(),
+        _ => default_effort.to_owned(),
+    }
+}
+
+/// [flyl1u/fly-island 演示会话]：1:1 复刻图 1 (`image_f41ce3.png`) 的三条会话，
+/// 供本机尚无活跃 Claude Code / Codex / DSH 会话时直接预览和交互。
+#[allow(dead_code)]
+pub fn build_fly_island_demo_sessions(now_u: i64) -> Vec<Agent> {
+    vec![
+        Agent {
+            key: "codex-fly-release".to_owned(),
+            name: "Codex".to_owned(),
+            phase: Phase::Waiting,
+            message: "草稿写好了，要我按版本号提交吗？".to_owned(),
+            detail: "支持岛内直接允许(Ctrl+Alt+Y) / 拒绝(Ctrl+Alt+N)".to_owned(),
+            project: "fly-island".to_owned(),
+            updated: now_u - 15,
+            age_secs: 15,
+            step: "草稿写好了，要我按版本号提交吗？".to_owned(),
+            step_index: 0,
+            step_total: 0,
+            progress: 0.90,
+            elapsed: 7 * 60,
+            quiet: false,
+            provider_key: "codex".to_owned(),
+            title: "整理 3.1 发布说明".to_owned(),
+            model: "gpt-6-astra".to_owned(),
+            effort: "Medium".to_owned(),
+            is_cli: false,
+            cwd: String::new(),
+        },
+        Agent {
+            key: "claude-fly-website".to_owned(),
+            name: "Claude Code".to_owned(),
+            phase: Phase::Working,
+            message: "正在把真实的小岛放进官网...".to_owned(),
+            detail: "Claude Code CLI 正在编辑仓库文件".to_owned(),
+            project: "fly-island-website".to_owned(),
+            updated: now_u - 5,
+            age_secs: 5,
+            step: "正在把真实的小岛放进官网...".to_owned(),
+            step_index: 2,
+            step_total: 4,
+            progress: 0.65,
+            elapsed: 4 * 60,
+            quiet: false,
+            provider_key: "claude".to_owned(),
+            title: "重做官网首页".to_owned(),
+            model: "Opus 5.5".to_owned(),
+            effort: "High".to_owned(),
+            is_cli: true,
+            cwd: String::new(),
+        },
+        Agent {
+            key: "codex-fly-clipboard".to_owned(),
+            name: "Codex".to_owned(),
+            phase: Phase::Done,
+            message: "已完成剪贴板图片预览修复".to_owned(),
+            detail: "任务已完成".to_owned(),
+            project: "fly-island".to_owned(),
+            updated: now_u - 60,
+            age_secs: 60,
+            step: "已完成剪贴板图片预览修复".to_owned(),
+            step_index: 4,
+            step_total: 4,
+            progress: 1.0,
+            elapsed: 10 * 60,
+            quiet: false,
+            provider_key: "codex".to_owned(),
+            title: "修复剪贴板图片预览".to_owned(),
+            model: "gpt-6-astra".to_owned(),
+            effort: "Medium".to_owned(),
+            is_cli: false,
+            cwd: String::new(),
+        },
+    ]
+}
+
+/// [flyl1u/fly-island] 零配置原生扫描 Claude Code (`~/.claude/projects/**/*.jsonl`)、
+/// OpenAI Codex (`~/.codex/sessions/**/*.jsonl`) 与 DeepSeek Harness (`~/.dsh/sessions/**/*.jsonl`) 的多会话状态。
+fn scan_fly_island_jsonl_sessions(now_u: i64) -> Vec<Agent> {
     let mut out = Vec::new();
+    let cfg = super::config::get();
     let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from) else {
         return out;
     };
 
-    // 1. Claude Code 实时会话 JSONL 探测
-    let claude_root = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".claude"))
-        .join("projects");
-    if let Some((jsonl_path, mtime)) = newest_jsonl_in_dir(&claude_root, now_u, 150, 3) {
-        let age = (now_u - mtime).max(0);
-        if let Some(tail) = read_file_tail_string(&jsonl_path, 16384) {
+    // 1. Claude Code 多会话 JSONL 探测 (`~/.claude/projects/**/*.jsonl`)
+    if cfg.fly_claude_sessions {
+        let claude_root = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".claude"))
+            .join("projects");
+        for (jsonl_path, mtime) in recent_jsonl_files_in_dir(&claude_root, now_u, 1800, 3, 4) {
+            let age = (now_u - mtime).max(0);
+            let Some((head, tail)) = read_file_head_and_tail(&jsonl_path, 6144, 16384) else { continue };
+            let mut cwd = String::new();
+            let mut title = String::new();
+            let mut model = String::new();
+            let mut effort = String::new();
+            for line in head.lines() {
+                let l = line.trim();
+                if !l.starts_with('{') { continue; }
+                let Ok(v) = serde_json::from_str::<Value>(l) else { continue };
+                if cwd.is_empty() {
+                    cwd = string_field(&v, "cwd");
+                }
+                if title.is_empty() && string_field(&v, "type") == "user" {
+                    if let Some(s) = v.pointer("/message/content").and_then(Value::as_str) {
+                        title = s.lines().next().unwrap_or("").trim().chars().take(24).collect();
+                    } else if let Some(arr) = v.pointer("/message/content").and_then(Value::as_array) {
+                        for it in arr {
+                            if let Some(t) = it.get("text").and_then(Value::as_str) {
+                                let clean = t.lines().next().unwrap_or("").trim();
+                                if !clean.is_empty() && !clean.starts_with('<') {
+                                    title = clean.chars().take(24).collect();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             let mut last_phase: Option<Phase> = None;
             let mut last_msg = String::new();
             for line in tail.lines().rev() {
                 let l = line.trim();
-                if !l.starts_with('{') {
+                if !l.starts_with('{') { continue; }
+                let Ok(v) = serde_json::from_str::<Value>(l) else { continue };
+                if model.is_empty() {
+                    if let Some(m) = v.pointer("/message/model").and_then(Value::as_str).or_else(|| v.get("model").and_then(Value::as_str)) {
+                        model = m.to_owned();
+                    }
+                }
+                if effort.is_empty() {
+                    if let Some(ef) = v.get("effort").and_then(Value::as_str).or_else(|| v.pointer("/message/effort").and_then(Value::as_str)) {
+                        effort = ef.to_owned();
+                    }
+                }
+                if last_phase.is_some() {
                     continue;
                 }
-                let Ok(v) = serde_json::from_str::<Value>(l) else { continue };
                 let row_type = string_field(&v, "type");
                 if row_type == "system" && string_field(&v, "subtype") == "turn_duration" {
-                    if age <= 45 {
-                        last_phase = Some(Phase::Done);
-                        last_msg = "Claude Code 已完成本轮任务".to_owned();
-                    }
-                    break;
+                    last_phase = Some(Phase::Done);
+                    last_msg = "已完成本轮任务".to_owned();
                 } else if row_type == "assistant" {
                     let stop_reason = v.pointer("/message/stop_reason").and_then(Value::as_str).unwrap_or("");
                     if let Some(arr) = v.pointer("/message/content").and_then(Value::as_array) {
@@ -856,12 +1076,14 @@ fn scan_live_agent_files(now_u: i64) -> Vec<(String, String, Phase, String)> {
                         if let Some((t_name, detail)) = found_tool {
                             let is_ask = t_name == "AskUserQuestion";
                             let is_approval_tool = matches!(t_name.as_str(), "Bash" | "Edit" | "Write" | "MultiEdit");
-                            let ph = if is_ask && age <= 300 {
+                            let ph = if is_ask && age <= 600 {
                                 Phase::Waiting
-                            } else if is_approval_tool && age >= 12 && age <= 180 {
+                            } else if is_approval_tool && age >= 8 && age <= 300 {
                                 Phase::Waiting
-                            } else {
+                            } else if age <= 90 {
                                 Phase::Tool
+                            } else {
+                                Phase::Done
                             };
                             let summary = if detail.is_empty() {
                                 format!("正在调用 {t_name}")
@@ -871,86 +1093,223 @@ fn scan_live_agent_files(now_u: i64) -> Vec<(String, String, Phase, String)> {
                             };
                             last_phase = Some(ph);
                             last_msg = summary;
-                            break;
-                        } else if stop_reason == "end_turn" {
-                            if age <= 35 {
-                                last_phase = Some(Phase::Done);
-                                let short: String = found_text.lines().next().unwrap_or("任务已完成").chars().take(42).collect();
-                                last_msg = if short.is_empty() { "Claude Code 已完成回复".to_owned() } else { short };
-                            }
-                            break;
-                        } else if age <= 25 {
+                        } else if stop_reason == "end_turn" || age > 45 {
+                            last_phase = Some(Phase::Done);
+                            let short: String = found_text.lines().next().unwrap_or("任务已完成").chars().take(42).collect();
+                            last_msg = if short.is_empty() { "已完成回复".to_owned() } else { short };
+                        } else {
                             last_phase = Some(Phase::Working);
                             let short: String = found_text.lines().next().unwrap_or("正在生成代码与回复…").chars().take(42).collect();
-                            last_msg = if short.is_empty() { "Claude Code 正在思考与编码…".to_owned() } else { short };
-                            break;
+                            last_msg = if short.is_empty() { "正在思考与编码…".to_owned() } else { short };
                         }
                     }
-                } else if row_type == "user" && age <= 25 {
+                } else if row_type == "user" && age <= 35 {
                     last_phase = Some(Phase::Working);
-                    last_msg = "Claude Code 正在思考与分析任务…".to_owned();
-                    break;
+                    last_msg = "正在思考与分析任务…".to_owned();
                 }
             }
             if let Some(ph) = last_phase {
-                out.push(("claude".to_owned(), "Claude Code".to_owned(), ph, last_msg));
+                let stem = jsonl_path.file_stem().and_then(|s| s.to_str()).unwrap_or("session");
+                let parent_dir = jsonl_path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()).unwrap_or("project");
+                let project = if !cwd.is_empty() {
+                    clean_project_basename(&cwd)
+                } else {
+                    clean_project_basename(parent_dir)
+                };
+                if title.is_empty() {
+                    title = "Claude Code 会话".to_owned();
+                }
+                out.push(Agent {
+                    key: format!("claude-{stem}"),
+                    name: "Claude Code".to_owned(),
+                    phase: ph,
+                    message: last_msg.clone(),
+                    detail: last_msg.clone(),
+                    project,
+                    updated: mtime,
+                    age_secs: age,
+                    step: last_msg,
+                    step_index: 0,
+                    step_total: 0,
+                    progress: if ph == Phase::Done { 1.0 } else { 0.65 },
+                    elapsed: age.max(60),
+                    quiet: false,
+                    provider_key: "claude".to_owned(),
+                    title,
+                    model: format_model_short(&model, "Opus 4.6"),
+                    effort: format_effort_short(&effort, "High"),
+                    is_cli: true,
+                    cwd,
+                });
             }
         }
     }
 
-    // 2. OpenAI Codex CLI 实时会话 JSONL 探测 (`~/.codex/sessions/**/*.jsonl`)
-    let codex_root = std::env::var_os("CODEX_HOME")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".codex"))
-        .join("sessions");
-    if let Some((jsonl_path, mtime)) = newest_jsonl_in_dir(&codex_root, now_u, 150, 5) {
-        let age = (now_u - mtime).max(0);
-        if let Some(tail) = read_file_tail_string(&jsonl_path, 16384) {
+    // 2. OpenAI Codex 多会话 JSONL 探测 (`~/.codex/sessions/**/*.jsonl`)
+    if cfg.fly_codex_sessions {
+        let codex_root = std::env::var_os("CODEX_HOME")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"))
+            .join("sessions");
+        for (jsonl_path, mtime) in recent_jsonl_files_in_dir(&codex_root, now_u, 1800, 5, 4) {
+            let age = (now_u - mtime).max(0);
+            let Some((head, tail)) = read_file_head_and_tail(&jsonl_path, 6144, 16384) else { continue };
+            let mut cwd = String::new();
+            let mut title = String::new();
+            let mut model = String::new();
+            let mut effort = String::new();
+            let mut is_cli = true;
+            for line in head.lines() {
+                let l = line.trim();
+                if !l.starts_with('{') { continue; }
+                let Ok(v) = serde_json::from_str::<Value>(l) else { continue };
+                if cwd.is_empty() {
+                    cwd = v.pointer("/payload/cwd").and_then(Value::as_str).or_else(|| v.get("cwd").and_then(Value::as_str)).unwrap_or("").to_owned();
+                }
+                if let Some(orig) = v.pointer("/payload/originator").and_then(Value::as_str) {
+                    if orig.to_ascii_lowercase().contains("desktop") || orig.to_ascii_lowercase().contains("app") {
+                        is_cli = false;
+                    }
+                }
+                if title.is_empty() {
+                    if let Some(msg) = v.pointer("/payload/message").and_then(Value::as_str) {
+                        let clean = msg.lines().next().unwrap_or("").trim();
+                        if !clean.is_empty() {
+                            title = clean.chars().take(24).collect();
+                        }
+                    }
+                }
+            }
             let mut last_phase: Option<Phase> = None;
             let mut last_msg = String::new();
             for line in tail.lines().rev() {
                 let l = line.trim();
-                if !l.starts_with('{') {
+                if !l.starts_with('{') { continue; }
+                let Ok(v) = serde_json::from_str::<Value>(l) else { continue };
+                if model.is_empty() {
+                    if let Some(m) = v.pointer("/payload/model").and_then(Value::as_str).or_else(|| v.get("model").and_then(Value::as_str)) {
+                        model = m.to_owned();
+                    }
+                }
+                if effort.is_empty() {
+                    if let Some(ef) = v.pointer("/payload/effort").and_then(Value::as_str).or_else(|| v.pointer("/payload/reasoning_effort").and_then(Value::as_str)) {
+                        effort = ef.to_owned();
+                    }
+                }
+                if last_phase.is_some() {
                     continue;
                 }
-                let Ok(v) = serde_json::from_str::<Value>(l) else { continue };
                 let ev_type = v.pointer("/payload/type").and_then(Value::as_str)
                     .or_else(|| v.get("type").and_then(Value::as_str))
                     .unwrap_or("");
                 if matches!(ev_type, "task_complete" | "turn_complete" | "agent_turn_complete") {
-                    if age <= 35 {
-                        last_phase = Some(Phase::Done);
-                        last_msg = "Codex 已完成当前编码任务".to_owned();
-                    }
-                    break;
-                } else if matches!(ev_type, "function_call" | "custom_tool_call" | "exec_command" | "apply_patch") && age <= 35 {
+                    last_phase = Some(Phase::Done);
+                    last_msg = "已完成当前编码任务".to_owned();
+                } else if matches!(ev_type, "function_call" | "custom_tool_call" | "exec_command" | "apply_patch") {
                     let t_name = v.pointer("/payload/name").and_then(Value::as_str).unwrap_or("命令/工具");
-                    last_phase = Some(if age >= 8 { Phase::Waiting } else { Phase::Tool });
-                    last_msg = format!("Codex 正在执行: {t_name}");
-                    break;
-                } else if matches!(ev_type, "agent_reasoning" | "task_started" | "turn_started") && age <= 20 {
-                    last_phase = Some(Phase::Working);
-                    last_msg = "Codex 正在推理与编写代码…".to_owned();
-                    break;
+                    last_phase = Some(if age >= 8 && age <= 300 { Phase::Waiting } else if age <= 60 { Phase::Tool } else { Phase::Done });
+                    last_msg = format!("正在执行: {t_name}");
+                } else if matches!(ev_type, "agent_reasoning" | "task_started" | "turn_started") {
+                    last_phase = Some(if age <= 60 { Phase::Working } else { Phase::Done });
+                    last_msg = "正在推理与编写代码…".to_owned();
                 }
             }
             if let Some(ph) = last_phase {
-                out.push(("codex".to_owned(), "Codex".to_owned(), ph, last_msg));
+                let stem = jsonl_path.file_stem().and_then(|s| s.to_str()).unwrap_or("codex");
+                let project = if !cwd.is_empty() {
+                    clean_project_basename(&cwd)
+                } else {
+                    "codex-project".to_owned()
+                };
+                if title.is_empty() {
+                    title = "Codex 编码任务".to_owned();
+                }
+                out.push(Agent {
+                    key: format!("codex-{stem}"),
+                    name: "Codex".to_owned(),
+                    phase: ph,
+                    message: last_msg.clone(),
+                    detail: last_msg.clone(),
+                    project,
+                    updated: mtime,
+                    age_secs: age,
+                    step: last_msg,
+                    step_index: 0,
+                    step_total: 0,
+                    progress: if ph == Phase::Done { 1.0 } else { 0.65 },
+                    elapsed: age.max(60),
+                    quiet: false,
+                    provider_key: "codex".to_owned(),
+                    title,
+                    model: format_model_short(&model, "gpt-5-codex"),
+                    effort: format_effort_short(&effort, "Medium"),
+                    is_cli,
+                    cwd,
+                });
             }
         }
     }
 
-    // 3/4. Gemini Antigravity 与 WorkBuddy 仅凭启动/浏览触发的 .pb/.log mtime 极易在刚打开软件时误报「工作中」，
-    // 故不再基于目录文件修改时间盲猜 Working；请通过生命周期 Hook (*.json) 上报真实状态。
+    // 3. DeepSeek Harness (DSH) 多会话 JSONL 探测 (`~/.dsh/sessions/**/*.jsonl`)
+    if cfg.fly_dsh_sessions {
+        let dsh_root = home.join(".dsh").join("sessions");
+        for (jsonl_path, mtime) in recent_jsonl_files_in_dir(&dsh_root, now_u, 1800, 4, 3) {
+            let age = (now_u - mtime).max(0);
+            let Some((head, tail)) = read_file_head_and_tail(&jsonl_path, 4096, 12288) else { continue };
+            let mut cwd = String::new();
+            let mut title = String::new();
+            for line in head.lines() {
+                let l = line.trim();
+                if !l.starts_with('{') { continue; }
+                let Ok(v) = serde_json::from_str::<Value>(l) else { continue };
+                if cwd.is_empty() {
+                    cwd = string_field(&v, "cwd");
+                }
+                if title.is_empty() {
+                    title = string_field(&v, "title");
+                }
+            }
+            let ph = if age <= 30 { Phase::Working } else { Phase::Done };
+            let last_msg = tail.lines().rev().find_map(|l| {
+                let v: Value = serde_json::from_str(l.trim()).ok()?;
+                let m = string_field(&v, "message");
+                (!m.is_empty()).then_some(m)
+            }).unwrap_or_else(|| "DeepSeek Harness 会话".to_owned());
+            let stem = jsonl_path.file_stem().and_then(|s| s.to_str()).unwrap_or("dsh");
+            out.push(Agent {
+                key: format!("deepseek-{stem}"),
+                name: "DeepSeek".to_owned(),
+                phase: ph,
+                message: last_msg.clone(),
+                detail: last_msg.clone(),
+                project: clean_project_basename(&cwd),
+                updated: mtime,
+                age_secs: age,
+                step: last_msg,
+                step_index: 0,
+                step_total: 0,
+                progress: if ph == Phase::Done { 1.0 } else { 0.60 },
+                elapsed: age.max(60),
+                quiet: false,
+                provider_key: "deepseek".to_owned(),
+                title: if title.is_empty() { "DSH 终端任务".to_owned() } else { title },
+                model: "deepseek-r1".to_owned(),
+                effort: "High".to_owned(),
+                is_cli: true,
+                cwd,
+            });
+        }
+    }
 
     out
 }
 
-#[cfg(windows)]
-fn cached_running_desktop_agents() -> Vec<(String, String, Phase, String)> {
+static FLY_SESSIONS_CACHE: OnceLock<Mutex<(Vec<Agent>, std::time::Instant)>> = OnceLock::new();
+
+fn cached_fly_island_sessions() -> Vec<Agent> {
     if !super::config::get().mod_ai_status_enabled {
-        if let Some(mtx) = DESKTOP_AGENTS_CACHE.get() {
+        if let Some(mtx) = FLY_SESSIONS_CACHE.get() {
             if let Ok(mut g) = mtx.lock() {
                 g.0.clear();
             }
@@ -959,7 +1318,7 @@ fn cached_running_desktop_agents() -> Vec<(String, String, Phase, String)> {
     }
 
     static SCAN_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let slot = DESKTOP_AGENTS_CACHE.get_or_init(|| {
+    let slot = FLY_SESSIONS_CACHE.get_or_init(|| {
         Mutex::new((
             Vec::new(),
             std::time::Instant::now() - std::time::Duration::from_secs(10),
@@ -972,10 +1331,10 @@ fn cached_running_desktop_agents() -> Vec<(String, String, Phase, String)> {
     };
     if need_scan && !SCAN_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         let _ = std::thread::Builder::new()
-            .name("auralsle-agent-win-scan".into())
+            .name("auralsle-fly-session-scan".into())
             .spawn(|| {
-                let detected = detect_running_desktop_agents();
-                if let Some(mtx) = DESKTOP_AGENTS_CACHE.get() {
+                let detected = scan_fly_island_jsonl_sessions(unix_now());
+                if let Some(mtx) = FLY_SESSIONS_CACHE.get() {
                     if let Ok(mut g) = mtx.lock() {
                         g.0 = detected;
                         g.1 = std::time::Instant::now();
@@ -985,121 +1344,6 @@ fn cached_running_desktop_agents() -> Vec<(String, String, Phase, String)> {
             });
     }
     cached
-}
-
-#[cfg(windows)]
-fn detect_running_desktop_agents() -> Vec<(String, String, Phase, String)> {
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetForegroundWindow, GetWindowTextW, IsWindowVisible,
-    };
-
-    let now_u = unix_now();
-    // 优先采集 Claude Code / Codex / Antigravity / WorkBuddy 本机实时会话状态与子工具进程
-    let mut initial = scan_live_agent_files(now_u);
-    let tool_active_keys = detect_agent_tool_children();
-    for &t_key in &tool_active_keys {
-        if let Some(pos) = initial.iter().position(|x| x.0 == t_key) {
-            if matches!(initial[pos].2, Phase::Done) {
-                let d_name = initial[pos].1.clone();
-                initial[pos].2 = Phase::Working;
-                initial[pos].3 = format!("{d_name} 正在运行子命令/工具…");
-            } else if matches!(initial[pos].2, Phase::Waiting) {
-                let d_name = initial[pos].1.clone();
-                initial[pos].2 = Phase::Tool;
-                initial[pos].3 = format!("{d_name} 正在执行子命令/工具…");
-            }
-        }
-    }
-
-    struct Ctx {
-        fg: HWND,
-        now_u: i64,
-        tool_active_keys: Vec<&'static str>,
-        found: Vec<(String, String, Phase, String)>,
-    }
-    fn phase_rank(p: Phase) -> u8 {
-        match p {
-            Phase::Waiting => 4,
-            Phase::Tool => 3,
-            Phase::Working | Phase::Running => 2,
-            Phase::Error => 1,
-            Phase::Done => 0,
-        }
-    }
-    unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        unsafe {
-            if !IsWindowVisible(hwnd).as_bool() {
-                return BOOL(1);
-            }
-            let mut buf = [0u16; 256];
-            let len = GetWindowTextW(hwnd, &mut buf);
-            if len <= 0 {
-                return BOOL(1);
-            }
-            let title = String::from_utf16_lossy(&buf[..len as usize]);
-            let low = title.to_ascii_lowercase();
-            if low == "msctfime ui" || low == "default ime" || low.contains("tooltip") {
-                return BOOL(1);
-            }
-            let ctx = &mut *(lparam.0 as *mut Ctx);
-            let proc_low = window_process_name_low(hwnd);
-
-            let Some((ag_key, ag_name)) = classify_ai_agent_window(&title, &low, &proc_low) else {
-                return BOOL(1);
-            };
-
-            let is_ide = matches!(
-                ag_key,
-                "antigravity" | "cursor" | "windsurf" | "kiro" | "workbuddy" | "zcode"
-            );
-            // IDE 窗口标题常包含正在编辑的文件名（如 loading.rs、confirm.ts、● 未保存），绝不凭窗口标题猜测工作/审批态
-            let waiting = !is_ide
-                && (title.contains("请求确认")
-                    || title.contains("需要批准")
-                    || title.contains("请求权限")
-                    || low.contains("approve?")
-                    || low.contains("allow?"));
-            let busy_kw = !is_ide
-                && (title.contains("正在回复")
-                    || title.contains("回复中")
-                    || title.contains("正在生成")
-                    || title.contains("停止生成")
-                    || low.contains("stop generating")
-                    || low.contains("generating response"));
-            let has_tool_child = false;
-
-            let (phase_opt, status_msg) = if waiting {
-                (Some(Phase::Waiting), format!("等待你确认或批准操作 · {title}"))
-            } else if busy_kw {
-                (Some(Phase::Working), format!("{ag_name} 正在思考与生成回复 · {title}"))
-            } else {
-                (None, String::new())
-            };
-            let _ = (ctx.fg, has_tool_child);
-
-            if let Some(ph) = phase_opt {
-                if let Some(pos) = ctx.found.iter().position(|x| x.0 == ag_key) {
-                    if phase_rank(ph) >= phase_rank(ctx.found[pos].2) {
-                        ctx.found[pos] = (ag_key.to_owned(), ag_name.to_owned(), ph, status_msg);
-                    }
-                } else {
-                    ctx.found.push((ag_key.to_owned(), ag_name.to_owned(), ph, status_msg));
-                }
-            }
-            BOOL(1)
-        }
-    }
-    let mut ctx = Ctx {
-        fg: unsafe { GetForegroundWindow() },
-        now_u,
-        tool_active_keys,
-        found: std::mem::take(&mut initial),
-    };
-    unsafe {
-        let _ = EnumWindows(Some(enum_cb), LPARAM(&mut ctx as *mut Ctx as isize));
-    }
-    ctx.found
 }
 
 #[cfg(windows)]

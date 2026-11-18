@@ -172,6 +172,80 @@ fn glass_key(shapes: &[crate::app::GlassShape], ppp: f32) -> Vec<i32> {
     key
 }
 
+/// 将主岛、悬浮球、课程卡与设备药丸拆分为互不粘连的多块矩形区域，消除胶囊下方及跨块空白区域的点击遮挡。
+fn multi_rect_key(
+    r: (i32, i32, i32, i32),
+    h: (i32, i32, i32, i32),
+    notice_hit: Option<(i32, i32, i32, i32)>,
+    shapes: &[crate::app::GlassShape],
+    ppp: f32,
+    expanded: bool,
+) -> Vec<i32> {
+    use crate::app::GlassShape;
+    let px_floor = |v: f32| (v * ppp).floor() as i32;
+    let px_ceil = |v: f32| (v * ppp).ceil() as i32;
+    let pad = if expanded { (ppp * 12.0).ceil() as i32 } else { (ppp * 1.0).ceil() as i32 };
+    let mut key = vec![
+        -3,
+        (h.0 - pad).max(r.0),
+        r.1.min(h.1),
+        (h.2 + pad).min(r.2),
+        (h.3 + pad).min(r.3),
+    ];
+    if let Some(nh) = notice_hit {
+        key.extend([
+            (nh.0 - pad).max(r.0),
+            (nh.1 - pad).max(r.1),
+            (nh.2 + pad).min(r.2),
+            (nh.3 + pad).min(r.3),
+        ]);
+    }
+    for shape in shapes {
+        let bounds = match shape {
+            GlassShape::Round(rect, _)
+            | GlassShape::Notch { rect, .. }
+            | GlassShape::Docked { rect, .. } => *rect,
+            GlassShape::Outline(pts) => eframe::egui::Rect::from_points(pts),
+        };
+        if bounds.width() > 0.5 && bounds.height() > 0.5 {
+            key.extend([
+                (px_floor(bounds.left()) - pad).max(r.0),
+                (px_floor(bounds.top()) - pad).max(r.1),
+                (px_ceil(bounds.right()) + pad).min(r.2),
+                (px_ceil(bounds.bottom()) + pad).min(r.3),
+            ]);
+        }
+    }
+    key
+}
+
+unsafe fn multi_rect_region(key: &[i32]) -> Option<HRGN> {
+    if key.first() != Some(&-3) {
+        return None;
+    }
+    let mut out: Option<HRGN> = None;
+    let mut i = 1;
+    while i + 3 < key.len() {
+        let (l, t, r, b) = (key[i], key[i + 1], key[i + 2], key[i + 3]);
+        i += 4;
+        if r <= l || b <= t {
+            continue;
+        }
+        let part = CreateRectRgn(l, t, r, b);
+        if part.0.is_null() {
+            continue;
+        }
+        match out {
+            None => out = Some(part),
+            Some(all) => {
+                let _ = CombineRgn(all, all, part, RGN_OR);
+                let _ = DeleteObject(part);
+            }
+        }
+    }
+    out
+}
+
 /// 按 `glass_key` 的结果合成窗口区域（多块轮廓取并集）。
 unsafe fn glass_region(key: &[i32]) -> Option<HRGN> {
     let mut out: Option<HRGN> = None;
@@ -563,8 +637,9 @@ impl Window {
             px(hit_rect.0 + hit_rect.2),
             px(hit_rect.1 + hit_rect.3),
         );
-        let mut hits=vec![h];
-        if let Some((x,y,w,h))=notice_hit {hits.push((px(x),px(y),px(x+w),px(y+h)));}
+        let notice_px = notice_hit.map(|(x, y, w, h)| (px(x), px(y), px(x + w), px(y + h)));
+        let mut hits = vec![h];
+        if let Some(nh) = notice_px { hits.push(nh); }
         *hit().lock().unwrap_or_else(|e| e.into_inner()) = hits;
         // 毛玻璃：合成引擎的模糊块贴合岛体轮廓，窗口区域仍用矩形（含阴影与拖放感应区）。
         let _ = capture;
@@ -625,8 +700,7 @@ impl Window {
             None if self.region != r || self.glass.is_some() => {
                 unsafe {
                     let rgn = CreateRectRgn(r.0, r.1, r.2, r.3);
-                    // DirectComposition 透明窗口由 GPU 交换链独立合成，传入 bRedraw=false 避免触发同步 WM_PAINT/WM_ERASEBKGND 阻塞主线程
-                    if SetWindowRgn(self.hwnd, rgn, false) != 0 {
+                    if SetWindowRgn(self.hwnd, rgn, true) != 0 {
                         self.region = r;
                         self.glass=None;
                     } else {

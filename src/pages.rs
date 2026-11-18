@@ -35,6 +35,43 @@ fn cover_colors(title: &str) -> (Color32, Color32) {
     palette[(h % palette.len() as u64) as usize]
 }
 
+/// 绘制音乐岛高质感统一圆角胶囊播放/暂停按钮（修复悬浮云/毛玻璃主题下 hgrad 对角线分色伪影，双竖条采用圆润胶囊造型）。
+fn paint_music_play_button(
+    c: &Card,
+    cx: f32,
+    cy: f32,
+    w: f32,
+    h: f32,
+    hover: f32,
+    press: f32,
+    playing_t: f32,
+    accent: Color32,
+    icon_sz: f32,
+) {
+    let scale = 1.0 - 0.08 * press + 0.03 * hover;
+    let p_card = c.scaled(cx, cy, scale);
+    let r = h * 0.5;
+    let x = cx - w * 0.5;
+    let y = cy - h * 0.5;
+    let from = crate::skin_paint::shape_count(p_card.ui.ctx(), p_card.painter.layer_id());
+    p_card.fill(x, y, w, h, r, paint::alpha(accent, 0.28 + 0.14 * hover));
+    p_card.fill(x, y, w, h, r, Color32::from_white_alpha((30.0 + 18.0 * hover) as u8));
+    p_card.stroke(x, y, w, h, r, 0.9, Color32::from_white_alpha((58.0 + 26.0 * hover) as u8));
+    if playing_t >= 0.88 {
+        let bar_w = (icon_sz * 0.25).clamp(2.6, 3.4);
+        let bar_h = icon_sz.clamp(9.5, 13.0);
+        let gap = (icon_sz * 0.26).clamp(2.8, 3.6);
+        let br = bar_w * 0.48;
+        p_card.fill(cx - gap * 0.5 - bar_w, cy - bar_h * 0.5, bar_w, bar_h, br, Color32::WHITE);
+        p_card.fill(cx + gap * 0.5, cy - bar_h * 0.5, bar_w, bar_h, br, Color32::WHITE);
+    } else {
+        paint::play_pause(&p_card, cx, cy, icon_sz, playing_t, Color32::WHITE);
+    }
+    if !cfg!(test) {
+        crate::skin_paint::tone_since(p_card.ui.ctx(), p_card.painter.layer_id(), from, |col, _| col);
+    }
+}
+
 impl App {
     // ================= 音乐 =================
     /// 从当前正在播放的真实专辑封面像素中提取双主色调（左上高光色 + 右下氛围色，自动提升过暗或低饱和像素的明度与饱和度；无封面时回退到歌名哈希色板，需求 13）。
@@ -396,9 +433,7 @@ impl App {
         let play_resp = c.hit(216.0, y - 11.5, 52.0, 23.0, "m-play-ei");
         let (play_hov, play_press) = c.hover_t(&play_resp);
         let c_mag = crate::auralsle_ai_status::ui::magnet_offset(cur_local, Pos2::new(242.0, y), 26.0, 2.6);
-        let play_card = c.scaled(242.0 + c_mag.x, y + c_mag.y, 1.0 - 0.08 * play_press);
-        play_card.hgrad(218.0 + c_mag.x, y - 9.5 + c_mag.y, 48.0, 19.0, 9.5, accent_a, mix(accent_b, Color32::WHITE, 0.18 * play_hov));
-        paint::play_pause(&play_card, 242.5 + c_mag.x, y + c_mag.y, 12.2, playing_t, Color32::WHITE);
+        paint_music_play_button(c, 242.0 + c_mag.x, y + c_mag.y, 48.0, 19.0, play_hov, play_press, playing_t, accent_a, 11.2);
 
         let next_r = c.hit(272.0, y - 11.5, 36.0, 23.0, "m-next-ei");
         let (nh, np_p) = c.hover_t(&next_r);
@@ -881,8 +916,8 @@ impl App {
         paint::skip(c, 171.0, cy_ctrl, -0.92, ic);
 
         let play_r = c.hit(192.0, cy_ctrl - 12.5, 36.0, 25.0, "m-play-fly");
-        c.hgrad(194.0, cy_ctrl - 10.5, 32.0, 21.0, 10.5, accent_a, accent_b);
-        paint::play_pause(c, 210.0, cy_ctrl, 11.5, playing_t, Color32::WHITE);
+        let (p_hov, p_press) = c.hover_t(&play_r);
+        paint_music_play_button(c, 210.0, cy_ctrl, 34.0, 20.0, p_hov, p_press, playing_t, accent_a, 11.0);
         if play_r.clicked() && has {
             cmds.push(Cmd::Media(Transport::Toggle));
         }
@@ -1030,37 +1065,51 @@ impl App {
             }
         };
 
-        // 辅助：居中逐字点亮歌词行（左右互补裁剪，杜绝双层叠绘造成切字边缘重影）
+        // 辅助：居中逐字点亮 + 超宽平滑横向滚动歌词行
         let draw_karaoke_lyric_center = |card: &Card, lx: f32, ly: f32, max_w: f32, text: &str, fsz: f32, prog: f32| {
             let phase = if cfg!(test) { 0.0 } else { card.ui.ctx().input(|i| i.time) as f32 * 2.4 };
             let ly = ly + if cfg!(test) { 0.0 } else { phase.sin() * 0.8 };
-            let fitted = card.fit(text, fsz, W::Bold, max_w);
-            let total_tw = card.text_w(&fitted, fsz, W::Bold);
-            let start_x = lx - total_tw * 0.5;
+            let raw_tw = card.text_w(text, fsz, W::Bold);
+            let box_x = lx - max_w * 0.5;
+            let viewport = card.clipped(box_x, ly - fsz - 4.0, max_w, fsz + 10.0);
+            let (draw_x, total_tw) = if !cfg!(test) && raw_tw > max_w {
+                let scroll_u = ((prog - 0.14) / 0.72).clamp(0.0, 1.0);
+                let sx = card.ui.ctx().animate_value_with_time(egui::Id::new("gl-karaoke-scroll-c"), (raw_tw - max_w + 6.0) * scroll_u, 0.12);
+                (box_x - sx, raw_tw)
+            } else {
+                (lx - raw_tw * 0.5, raw_tw)
+            };
             let lit_w = (total_tw * prog.clamp(0.18, 1.0)).clamp(0.0, total_tw + 2.0);
-            let clip_lit = card.clipped(start_x - 2.0, ly - fsz - 4.0, lit_w + 2.0, fsz + 10.0);
-            clip_lit.text(start_x, ly, &fitted, fsz, W::Bold, theme::WHITE, H::Left);
+            let clip_lit = viewport.clipped(draw_x - 2.0, ly - fsz - 4.0, lit_w + 2.0, fsz + 10.0);
+            clip_lit.text(draw_x, ly, text, fsz, W::Bold, theme::WHITE, H::Left);
             if lit_w < total_tw {
-                let clip_dim = card.clipped(start_x + lit_w, ly - fsz - 4.0, (total_tw - lit_w) + 6.0, fsz + 10.0);
-                clip_dim.text(start_x, ly, &fitted, fsz, W::Bold, Color32::from_white_alpha(115), H::Left);
+                let clip_dim = viewport.clipped(draw_x + lit_w, ly - fsz - 4.0, (total_tw - lit_w) + 6.0, fsz + 10.0);
+                clip_dim.text(draw_x, ly, text, fsz, W::Bold, Color32::from_white_alpha(115), H::Left);
             }
-            karaoke_wave_crest(card, start_x + lit_w, ly, fsz, prog, phase, lit_w < total_tw);
+            karaoke_wave_crest(&viewport, draw_x + lit_w, ly, fsz, prog, phase, lit_w < total_tw);
         };
 
-        // 辅助：左对齐逐字点亮歌词行（左右互补裁剪，杜绝双层叠绘造成切字边缘重影）
+        // 辅助：左对齐逐字点亮 + 超宽平滑横向滚动歌词行
         let draw_karaoke_lyric_left = |card: &Card, start_x: f32, ly: f32, max_w: f32, text: &str, fsz: f32, prog: f32| {
             let phase = if cfg!(test) { 0.0 } else { card.ui.ctx().input(|i| i.time) as f32 * 2.4 };
             let ly = ly + if cfg!(test) { 0.0 } else { phase.sin() * 0.8 };
-            let fitted = card.fit(text, fsz, W::Bold, max_w);
-            let total_tw = card.text_w(&fitted, fsz, W::Bold);
-            let lit_w = (total_tw * prog.clamp(0.18, 1.0)).clamp(0.0, total_tw + 2.0);
-            let clip_lit = card.clipped(start_x - 2.0, ly - fsz - 4.0, lit_w + 2.0, fsz + 10.0);
-            clip_lit.text(start_x, ly, &fitted, fsz, W::Bold, theme::WHITE, H::Left);
-            if lit_w < total_tw {
-                let clip_dim = card.clipped(start_x + lit_w, ly - fsz - 4.0, (total_tw - lit_w) + 6.0, fsz + 10.0);
-                clip_dim.text(start_x, ly, &fitted, fsz, W::Bold, Color32::from_white_alpha(115), H::Left);
+            let raw_tw = card.text_w(text, fsz, W::Bold);
+            let viewport = card.clipped(start_x, ly - fsz - 4.0, max_w, fsz + 10.0);
+            let draw_x = if !cfg!(test) && raw_tw > max_w {
+                let scroll_u = ((prog - 0.14) / 0.72).clamp(0.0, 1.0);
+                let sx = card.ui.ctx().animate_value_with_time(egui::Id::new("gl-karaoke-scroll-l"), (raw_tw - max_w + 6.0) * scroll_u, 0.12);
+                start_x - sx
+            } else {
+                start_x
+            };
+            let lit_w = (raw_tw * prog.clamp(0.18, 1.0)).clamp(0.0, raw_tw + 2.0);
+            let clip_lit = viewport.clipped(draw_x - 2.0, ly - fsz - 4.0, lit_w + 2.0, fsz + 10.0);
+            clip_lit.text(draw_x, ly, text, fsz, W::Bold, theme::WHITE, H::Left);
+            if lit_w < raw_tw {
+                let clip_dim = viewport.clipped(draw_x + lit_w, ly - fsz - 4.0, (raw_tw - lit_w) + 6.0, fsz + 10.0);
+                clip_dim.text(draw_x, ly, text, fsz, W::Bold, Color32::from_white_alpha(115), H::Left);
             }
-            karaoke_wave_crest(card, start_x + lit_w, ly, fsz, prog, phase, lit_w < total_tw);
+            karaoke_wave_crest(&viewport, draw_x + lit_w, ly, fsz, prog, phase, lit_w < raw_tw);
         };
 
         if form == 0 {
@@ -1110,11 +1159,8 @@ impl App {
             }
             paint::skip(c, cx_ctrl - 24.0, cy_ctrl, -0.82, ic);
             let play_r = c.hit(cx_ctrl - 12.0, cy_ctrl - 11.0, 26.0, 22.0, "gl-m0-play");
-            let (_, p_press) = c.hover_t(&play_r);
-            let p_card = c.scaled(cx_ctrl + 1.0, cy_ctrl, 1.0 - 0.08 * p_press);
-            p_card.hgrad(cx_ctrl - 11.0, cy_ctrl - 9.5, 24.0, 19.0, 9.5, play_col_a, play_col_b);
-            p_card.stroke(cx_ctrl - 11.0, cy_ctrl - 9.5, 24.0, 19.0, 9.5, 0.85, Color32::from_white_alpha(48));
-            paint::play_pause(&p_card, cx_ctrl + 1.0, cy_ctrl, 10.5, playing_t, Color32::WHITE);
+            let (p_hov, p_press) = c.hover_t(&play_r);
+            paint_music_play_button(c, cx_ctrl + 1.0, cy_ctrl, 24.0, 19.0, p_hov, p_press, playing_t, play_col_a, 10.2);
             if play_r.clicked() && has {
                 cmds.push(Cmd::Media(Transport::Toggle));
             }
@@ -1235,11 +1281,8 @@ impl App {
             }
             paint::skip(c, mid_x - 42.0, y_ctrl, -0.95, ic);
             let play_r = c.hit(mid_x - 21.0, y_ctrl - 12.0, 42.0, 24.0, "gl-m1-play");
-            let (_, p_press) = c.hover_t(&play_r);
-            let p_card = c.scaled(mid_x, y_ctrl, 1.0 - 0.08 * p_press);
-            p_card.hgrad(mid_x - 20.0, y_ctrl - 9.8, 40.0, 19.6, 9.8, play_col_a, play_col_b);
-            p_card.stroke(mid_x - 20.0, y_ctrl - 9.8, 40.0, 19.6, 9.8, 0.9, Color32::from_white_alpha(52));
-            paint::play_pause(&p_card, mid_x, y_ctrl, 11.5, playing_t, Color32::WHITE);
+            let (p_hov, p_press) = c.hover_t(&play_r);
+            paint_music_play_button(c, mid_x, y_ctrl, 40.0, 19.6, p_hov, p_press, playing_t, play_col_a, 11.0);
             if play_r.clicked() && has {
                 cmds.push(Cmd::Media(Transport::Toggle));
             }
@@ -1329,11 +1372,8 @@ impl App {
             }
             paint::skip(c, mid_x - 46.0, y_ctrl, -1.0, ic);
             let play_r = c.hit(mid_x - 22.0, y_ctrl - 12.0, 44.0, 24.0, "gl-m2-play");
-            let (_, p_press) = c.hover_t(&play_r);
-            let p_card = c.scaled(mid_x, y_ctrl, 1.0 - 0.08 * p_press);
-            p_card.hgrad(mid_x - 21.0, y_ctrl - 9.8, 42.0, 19.6, 9.8, play_col_a, play_col_b);
-            p_card.stroke(mid_x - 21.0, y_ctrl - 9.8, 42.0, 19.6, 9.8, 0.95, Color32::from_white_alpha(56));
-            paint::play_pause(&p_card, mid_x, y_ctrl, 12.0, playing_t, Color32::WHITE);
+            let (p_hov, p_press) = c.hover_t(&play_r);
+            paint_music_play_button(c, mid_x, y_ctrl, 42.0, 19.6, p_hov, p_press, playing_t, play_col_a, 11.2);
             if play_r.clicked() && has {
                 cmds.push(Cmd::Media(Transport::Toggle));
             }

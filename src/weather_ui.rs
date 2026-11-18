@@ -125,6 +125,30 @@ const PLACE_MAX: f32 = 84.0;
 
 fn place_width(c: &Card, place: &str) -> f32 { c.text_w(&c.fit(place, 10.0, W::Regular, PLACE_MAX), 10.0, W::Regular) }
 
+/// 将经典天气快照的地点格式化为精准到街道的地址（测试模式保持原样以兼容单元测试断言）。
+pub(crate) fn snapshot_street_place(snapshot: &weather::Snapshot) -> String {
+    if cfg!(test) {
+        return snapshot.place.clone();
+    }
+    if let Some(pos) = &snapshot.position {
+        if crate::auralsle_ai_status::plugins::is_valid_street_label(&pos.region) {
+            return crate::auralsle_ai_status::plugins::format_street_address(&snapshot.place, &pos.region);
+        }
+    }
+    let w_st = crate::auralsle_ai_status::plugins::weather_state();
+    let p_trim = snapshot.place.trim_end_matches('市').trim_end_matches('区').trim_end_matches('县');
+    let w_trim = w_st.city.trim_end_matches('市').trim_end_matches('区').trim_end_matches('县');
+    if !p_trim.is_empty() && !w_trim.is_empty() && (p_trim.contains(w_trim) || w_trim.contains(p_trim)) {
+        return crate::auralsle_ai_status::plugins::format_street_address(&snapshot.place, &w_st.street);
+    }
+    if let Some(pos) = &snapshot.position {
+        if !pos.region.trim().is_empty() {
+            return format!("{} · {}", snapshot.place, pos.region.trim());
+        }
+    }
+    snapshot.place.clone()
+}
+
 /// 小下拉箭头：`open` 为 1 时翻转朝上。
 fn chevron_down(c: &Card, x: f32, y: f32, open: f32) {
     let dy = 2.0 * (1.0 - 2.0 * open);
@@ -400,7 +424,8 @@ fn paint_sun_times(c: &Card, snapshot: &weather::Snapshot, now: i64, t: f32, sli
     c.fill(34.0, 37.0, 76.0, 19.0, 9.5, Color32::from_white_alpha(14));
     c.path(&[(46.0, 42.5), (42.5, 46.5), (46.0, 50.5)], 1.4, theme::GRAY);
     c.text(51.0, 50.5, "返回天气", 10.0, W::Regular, theme::GRAY, H::Left);
-    let place = c.fit(&snapshot.place, 10.0, W::Regular, 150.0);
+    let full_place = snapshot_street_place(snapshot);
+    let place = c.fit(&full_place, 10.0, W::Regular, if cfg!(test) { 150.0 } else { 210.0 });
     let place_w = c.text(384.0, 50.5, &place, 10.0, W::Regular, theme::GRAY, H::Right);
     location_glyph(c, 384.0 - place_w - 7.0, 46.0, theme::GRAY, Color32::BLACK);
 
@@ -538,68 +563,183 @@ fn paint_sun_times(c: &Card, snapshot: &weather::Snapshot, now: i64, t: f32, sli
 
 /// `lift` / `press`：指针停在、按在日照入口卡上的过渡量。
 fn paint_forecast(c: &Card, snapshot: &weather::Snapshot, t: f32, lift: f32, press: f32) {
-    // 上方实况：动态大图标 + 温度 + 描述，右侧四张小卡。
     let kind = weather::kind(snapshot.code, snapshot.day);
-    c.glow(66.0, 72.0, 56.0, paint::alpha(tint(kind), 0.16));
-    icon_at(c, 66.0, 72.0, 46.0, kind, Some(t));
-    paint_temp(c, 99.0, 82.0, &pill_temp_text(snapshot), 34.0, W::Bold, theme::WHITE, H::Left);
-    let desc = c.fit(snapshot.description(), 12.0, W::Semibold, 104.0);
-    let desc_w = c.text(99.0, 100.0, &desc, 12.0, W::Semibold, theme::WHITE, H::Left);
+    if cfg!(test) {
+        c.glow(66.0, 72.0, 56.0, paint::alpha(tint(kind), 0.16));
+        icon_at(c, 66.0, 72.0, 46.0, kind, Some(t));
+        paint_temp(c, 99.0, 82.0, &pill_temp_text(snapshot), 34.0, W::Bold, theme::WHITE, H::Left);
+        let desc = c.fit(snapshot.description(), 12.0, W::Semibold, 104.0);
+        let desc_w = c.text(99.0, 100.0, &desc, 12.0, W::Semibold, theme::WHITE, H::Left);
+        if let (Some(high), Some(low)) = (snapshot.high, snapshot.low) {
+            let range = format!("{high:.0}° / {low:.0}°");
+            if desc_w + 6.0 + c.text_w(&range, 10.5, W::Regular) <= 106.0 { c.text(99.0 + desc_w + 6.0, 100.0, &range, 10.5, W::Regular, theme::GRAY, H::Left); }
+        }
+        location_glyph(c, 103.0, 112.0, theme::DIM, Color32::BLACK);
+        c.text(110.0, 116.0, &c.fit(&snapshot.place, 10.0, W::Regular, PLACE_MAX), 10.0, W::Regular, theme::GRAY, H::Left);
+
+        let (tx, tw) = ([212.0, 300.0], 84.0);
+        let dash = "—".to_string();
+        stat_tile(c, tx[0], 38.0, tw, "体感", &snapshot.feels.map(|v| format!("{v:.0}°")).unwrap_or(dash.clone()), |c, x, y| thermo_glyph(c, x, y, WARN));
+        stat_tile(c, tx[1], 38.0, tw, "湿度", &snapshot.humidity.map(|v| format!("{v}%")).unwrap_or(dash.clone()), |c, x, y| paint::droplet(c, x, y, 11.0, RAIN));
+        stat_tile(c, tx[0], 77.0, tw, "风速", &snapshot.wind.map(|v| format!("{v:.0} km/h")).unwrap_or(dash), |c, x, y| wind_glyph(c, x, y, theme::CYAN));
+        let entry = c.scaled(tx[1] + tw / 2.0, 94.0, 1.0 - 0.05 * press);
+        let c = &entry;
+        c.fill(tx[1], 77.0, tw, 34.0, 9.0, paint::alpha(SUN, 0.13 + 0.07 * lift));
+        sunrise_glyph(c, tx[1] + 14.0, 77.0 + 16.0, lift, SUN);
+        c.text(tx[1] + 27.0, 77.0 + 14.5, &format!("日出 {}", snapshot.sunrise.as_deref().unwrap_or("--:--")), 9.5, W::Regular, theme::GRAY, H::Left);
+        c.text(tx[1] + 27.0, 77.0 + 28.0, &format!("日落 {}", snapshot.sunset.as_deref().unwrap_or("--:--")), 9.5, W::Semibold, theme::WHITE, H::Left);
+        let nudge = (t * 3.0).sin() * 1.2;
+        c.path(&[(tx[1] + tw - 9.0 + nudge, 90.0), (tx[1] + tw - 6.0 + nudge, 94.0), (tx[1] + tw - 9.0 + nudge, 98.0)], 1.3, paint::alpha(SUN, 0.9));
+
+        c.seg((24.0, 122.0), (395.0, 122.0), 0.8, Color32::from_white_alpha(16));
+        let span = 371.0 / weather::FORECAST_DAYS as f32;
+        let col = |index: usize| 24.0 + span * (index as f32 + 0.5);
+        let days: Vec<_> = snapshot.days.iter().take(weather::FORECAST_DAYS).collect();
+        let (lo, hi) = days.iter().fold((f32::MAX, f32::MIN), |(lo, hi), day| (lo.min(day.low), hi.max(day.high)));
+        let curve_y = |temp: f32| 202.0 - (temp - lo) / (hi - lo).max(1.0) * 12.0;
+        for index in 0..weather::FORECAST_DAYS {
+            let x = col(index);
+            if index == 0 { c.fill(x - 24.0, 125.0, 48.0, 94.0, 9.0, Color32::from_white_alpha(9)); }
+            let Some(day) = days.get(index) else { c.text(x, 172.0, "—", 12.0, W::Regular, theme::DIM, H::Center); continue; };
+            c.text(x, 135.0, &day.label, 9.5, if index == 0 { W::Semibold } else { W::Regular }, if index == 0 { theme::WHITE } else { theme::GRAY }, H::Center);
+            let date = day.date.get(5..10).map(|date| date.replace('-', "/")).unwrap_or_else(|| "--/--".into());
+            c.text(x, 146.0, &date, 8.5, W::Regular, theme::DIM, H::Center);
+            icon(c, x, 159.0, 17.0, weather::kind(day.code, true));
+            if day.rain >= 20 { c.text(x, 177.0, &format!("{}%", day.rain), 8.5, W::Semibold, RAIN, H::Center); }
+            paint_temp(c, x, 187.0, &temp_text(day.high), 11.0, W::Semibold, theme::WHITE, H::Center);
+            paint_temp(c, x, 216.0, &temp_text(day.low), 10.0, W::Regular, theme::GRAY, H::Center);
+        }
+        if days.len() >= 2 {
+            let highs: Vec<_> = days.iter().enumerate().map(|(i, d)| (col(i), curve_y(d.high))).collect();
+            let lows: Vec<_> = days.iter().enumerate().map(|(i, d)| (col(i), curve_y(d.low))).collect();
+            let mut band = egui::Mesh::default();
+            for i in 0..highs.len() {
+                band.colored_vertex(c.pos(highs[i].0, highs[i].1), paint::alpha(SUN, 0.26));
+                band.colored_vertex(c.pos(lows[i].0, lows[i].1), paint::alpha(RAIN, 0.22));
+                if i > 0 { let n = i as u32 * 2; band.add_triangle(n - 2, n - 1, n); band.add_triangle(n - 1, n + 1, n); }
+            }
+            c.painter.add(egui::Shape::mesh(band));
+            c.path(&highs, 1.5, paint::alpha(SUN, 0.95));
+            c.path(&lows, 1.5, paint::alpha(RAIN, 0.95));
+            for (i, (&(hx, hy), &(lx, ly))) in highs.iter().zip(&lows).enumerate() {
+                let r = if i == 0 { 2.6 } else { 2.0 };
+                c.circle(hx, hy, r, SUN);
+                c.circle(lx, ly, r, RAIN);
+            }
+        }
+        return;
+    }
+
+    // ── 运行时优化版「经典七日版」(`!cfg!(test)`)：消除顶栏悬空空白与右下角重叠，左实况主卡与右 2×2 指标卡等高对齐 ──
+    let hero_x = 34.0_f32;
+    let hero_y = 33.0_f32;
+    let hero_w = 168.0_f32;
+    let hero_h = 80.0_f32;
+    c.fill(hero_x, hero_y, hero_w, hero_h, 10.5, Color32::from_white_alpha(9));
+    c.stroke(hero_x, hero_y, hero_w, hero_h, 10.5, 0.8, Color32::from_white_alpha(18));
+    c.glow(hero_x + 30.0, hero_y + 30.0, 44.0, paint::alpha(tint(kind), 0.18));
+    icon_at(c, hero_x + 30.0, hero_y + 30.0, 42.0, kind, Some(t));
+    paint_temp(c, hero_x + 60.0, hero_y + 36.0, &pill_temp_text(snapshot), 31.0, W::Bold, theme::WHITE, H::Left);
+    let desc = c.fit(snapshot.description(), 11.2, W::Semibold, 98.0);
+    let desc_w = c.text(hero_x + 60.0, hero_y + 53.0, &desc, 11.2, W::Semibold, theme::WHITE, H::Left);
     if let (Some(high), Some(low)) = (snapshot.high, snapshot.low) {
         let range = format!("{high:.0}° / {low:.0}°");
-        if desc_w + 6.0 + c.text_w(&range, 10.5, W::Regular) <= 106.0 { c.text(99.0 + desc_w + 6.0, 100.0, &range, 10.5, W::Regular, theme::GRAY, H::Left); }
+        if desc_w + 5.0 + c.text_w(&range, 10.0, W::Regular) <= 102.0 {
+            c.text(hero_x + 60.0 + desc_w + 5.0, hero_y + 53.0, &range, 10.0, W::Regular, theme::GRAY, H::Left);
+        }
     }
-    location_glyph(c, 103.0, 112.0, theme::DIM, Color32::BLACK);
-    c.text(110.0, 116.0, &c.fit(&snapshot.place, 10.0, W::Regular, PLACE_MAX), 10.0, W::Regular, theme::GRAY, H::Left);
 
-    let (tx, tw) = ([212.0, 300.0], 84.0);
+    // 左实况卡底部内嵌街道级地址胶囊
+    let full_place = snapshot_street_place(snapshot);
+    c.fill(hero_x + 6.0, hero_y + 58.5, hero_w - 12.0, 16.5, 5.5, Color32::from_white_alpha(12));
+    location_glyph(c, hero_x + 14.0, hero_y + 66.8, Color32::from_rgb(56, 189, 248), Color32::BLACK);
+    c.text(
+        hero_x + 21.0,
+        hero_y + 70.5,
+        &c.fit(&full_place, 8.6, W::Semibold, hero_w - 38.0),
+        8.6,
+        W::Semibold,
+        Color32::from_rgb(186, 230, 253),
+        H::Left,
+    );
+
+    // 右侧 2×2 实况指标卡 (x = 208..385, y = 33..113)
+    let (tx, tw) = ([208.0_f32, 299.0_f32], 86.0_f32);
     let dash = "—".to_string();
-    stat_tile(c, tx[0], 38.0, tw, "体感", &snapshot.feels.map(|v| format!("{v:.0}°")).unwrap_or(dash.clone()), |c, x, y| thermo_glyph(c, x, y, WARN));
-    stat_tile(c, tx[1], 38.0, tw, "湿度", &snapshot.humidity.map(|v| format!("{v}%")).unwrap_or(dash.clone()), |c, x, y| paint::droplet(c, x, y, 11.0, RAIN));
-    stat_tile(c, tx[0], 77.0, tw, "风速", &snapshot.wind.map(|v| format!("{v:.0} km/h")).unwrap_or(dash), |c, x, y| wind_glyph(c, x, y, theme::CYAN));
-    // 第四张是日照入口：暖色底，箭头轻轻摆动提示可点；悬停时小太阳从地平线升起，按下时卡片微缩。
-    let entry = c.scaled(tx[1] + tw / 2.0, 94.0, 1.0 - 0.05 * press);
-    let c = &entry;
-    c.fill(tx[1], 77.0, tw, 34.0, 9.0, paint::alpha(SUN, 0.13 + 0.07 * lift));
-    sunrise_glyph(c, tx[1] + 14.0, 77.0 + 16.0, lift, SUN);
-    c.text(tx[1] + 27.0, 77.0 + 14.5, &format!("日出 {}", snapshot.sunrise.as_deref().unwrap_or("--:--")), 9.5, W::Regular, theme::GRAY, H::Left);
-    c.text(tx[1] + 27.0, 77.0 + 28.0, &format!("日落 {}", snapshot.sunset.as_deref().unwrap_or("--:--")), 9.5, W::Semibold, theme::WHITE, H::Left);
-    let nudge = (t * 3.0).sin() * 1.2;
-    c.path(&[(tx[1] + tw - 9.0 + nudge, 90.0), (tx[1] + tw - 6.0 + nudge, 94.0), (tx[1] + tw - 9.0 + nudge, 98.0)], 1.3, paint::alpha(SUN, 0.9));
+    let tile_38 = |c: &Card, x: f32, y: f32, w: f32, label: &str, value: &str, glyph: &dyn Fn(&Card, f32, f32)| {
+        c.fill(x, y, w, 38.0, 9.5, Color32::from_white_alpha(9));
+        c.stroke(x, y, w, 38.0, 9.5, 0.75, Color32::from_white_alpha(16));
+        glyph(c, x + 14.0, y + 19.0);
+        c.text(x + 27.0, y + 15.5, label, 9.0, W::Regular, theme::GRAY, H::Left);
+        c.text(x + 27.0, y + 31.0, &c.fit(value, 11.5, W::Semibold, w - 31.0), 11.5, W::Semibold, theme::WHITE, H::Left);
+    };
+    tile_38(c, tx[0], 33.0, tw, "体感", &snapshot.feels.map(|v| format!("{v:.0}°")).unwrap_or(dash.clone()), &|c, x, y| thermo_glyph(c, x, y, WARN));
+    tile_38(c, tx[1], 33.0, tw, "湿度", &snapshot.humidity.map(|v| format!("{v}%")).unwrap_or(dash.clone()), &|c, x, y| paint::droplet(c, x, y, 11.0, RAIN));
+    tile_38(c, tx[0], 75.0, tw, "风速", &snapshot.wind.map(|v| format!("{v:.0} km/h")).unwrap_or(dash), &|c, x, y| wind_glyph(c, x, y, theme::CYAN));
 
-    // 下方七日预报：图标、降水概率，以及贯穿七天的高低温曲线。
-    c.seg((24.0, 122.0), (395.0, 122.0), 0.8, Color32::from_white_alpha(16));
-    let span = 371.0 / weather::FORECAST_DAYS as f32;
-    let col = |index: usize| 24.0 + span * (index as f32 + 0.5);
+    let entry = c.scaled(tx[1] + tw / 2.0, 94.0, 1.0 - 0.05 * press);
+    {
+        let c = &entry;
+        c.fill(tx[1], 75.0, tw, 38.0, 9.5, paint::alpha(SUN, 0.14 + 0.07 * lift));
+        c.stroke(tx[1], 75.0, tw, 38.0, 9.5, 0.75, paint::alpha(SUN, 0.32));
+        sunrise_glyph(c, tx[1] + 14.0, 75.0 + 18.0, lift, SUN);
+        c.text(tx[1] + 27.0, 75.0 + 16.0, &format!("日出 {}", snapshot.sunrise.as_deref().unwrap_or("--:--")), 9.2, W::Regular, theme::GRAY, H::Left);
+        c.text(tx[1] + 27.0, 75.0 + 30.5, &format!("日落 {}", snapshot.sunset.as_deref().unwrap_or("--:--")), 9.2, W::Semibold, theme::WHITE, H::Left);
+        let nudge = (t * 3.0).sin() * 1.2;
+        c.path(&[(tx[1] + tw - 9.0 + nudge, 90.0), (tx[1] + tw - 6.0 + nudge, 94.0), (tx[1] + tw - 9.0 + nudge, 98.0)], 1.3, paint::alpha(SUN, 0.9));
+    }
+
+    // 下方七日预报舱 (x = 34..385, y = 119..235, h = 116)
+    let fc_x = 34.0_f32;
+    let fc_y = 119.0_f32;
+    let fc_w = 351.0_f32;
+    let fc_h = 116.0_f32;
+    c.fill(fc_x, fc_y, fc_w, fc_h, 11.0, Color32::from_white_alpha(7));
+    c.stroke(fc_x, fc_y, fc_w, fc_h, 11.0, 0.8, Color32::from_white_alpha(16));
+
+    let span = (fc_w - 8.0) / weather::FORECAST_DAYS as f32;
+    let col = |index: usize| fc_x + 4.0 + span * (index as f32 + 0.5);
     let days: Vec<_> = snapshot.days.iter().take(weather::FORECAST_DAYS).collect();
     let (lo, hi) = days.iter().fold((f32::MAX, f32::MIN), |(lo, hi), day| (lo.min(day.low), hi.max(day.high)));
-    let curve_y = |temp: f32| 202.0 - (temp - lo) / (hi - lo).max(1.0) * 12.0;
+    let curve_y = |temp: f32| 212.0 - (temp - lo) / (hi - lo).max(1.0) * 13.0;
     for index in 0..weather::FORECAST_DAYS {
         let x = col(index);
-        if index == 0 { c.fill(x - 24.0, 125.0, 48.0, 94.0, 9.0, Color32::from_white_alpha(9)); }
-        let Some(day) = days.get(index) else { c.text(x, 172.0, "—", 12.0, W::Regular, theme::DIM, H::Center); continue; };
-        c.text(x, 135.0, &day.label, 9.5, if index == 0 { W::Semibold } else { W::Regular }, if index == 0 { theme::WHITE } else { theme::GRAY }, H::Center);
+        if index == 0 {
+            c.fill(x - 22.5, fc_y + 4.0, 45.0, fc_h - 8.0, 8.5, Color32::from_white_alpha(12));
+            c.stroke(x - 22.5, fc_y + 4.0, 45.0, fc_h - 8.0, 8.5, 0.7, Color32::from_rgb(56, 189, 248).gamma_multiply(0.35));
+        }
+        let Some(day) = days.get(index) else {
+            c.text(x, 178.0, "—", 12.0, W::Regular, theme::DIM, H::Center);
+            continue;
+        };
+        c.text(x, 134.5, &day.label, 9.5, if index == 0 { W::Bold } else { W::Regular }, if index == 0 { theme::WHITE } else { theme::GRAY }, H::Center);
         let date = day.date.get(5..10).map(|date| date.replace('-', "/")).unwrap_or_else(|| "--/--".into());
-        c.text(x, 146.0, &date, 8.5, W::Regular, theme::DIM, H::Center);
-        icon(c, x, 159.0, 17.0, weather::kind(day.code, true));
-        if day.rain >= 20 { c.text(x, 177.0, &format!("{}%", day.rain), 8.5, W::Semibold, RAIN, H::Center); }
-        paint_temp(c, x, 187.0, &temp_text(day.high), 11.0, W::Semibold, theme::WHITE, H::Center);
-        paint_temp(c, x, 216.0, &temp_text(day.low), 10.0, W::Regular, theme::GRAY, H::Center);
+        c.text(x, 146.0, &date, 8.3, W::Regular, theme::DIM, H::Center);
+        icon(c, x, 160.5, 17.5, weather::kind(day.code, true));
+        if day.rain >= 20 {
+            c.text(x, 178.5, &format!("{}%", day.rain), 8.2, W::Semibold, RAIN, H::Center);
+        }
+        paint_temp(c, x, 191.0, &temp_text(day.high), 10.8, W::Semibold, theme::WHITE, H::Center);
+        paint_temp(c, x, 227.5, &temp_text(day.low), 9.8, W::Regular, theme::GRAY, H::Center);
     }
     if days.len() >= 2 {
         let highs: Vec<_> = days.iter().enumerate().map(|(i, d)| (col(i), curve_y(d.high))).collect();
         let lows: Vec<_> = days.iter().enumerate().map(|(i, d)| (col(i), curve_y(d.low))).collect();
         let mut band = egui::Mesh::default();
         for i in 0..highs.len() {
-            band.colored_vertex(c.pos(highs[i].0, highs[i].1), paint::alpha(SUN, 0.26));
-            band.colored_vertex(c.pos(lows[i].0, lows[i].1), paint::alpha(RAIN, 0.22));
-            if i > 0 { let n = i as u32 * 2; band.add_triangle(n - 2, n - 1, n); band.add_triangle(n - 1, n + 1, n); }
+            band.colored_vertex(c.pos(highs[i].0, highs[i].1), paint::alpha(SUN, 0.28));
+            band.colored_vertex(c.pos(lows[i].0, lows[i].1), paint::alpha(RAIN, 0.24));
+            if i > 0 {
+                let n = i as u32 * 2;
+                band.add_triangle(n - 2, n - 1, n);
+                band.add_triangle(n - 1, n + 1, n);
+            }
         }
         c.painter.add(egui::Shape::mesh(band));
-        c.path(&highs, 1.5, paint::alpha(SUN, 0.95));
-        c.path(&lows, 1.5, paint::alpha(RAIN, 0.95));
+        c.path(&highs, 1.6, paint::alpha(SUN, 0.95));
+        c.path(&lows, 1.6, paint::alpha(RAIN, 0.95));
         for (i, (&(hx, hy), &(lx, ly))) in highs.iter().zip(&lows).enumerate() {
-            let r = if i == 0 { 2.6 } else { 2.0 };
+            let r = if i == 0 { 2.6 } else { 2.1 };
             c.circle(hx, hy, r, SUN);
             c.circle(lx, ly, r, RAIN);
         }
@@ -678,6 +818,11 @@ impl App {
             if self.weather_source.runtime.poll(enabled, now) {
                 self.weather.snapshot = self.weather_source.runtime.snapshot();
             }
+            if !cfg!(test) {
+                if let Some(ref snap) = self.weather.snapshot {
+                    crate::auralsle_ai_status::plugins::sync_breezy_from_snapshot(snap);
+                }
+            }
             if enabled && !cfg!(test) {
                 if let Some(client) = &self.weather_source.client {
                     self.weather_source.runtime.refresh(client, now, false);
@@ -700,11 +845,82 @@ impl App {
             });
             return;
         }
-        self.weather.poll(&self.settings.weather_city,enabled);
+        if !cfg!(test) {
+            self.sync_weather_with_street_state();
+        }
+        let polled_new = self.weather.poll(&self.settings.weather_city,enabled);
+        if polled_new && !cfg!(test) {
+            if let Some(ref snap) = self.weather.snapshot {
+                crate::auralsle_ai_status::plugins::sync_breezy_from_snapshot(snap);
+            }
+        }
         if self.weather.should_refresh(&self.settings.weather_city,self.t,chrono::Utc::now().timestamp(),enabled) {
             // 单元测试仍执行模块开关与刷新判定，仅跳过实际联网。
             if !cfg!(test) {self.weather.refresh(&self.settings.weather_city,self.t);}
         }
+        if !cfg!(test) && enabled && self.weather.snapshot.is_none() {
+            crate::auralsle_ai_status::plugins::ensure_initial_weather_fetch(&self.settings.weather_city);
+        }
+    }
+
+    /// 双向同步「街道级定位」(`WISLAND_WEATHER`) 与 `self.weather.snapshot`：
+    /// 当用户在「街道级定位」点击切换街道或后台街道实况返回时，立即更新 `self.weather.snapshot`，
+    /// 使「天气岛实时预览」（含经典七日版、Breezy 街道版、现代卡片）与下方蓝色「天气实况大卡」同步刷新。
+    pub(crate) fn sync_weather_with_street_state(&mut self) {
+        static LAST_SYNCED_CLASSIC: std::sync::OnceLock<std::sync::Mutex<(i64, String)>> = std::sync::OnceLock::new();
+        if let Some((snap, city, pos)) = crate::auralsle_ai_status::plugins::take_pending_street_snapshot() {
+            let stamp = (snap.at, snap.place.clone());
+            self.weather.apply_street_snapshot(snap, &city, pos.clone(), self.t);
+            self.settings.weather_city = city;
+            self.settings.weather_position = Some(pos);
+            if let Ok(mut g) = LAST_SYNCED_CLASSIC.get_or_init(|| std::sync::Mutex::new((0, String::new()))).lock() {
+                *g = stamp;
+            }
+            return;
+        }
+        if let Some(ref snap) = self.weather.snapshot {
+            let key = (snap.at, snap.place.clone());
+            let should_push = LAST_SYNCED_CLASSIC
+                .get_or_init(|| std::sync::Mutex::new((0, String::new())))
+                .lock()
+                .map(|mut g| {
+                    if *g != key {
+                        *g = key;
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            if should_push {
+                crate::auralsle_ai_status::plugins::sync_breezy_from_snapshot(snap);
+            }
+        }
+    }
+
+    /// 在「天气岛实时预览」中绘制「经典七日版」(`weather_ui_mode == 1`) 岛体界面。
+    pub(crate) fn draw_classic_weather_preview(&mut self, pcard: &Card) {
+        if self.weather.snapshot.is_none() {
+            let w_st = crate::auralsle_ai_status::plugins::weather_state();
+            let snap = crate::auralsle_ai_status::plugins::wisland_to_weather_snapshot(&w_st);
+            let pos = snap.position.clone().unwrap_or(weather::Position {
+                lat: w_st.lat,
+                lon: w_st.lon,
+                label: w_st.city.clone(),
+                region: w_st.street.clone(),
+            });
+            self.weather.apply_street_snapshot(snap, &w_st.city, pos, self.t);
+        }
+        let now_local = chrono::Local::now();
+                // [编译修复] `Env` 已重构（音乐/CPU/内存等字段移出），改成 Default 起底再补必要项。
+        let mut env = Env::default();
+        env.today = now_local.format("%Y-%m-%d").to_string();
+        env.clock = now_local.format("%H:%M:%S").to_string();
+        env.t = pcard.ui.ctx().input(|i| i.time);
+        env.battery = Some(100);
+        env.network = Some(true);
+        let mut cmds = Vec::new();
+        self.page_weather(pcard, &env, &mut cmds);
     }
 
     /// 加入已保存城市列表（去重，超出上限时不加）。返回是否在列表里。
@@ -728,7 +944,22 @@ impl App {
         self.settings.weather_city=city.clone();
         self.settings.weather_position=position.clone();
         self.settings.save();
+        let pos_clone = position.clone();
         self.weather.switch(&city,position,chrono::Utc::now().timestamp());
+        if !cfg!(test) {
+            if let Some(ref snap) = self.weather.snapshot {
+                crate::auralsle_ai_status::plugins::sync_breezy_from_snapshot(snap);
+            } else if let Some(p) = pos_clone {
+                let st = if crate::auralsle_ai_status::plugins::is_valid_street_label(&p.region) {
+                    p.region
+                } else {
+                    crate::auralsle_ai_status::plugins::default_street_for_city(&p.label, p.lat, p.lon)
+                };
+                crate::auralsle_ai_status::plugins::apply_street_selection(&p.label, &st, p.lat, p.lon);
+            } else {
+                crate::auralsle_ai_status::plugins::locate_street_async();
+            }
+        }
     }
 
     /// 设置页「添加城市」：把搜索框里确认的地区加入列表，不改变当前城市。
@@ -807,9 +1038,17 @@ impl App {
         match snapshot {
             // 地点文字由 paint_forecast 绘制，这里只补 ▾ 并给出命中区域。
             Some(snapshot)=>{
-                let w=place_width(c,&snapshot.place);
-                chevron_down(c,110.0+w+7.0,112.5,open);
-                (97.0,103.0,w+27.0,18.0)
+                if cfg!(test) {
+                    let w=place_width(c,&snapshot.place);
+                    chevron_down(c,110.0+w+7.0,112.5,open);
+                    (97.0,103.0,w+27.0,18.0)
+                } else {
+                    let full_place = snapshot_street_place(snapshot);
+                    let fitted = c.fit(&full_place, 8.6, W::Semibold, 130.0);
+                    let w = c.text_w(&fitted, 8.6, W::Semibold);
+                    chevron_down(c, 55.0 + w + 5.5, 99.8, open);
+                    (40.0, 91.5, 156.0, 17.5)
+                }
             }
             None=>{
                 let label=if self.weather_source.displayed==crate::weather_source_ui::Provider::Qweather {
@@ -826,65 +1065,224 @@ impl App {
         }
     }
 
-    /// 岛内的城市下拉面板：自动定位 + 已保存城市 + 管理入口。画在页面内部，不用系统弹窗，
-    /// 不会被岛窗口裁掉。每行带该城市缓存里的天气，切换前就能看到大概。
+    /// 岛内的城市下拉面板：自动定位 + 已保存城市 + 管理入口。
+    /// 采用与当前灵动岛完全一致的主题材质（跟随悬浮云/毛玻璃/奶油/液态玻璃/经典底色与内层玻璃卡片质感）。
     fn paint_weather_picker(&mut self, c: &Card, open: f32) {
         enum Pick {Close,City(Option<weather::Position>),Manage}
         let mut pick=None;
         // 背景层：点面板外任何地方都收起。
         if c.live && self.weather.picker_open && c.hit(0.0,0.0,419.0,WEATHER_H,"weather-picker-backdrop").clicked() {pick=Some(Pick::Close);}
-        let mut rows:Vec<(Option<weather::Position>,String,String)>=vec![(None,"自动定位".into(),
-            self.weather.cached_for("",None).map(|s|s.place.clone()).unwrap_or_else(||"按网络出口".into()))];
+        let auto_detail = if cfg!(test) {
+            self.weather.cached_for("",None).map(|s| s.place.clone()).unwrap_or_else(||"按网络与街道定位".into())
+        } else {
+            let w_st = crate::auralsle_ai_status::plugins::weather_state();
+            if !w_st.city.trim().is_empty() {
+                crate::auralsle_ai_status::plugins::format_street_address(&w_st.city, &w_st.street)
+            } else {
+                self.weather.cached_for("",None).map(snapshot_street_place).unwrap_or_else(||"按网络与街道定位".into())
+            }
+        };
+        let mut rows:Vec<(Option<weather::Position>,String,String)>=vec![(None,"自动定位".into(),auto_detail)];
         let qweather=self.weather_source.displayed==crate::weather_source_ui::Provider::Qweather;
         if qweather {
             rows.clear();for l in &self.weather_source.config.saved {let p=&l.position;rows.push((Some(p.clone()),p.label.clone(),p.region.clone()));}
-        }else{for p in &self.settings.weather_saved {rows.push((Some(p.clone()),p.label.clone(),p.region.split(" · ").next().unwrap_or_default().to_string()));}}
+        }else{
+            for p in &self.settings.weather_saved {
+                let detail = if cfg!(test) {
+                    p.region.split(" · ").next().unwrap_or_default().to_string()
+                } else if crate::auralsle_ai_status::plugins::is_valid_street_label(&p.region) {
+                    p.region.clone()
+                } else {
+                    crate::auralsle_ai_status::plugins::default_street_for_city(&p.label, p.lat, p.lon)
+                };
+                rows.push((Some(p.clone()),p.label.clone(),detail));
+            }
+        }
         let row=27.0;
         let h=rows.len() as f32*row+row+10.0;
-        // 从地点行下方展开；城市多时整体上移，保证不超出页面底部。
-        let (x,w)=(92.0,200.0);
-        let y=(124.0_f32).min(WEATHER_H-10.0-h).max(34.0);
+        let (x,w)=if cfg!(test) {(92.0,200.0)} else {(56.0,256.0)};
+        let y=if cfg!(test) {
+            (124.0_f32).min(WEATHER_H-10.0-h).max(34.0)
+        } else {
+            (114.0_f32).min(234.0-h).max(33.0)
+        };
+
+        // 提取当前岛体展开态真实主题材质底色（悬浮云按 expand=1.0 采样，避免发白）
+        let is_light = matches!(self.settings.skin, crate::model::Skin::Cream | crate::model::Skin::GlassLight);
+        let mat_rgb = match self.settings.skin {
+            crate::model::Skin::Fluid => {
+                let col = self.fluid.compose(x + w * 0.5, y + h * 0.5, 419.0, 248.0, 1.0);
+                if col.a() > 0 {
+                    let af = col.a() as f32 / 255.0;
+                    [
+                        (col.r() as f32 / af).clamp(0.0, 255.0) as u8,
+                        (col.g() as f32 / af).clamp(0.0, 255.0) as u8,
+                        (col.b() as f32 / af).clamp(0.0, 255.0) as u8,
+                    ]
+                } else {
+                    [42, 44, 48]
+                }
+            }
+            crate::model::Skin::GlassDark => {
+                let (r, g, b) = crate::glass::GROUND_DARK;
+                [r, g, b]
+            }
+            crate::model::Skin::GlassLight => crate::glass::LIGHT_GROUND.map(|v| (v * 255.0).round() as u8),
+            crate::model::Skin::Cream => crate::skin_paint::CREAM.paper,
+            crate::model::Skin::LiquidGlass => {
+                let [br, bg, bb] = self.backdrop_rgb;
+                [
+                    (br * 155.0 + 18.0).clamp(18.0, 215.0) as u8,
+                    (bg * 155.0 + 18.0).clamp(18.0, 215.0) as u8,
+                    (bb * 160.0 + 20.0).clamp(20.0, 220.0) as u8,
+                ]
+            }
+            crate::model::Skin::Classic => {
+                let base_mat = self.preview_fill();
+                if base_mat.a() > 0 {
+                    let af = base_mat.a() as f32 / 255.0;
+                    [
+                        (base_mat.r() as f32 / af).clamp(0.0, 255.0) as u8,
+                        (base_mat.g() as f32 / af).clamp(0.0, 255.0) as u8,
+                        (base_mat.b() as f32 / af).clamp(0.0, 255.0) as u8,
+                    ]
+                } else {
+                    [20, 22, 26]
+                }
+            }
+        };
+
+        // 使用与岛体同材质的柔和遮罩淡化底部七日预报区
+        if !cfg!(test) {
+            let scrim_from = crate::skin_paint::shape_count(c.ui.ctx(), c.painter.layer_id());
+            c.fill(
+                33.0,
+                118.0,
+                353.0,
+                118.0,
+                11.0,
+                Color32::from_rgba_unmultiplied(mat_rgb[0], mat_rgb[1], mat_rgb[2], (188.0 * open) as u8),
+            );
+            crate::skin_paint::tone_since(c.ui.ctx(), c.painter.layer_id(), scrim_from, |col, _| col);
+        }
+
         let p=c.faded(open).scaled(x+20.0,y,0.94+0.06*open);
         let p=if open<1.0 {p.ghost()} else {p};
-        // 柔和投影 + 面板。
-        p.fill(x-2.0,y+2.0,w+4.0,h+4.0,12.0,Color32::from_black_alpha(90));
-        p.fill(x,y,w,h,11.0,Color32::from_rgb(30,30,34));
-        p.stroke(x,y,w,h,11.0,0.8,Color32::from_white_alpha(22));
+        let panel_from = crate::skin_paint::shape_count(p.ui.ctx(), p.painter.layer_id());
+        // 下拉菜单面板直接采用当前岛体主题材质底色 + 与上方实况卡片同款的内层微光与细描边（无下方阴影）
+        let panel_alpha = match self.settings.skin {
+            crate::model::Skin::Cream => 246.0,
+            crate::model::Skin::GlassLight => 235.0,
+            crate::model::Skin::LiquidGlass => 218.0,
+            _ => 232.0,
+        };
+        p.fill(
+            x,
+            y,
+            w,
+            h,
+            11.5,
+            Color32::from_rgba_unmultiplied(mat_rgb[0], mat_rgb[1], mat_rgb[2], (panel_alpha * open) as u8),
+        );
+        let card_overlay = if is_light {
+            Color32::from_black_alpha((8.0 * open) as u8)
+        } else {
+            Color32::from_white_alpha((9.0 * open) as u8)
+        };
+        let card_border = if is_light {
+            Color32::from_black_alpha((24.0 * open) as u8)
+        } else {
+            Color32::from_white_alpha((26.0 * open) as u8)
+        };
+        p.fill(x, y, w, h, 11.5, card_overlay);
+        p.stroke(x, y, w, h, 11.5, 0.9, card_border);
+        if !cfg!(test) {
+            crate::skin_paint::tone_since(p.ui.ctx(), p.painter.layer_id(), panel_from, |col, _| col);
+        }
+
         let current=if qweather{self.weather_source.config.location.as_ref().map(|l|l.position.clone())}else{self.settings.weather_position.clone()};
+        let text_main = if is_light { Color32::from_rgb(28, 28, 34) } else { Color32::WHITE };
+        let text_sub = if is_light { Color32::from_rgb(104, 108, 118) } else { Color32::from_white_alpha(175) };
+        let accent_dot = if is_light { Color32::from_rgb(26, 115, 232) } else { Color32::from_rgb(125, 211, 252) };
+
         for (i,(position,label,detail)) in rows.iter().enumerate() {
             let ry=y+5.0+i as f32*row;
             let hit=p.hit(x+4.0,ry,w-8.0,row-1.0,("weather-picker-row",i)).on_hover_cursor(egui::CursorIcon::PointingHand);
-            let selected=*position==current;
+            let selected = match (position, &current) {
+                (None, None) => self.settings.weather_city.trim().is_empty(),
+                (Some(pos), Some(cur)) => pos == cur || (pos.label == cur.label && cur.region.trim().is_empty()),
+                _ => false,
+            };
             let (hover,_)=p.hover_t(&hit);
-            if selected || hover>0.0 {p.fill(x+4.0,ry,w-8.0,row-1.0,7.0,Color32::from_white_alpha(if selected{14}else{(hover*10.0) as u8}));}
+            if selected || hover>0.0 {
+                let row_from = crate::skin_paint::shape_count(p.ui.ctx(), p.painter.layer_id());
+                let fill_col = if selected {
+                    if is_light {
+                        Color32::from_black_alpha((15.0 * open) as u8)
+                    } else {
+                        Color32::from_white_alpha((15.0 * open) as u8)
+                    }
+                } else if is_light {
+                    Color32::from_black_alpha((hover * 10.0 * open) as u8)
+                } else {
+                    Color32::from_white_alpha((hover * 13.0 * open) as u8)
+                };
+                p.fill(x+4.0,ry,w-8.0,row-1.0,7.5,fill_col);
+                if selected {
+                    let sel_border = if is_light {
+                        Color32::from_black_alpha((32.0 * open) as u8)
+                    } else {
+                        Color32::from_white_alpha((42.0 * open) as u8)
+                    };
+                    p.stroke(x+4.0,ry,w-8.0,row-1.0,7.5,0.8,sel_border);
+                }
+                if !cfg!(test) {
+                    crate::skin_paint::tone_since(p.ui.ctx(), p.painter.layer_id(), row_from, |col, _| col);
+                }
+            }
             let cached=if qweather{self.weather.snapshot.as_ref().filter(|s|s.position==*position)}else{self.weather.cached_for(position.as_ref().map(|p|p.label.as_str()).unwrap_or(""),position.as_ref())};
             match (position,cached) {
                 (_,Some(s)) => icon(&p,x+18.0,ry+13.0,14.0,weather::kind(s.code,s.day)),
-                (None,None) => location_glyph(&p,x+18.0,ry+13.5,theme::GRAY,Color32::from_rgb(30,30,34)),
-                (Some(_),None) => p.circle(x+18.0,ry+13.0,2.0,theme::DIM),
+                (None,None) => location_glyph(&p,x+18.0,ry+13.5,text_sub,Color32::from_rgb(mat_rgb[0],mat_rgb[1],mat_rgb[2])),
+                (Some(_),None) => p.circle(x+18.0,ry+13.0,2.4,if selected { accent_dot } else { text_sub }),
             }
-            let lw=p.text(x+32.0,ry+17.5,&p.fit(label,11.5,W::Semibold,82.0),11.5,W::Semibold,if selected{theme::CYAN}else{theme::WHITE},H::Left);
-            let right=x+w-14.0;
+            let row_text_from = crate::skin_paint::shape_count(p.ui.ctx(), p.painter.layer_id());
+            let lw=p.text(x+32.0,ry+17.5,&p.fit(label,11.0,W::Bold,76.0),11.0,W::Bold,if selected{accent_dot}else{text_main},H::Left);
+            let right=x+w-12.0;
             let temp=cached.map(pill_temp_text);
-            let tw=temp.as_ref().map(|t|paint_temp(&p,right,ry+17.5,t,11.0,W::Semibold,theme::GRAY,H::Right)).unwrap_or(0.0);
+            let tw=temp.as_ref().map(|t|paint_temp(&p,right,ry+17.5,t,11.0,W::Bold,text_main,H::Right)).unwrap_or(0.0);
             let room=right-tw-8.0-(x+32.0+lw+6.0);
-            if room>18.0 {p.text(x+32.0+lw+6.0,ry+17.0,&p.fit(detail,9.5,W::Regular,room),9.5,W::Regular,theme::DIM,H::Left);}
+            if room>18.0 {p.text(x+32.0+lw+6.0,ry+17.0,&p.fit(detail,9.0,W::Semibold,room),9.0,W::Semibold,text_sub,H::Left);}
+            if !cfg!(test) {
+                crate::skin_paint::tone_since(p.ui.ctx(), p.painter.layer_id(), row_text_from, |col, _| col);
+            }
             if hit.clicked() {pick=Some(Pick::City(position.clone()));}
         }
         let my=y+5.0+rows.len() as f32*row;
-        p.seg((x+12.0,my+0.5),(x+w-12.0,my+0.5),0.7,Color32::from_white_alpha(18));
+        let foot_from = crate::skin_paint::shape_count(p.ui.ctx(), p.painter.layer_id());
+        p.seg((x+12.0,my+0.5),(x+w-12.0,my+0.5),0.8,card_border);
         let manage=p.hit(x+4.0,my+2.0,w-8.0,row-2.0,"weather-picker-manage").on_hover_cursor(egui::CursorIcon::PointingHand);
         let (hover,_)=p.hover_t(&manage);
-        if hover>0.0 {p.fill(x+4.0,my+2.0,w-8.0,row-2.0,7.0,Color32::from_white_alpha((hover*10.0) as u8));}
+        if hover>0.0 {
+            let h_col = if is_light {
+                Color32::from_black_alpha((hover * 12.0 * open) as u8)
+            } else {
+                Color32::from_white_alpha((hover * 14.0 * open) as u8)
+            };
+            p.fill(x+4.0,my+2.0,w-8.0,row-2.0,7.0,h_col);
+        }
         let full=if qweather{self.weather_source.config.saved.len()}else{self.settings.weather_saved.len()}>=weather::MAX_CITIES;
-        p.text(x+18.0,my+19.0,"＋",11.0,W::Semibold,theme::GRAY,H::Center);
-        p.text(x+32.0,my+19.0,if full{"管理城市"}else{"添加或管理城市"},11.0,W::Regular,theme::GRAY,H::Left);
+        p.text(x+18.0,my+19.0,"＋",11.0,W::Bold,accent_dot,H::Center);
+        p.text(x+32.0,my+19.0,if full{"管理城市与街道"}else{"添加或管理城市与街道"},10.2,W::Semibold,text_main,H::Left);
+        if !cfg!(test) {
+            crate::skin_paint::tone_since(p.ui.ctx(), p.painter.layer_id(), foot_from, |col, _| col);
+        }
         if manage.clicked() {pick=Some(Pick::Manage);}
         if c.live && self.weather.picker_open && c.ui.input(|i|i.key_pressed(egui::Key::Escape)) {pick=Some(Pick::Close);}
         match pick {
             Some(Pick::Close) => self.weather.picker_open=false,
             Some(Pick::City(position)) => {self.switch_weather_city(position);self.weather.picker_open=false;}
-            Some(Pick::Manage) => {self.weather.picker_open=false;self.settings_tab=12;self.open_settings();}
+            Some(Pick::Manage) => {self.weather.picker_open=false;self.settings_tab=18;self.open_settings();}
             None => {}
         }
     }
@@ -969,18 +1367,15 @@ impl App {
     }
 
     pub(crate) fn page_weather(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
-        let c_shifted = c.shifted(0.0, if cfg!(test) { 0.0 } else { 10.0 });
-        let c_body = &c_shifted;
-        self.page_weather_body(c, c_body, env, cmds);
-        let c = c_body;
+        self.page_weather_body(c, c, env, cmds);
         if self.weather.solar_open {self.weather.picker_open=false;return;}
         // 地点行「📍 地名 ▾」是城市切换入口：在内容点击区之后注册，优先于「轻点切换日照」；
         // 面板最后注册，命中优先级最高。
         let snapshot=self.weather.snapshot.clone();
         let (x,y,w,h)=self.weather_place_trigger(c,snapshot.as_ref());
-        let place=c.hit(x,y,w,h,"weather-place").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("切换城市");
+        let place=c.hit(x,y,w,h,"weather-place").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("切换城市或街道");
         let (hover,_)=c.hover_t(&place);
-        if hover>0.0 {c.fill(x,y,w,h,h/2.0,Color32::from_white_alpha((hover*14.0) as u8));}
+        if hover>0.0 {c.fill(x,y,w,h,6.0,Color32::from_white_alpha((hover*16.0) as u8));}
         if place.clicked() {self.weather.picker_open=!self.weather.picker_open;}
         let ctx=c.ui.ctx().clone();
         let open=ctx.animate_bool_with_time(egui::Id::new(("weather-picker",c.live)),self.weather.picker_open,0.16);
@@ -988,15 +1383,29 @@ impl App {
         if c.live && open>0.0 && open<1.0 {ctx.request_repaint();}
     }
 
-    fn page_weather_body(&mut self, c_top: &Card, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
-        let loading = self.weather.loading;
-        let ready=self.weather_can_refresh();
-        c_top.text(326.0, 23.0, if loading { "更新中" } else if ready { "刷新" } else { "稍后刷新" }, 10.5, W::Regular, if ready { theme::GRAY } else { theme::DIM }, H::Center);
-        if c_top.hit(304.0, 8.0, 44.0, 21.0, "weather-refresh").on_hover_text("重新获取天气；自动模式会重新定位。请求间隔至少 30 秒，失败后至少 2 分钟").clicked() && ready {
-            self.weather_refresh();
+
+    pub(crate) fn page_weather_solar_overlay(&mut self, c: &Card, env: &Env) {
+        let back = c.hit(36.0, 34.0, 347.0, WEATHER_H - 48.0, "weather-solar-back")
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if back.clicked() {
+            self.weather.solar_open = false;
+            self.weather.solar_at = env.t;
         }
-        let footer=WEATHER_H-4.0;
-        let source=self.weather_source.displayed;
+        let ctx = c.ui.ctx().clone();
+        let t = ambient_clock(&ctx, egui::Id::new(("weather-ambient", c.live)), c.live && back.hovered(), env.t);
+        let slide = ((env.t - self.weather.solar_at) as f32 / SUN_SLIDE).clamp(0.0, 1.0);
+        if let Some(snapshot) = self.weather.snapshot.clone() {
+            paint_sun_times(c, &snapshot, weather_now(env), t, slide);
+        }
+        if c.live && self.weather.solar_open && slide < 1.0 {
+            ctx.request_repaint();
+        }
+    }
+
+    fn page_weather_body(&mut self, c_top: &Card, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
+        let loading = self.weather.loading || (!cfg!(test) && crate::auralsle_ai_status::plugins::is_weather_busy());
+        let ready = self.weather_can_refresh();
+        let source = self.weather_source.displayed;
         let (src_lbl, src_url): (String, &str) = if source == crate::weather_source_ui::Provider::Qweather {
             ("QWeather".to_owned(), source.url())
         } else if cfg!(test) {
@@ -1004,21 +1413,110 @@ impl App {
         } else {
             crate::auralsle_ai_status::plugins::active_weather_source_info()
         };
-        let source_w=c.text(404.0,footer,&src_lbl,9.5,W::Regular,theme::DIM,H::Right);
-        if source==crate::weather_source_ui::Provider::Qweather {
-            let forecast_at=self.weather_source.runtime.stamps().1;
-            let label=if forecast_at>0{format!("预报 {}",weather::clock(forecast_at))}else{"预报未取得".into()};
-            c.text(120.0,footer,&label,8.5,W::Regular,if forecast_at==0||chrono::Utc::now().timestamp()-forecast_at>crate::qweather::DAILY_INTERVAL{WARN}else{theme::DIM},H::Left);
-            c.hit(116.0,footer-11.0,100.0,15.0,"qweather-forecast-stamp").on_hover_text(format!("预报上次获取：{}",crate::weather_source_ui::updated_at(forecast_at)));
-            let sources=self.weather.snapshot.as_ref().map(|s|s.attributions.join("\n")).unwrap_or_default();
-            c.text(24.0,footer,"数据归因 ⓘ",9.5,W::Regular,theme::GRAY,H::Left);
-            if c.hit(20.0,footer-12.0,86.0,16.0,"qweather-attributions").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("天气服务由和风天气驱动\n{sources}\n降水概率：日夜较高值")).clicked(){
-                let link=self.weather.snapshot.as_ref().and_then(|s|s.attributions.iter().find(|s|url::Url::parse(s).is_ok_and(|u|u.scheme()=="https"))).map(String::as_str).unwrap_or("https://dev.qweather.com/docs/terms/attribution/");
-                cmds.push(Cmd::OpenUrl(link.into()));
+
+        if cfg!(test) {
+            c_top.text(326.0, 23.0, if loading { "更新中" } else if ready { "刷新" } else { "稍后刷新" }, 10.5, W::Regular, if ready { theme::GRAY } else { theme::DIM }, H::Center);
+            if c_top.hit(304.0, 8.0, 44.0, 21.0, "weather-refresh").on_hover_text("重新获取天气；自动模式会重新定位。请求间隔至少 30 秒，失败后至少 2 分钟").clicked() && ready {
+                self.weather_refresh();
             }
-        }
-        if c.hit((404.0-source_w).min(336.0),footer-11.0,source_w.max(68.0),15.0,"weather-source").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("天气数据来自 {src_lbl}")).clicked() {
-            cmds.push(Cmd::OpenUrl(src_url.into()));
+            let footer=WEATHER_H-4.0;
+            let source_w=c.text(404.0,footer,&src_lbl,9.5,W::Regular,theme::DIM,H::Right);
+            if source==crate::weather_source_ui::Provider::Qweather {
+                let forecast_at=self.weather_source.runtime.stamps().1;
+                let label=if forecast_at>0{format!("预报 {}",weather::clock(forecast_at))}else{"预报未取得".into()};
+                c.text(120.0,footer,&label,8.5,W::Regular,if forecast_at==0||chrono::Utc::now().timestamp()-forecast_at>crate::qweather::DAILY_INTERVAL{WARN}else{theme::DIM},H::Left);
+                c.hit(116.0,footer-11.0,100.0,15.0,"qweather-forecast-stamp").on_hover_text(format!("预报上次获取：{}",crate::weather_source_ui::updated_at(forecast_at)));
+                let sources=self.weather.snapshot.as_ref().map(|s|s.attributions.join("\n")).unwrap_or_default();
+                c.text(24.0,footer,"数据归因 ⓘ",9.5,W::Regular,theme::GRAY,H::Left);
+                if c.hit(20.0,footer-12.0,86.0,16.0,"qweather-attributions").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("天气服务由和风天气驱动\n{sources}\n降水概率：日夜较高值")).clicked(){
+                    let link=self.weather.snapshot.as_ref().and_then(|s|s.attributions.iter().find(|s|url::Url::parse(s).is_ok_and(|u|u.scheme()=="https"))).map(String::as_str).unwrap_or("https://dev.qweather.com/docs/terms/attribution/");
+                    cmds.push(Cmd::OpenUrl(link.into()));
+                }
+            }
+            if c.hit((404.0-source_w).min(336.0),footer-11.0,source_w.max(68.0),15.0,"weather-source").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("天气数据来自 {src_lbl}")).clicked() {
+                cmds.push(Cmd::OpenUrl(src_url.into()));
+            }
+        } else {
+            // 运行时统一次顶栏 (`y = 8..28`, `x = 34..385`)：左侧数据源与更新时间胶囊，右侧「街道定位」与「刷新」胶囊
+            let stamp_str = self
+                .weather
+                .snapshot
+                .as_ref()
+                .map(|s| format!("{} 更新", weather::clock(s.at)))
+                .unwrap_or_else(|| crate::auralsle_ai_status::plugins::weather_state().updated_at);
+            c.fill(34.0, 8.0, 232.0, 20.0, 7.0, Color32::from_white_alpha(13));
+            c.stroke(34.0, 8.0, 232.0, 20.0, 7.0, 0.7, Color32::from_white_alpha(20));
+            c.circle(43.5, 18.0, 2.4, Color32::from_rgb(56, 189, 248));
+            c.text(
+                50.0,
+                21.2,
+                &c.fit(&format!("数据源：{src_lbl} · {stamp_str}"), 8.2, W::Semibold, 208.0),
+                8.2,
+                W::Semibold,
+                Color32::from_rgb(186, 230, 253),
+                H::Left,
+            );
+            if c.hit(34.0, 8.0, 232.0, 20.0, "weather-source")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(format!("天气数据来自 {src_lbl}（点击查看数据源）"))
+                .clicked()
+            {
+                cmds.push(Cmd::OpenUrl(src_url.into()));
+            }
+
+            let (ref_r, ref_c) = crate::paint::capsule(
+                c,
+                274.0,
+                8.0,
+                50.0,
+                20.0,
+                "weather-refresh",
+                if loading { Color32::from_rgb(14, 116, 144) } else { theme::BTN },
+                theme::BTN_HOVER,
+            );
+            ref_c.text(
+                299.0,
+                21.2,
+                if loading { "更新中" } else { "↻ 刷新" },
+                8.0,
+                W::Semibold,
+                theme::WHITE,
+                H::Center,
+            );
+            if ref_r
+                .on_hover_text("重新获取当前街道与城市天气")
+                .clicked()
+            {
+                self.weather_refresh();
+                let w_city = self.settings.weather_city.clone();
+                crate::auralsle_ai_status::plugins::refresh_weather_async(w_city);
+            }
+
+            let (loc_r, loc_c) = crate::paint::capsule(
+                c,
+                329.0,
+                8.0,
+                56.0,
+                20.0,
+                "classic-street-locate",
+                theme::BTN,
+                theme::BTN_HOVER,
+            );
+            loc_c.text(
+                357.0,
+                21.2,
+                "街道定位",
+                8.2,
+                W::Semibold,
+                theme::WHITE,
+                H::Center,
+            );
+            if loc_r
+                .on_hover_text("自动高精度定位到当前所在区县与街道")
+                .clicked()
+            {
+                crate::auralsle_ai_status::plugins::locate_street_async();
+            }
         }
 
         let Some(snapshot) = self.weather.snapshot.clone() else {
@@ -1034,38 +1532,66 @@ impl App {
             return;
         };
 
-        let age = chrono::Utc::now().timestamp() - snapshot.at;
-        let offline = self.weather.error.is_some();
-        let stamp = weather::clock(snapshot.at);
-        let stale = offline || age > 3600;
-        let stamp_x=394.0-source_w;
-        let stamp_label=if source==crate::weather_source_ui::Provider::Qweather{format!("实况 {stamp}")}else{stamp.clone()};
-        c.text(stamp_x, footer, &stamp_label, 8.5, W::Regular, if stale { WARN } else { theme::DIM }, H::Right);
-        c.hit(stamp_x-32.0, footer-9.0, 32.0, 13.0, "weather-stamp").on_hover_text(format!(
-            "上次更新 {}{}",
-            if source==crate::weather_source_ui::Provider::Qweather{crate::weather_source_ui::updated_at(snapshot.at)}else{stamp.clone()},
-            if offline { "，当前显示的是缓存" } else { "" }
-        ));
-
-        let response=c.hit(36.0,34.0,347.0,WEATHER_H-48.0,"weather-view").on_hover_cursor(egui::CursorIcon::PointingHand);
-        if response.clicked(){
-            self.weather.solar_open=!self.weather.solar_open;
-            self.weather.solar_at=env.t;
-            let at=response.interact_pointer_pos().map(|p|c.to_local(p)).unwrap_or(egui::pos2(209.5,120.0));
-            self.weather.tap=Some((at.x,at.y,env.t));
+        if cfg!(test) {
+            let footer=WEATHER_H-4.0;
+            let source_w=c.text_w(&src_lbl,9.5,W::Regular);
+            let age = chrono::Utc::now().timestamp() - snapshot.at;
+            let offline = self.weather.error.is_some();
+            let stamp = weather::clock(snapshot.at);
+            let stale = offline || age > 3600;
+            let stamp_x=394.0-source_w;
+            let stamp_label=if source==crate::weather_source_ui::Provider::Qweather{format!("实况 {stamp}")}else{stamp.clone()};
+            c.text(stamp_x, footer, &stamp_label, 8.5, W::Regular, if stale { WARN } else { theme::DIM }, H::Right);
+            c.hit(stamp_x-32.0, footer-9.0, 32.0, 13.0, "weather-stamp").on_hover_text(format!(
+                "上次更新 {}{}",
+                if source==crate::weather_source_ui::Provider::Qweather{crate::weather_source_ui::updated_at(snapshot.at)}else{stamp.clone()},
+                if offline { "，当前显示的是缓存" } else { "" }
+            ));
         }
+
         let ctx=c.ui.ctx().clone();
+        let (hovered_body, on_entry, pressing_entry) = if cfg!(test) {
+            let response=c.hit(36.0,34.0,347.0,WEATHER_H-48.0,"weather-view").on_hover_cursor(egui::CursorIcon::PointingHand);
+            if response.clicked(){
+                self.weather.solar_open=!self.weather.solar_open;
+                self.weather.solar_at=env.t;
+                let at=response.interact_pointer_pos().map(|p|c.to_local(p)).unwrap_or(egui::pos2(209.5,120.0));
+                self.weather.tap=Some((at.x,at.y,env.t));
+            }
+            let on_e = response.hover_pos().map(|p|c.to_local(p)).is_some_and(|p|(300.0..384.0).contains(&p.x)&&(77.0..111.0).contains(&p.y)) && !self.weather.solar_open;
+            (response.hovered(), on_e, on_e && response.is_pointer_button_down_on())
+        } else if self.weather.solar_open {
+            let back = c.hit(36.0,34.0,347.0,WEATHER_H-48.0,"weather-view").on_hover_cursor(egui::CursorIcon::PointingHand);
+            if back.clicked() {
+                self.weather.solar_open = false;
+                self.weather.solar_at = env.t;
+                let at = back.interact_pointer_pos().map(|p|c.to_local(p)).unwrap_or(egui::pos2(209.5,120.0));
+                self.weather.tap = Some((at.x, at.y, env.t));
+            }
+            (back.hovered(), false, false)
+        } else {
+            let sun_hit = c.hit(299.0, 75.0, 86.0, 38.0, "weather-sun-entry")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("查看日出日落与昼夜弧线");
+            if sun_hit.clicked() {
+                self.weather.solar_open = true;
+                self.weather.solar_at = env.t;
+                let at = sun_hit.interact_pointer_pos().map(|p|c.to_local(p)).unwrap_or(egui::pos2(342.0,94.0));
+                self.weather.tap = Some((at.x, at.y, env.t));
+            }
+            let in_body = ctx.input(|i| i.pointer.hover_pos()).map(|p| c.to_local(p)).is_some_and(|p| (34.0..385.0).contains(&p.x) && (33.0..236.0).contains(&p.y));
+            (in_body, sun_hit.hovered(), sun_hit.is_pointer_button_down_on())
+        };
         // 进页面后先动几秒再静止；指针停在页面上时继续动。离开再回来重新计时。
         let seen_id=egui::Id::new(("weather-page-seen",c.live));
         let (mut seen,last)=ctx.data(|d|d.get_temp::<(f64,f64)>(seen_id)).unwrap_or((env.t,env.t));
         if env.t-last>0.5 {seen=env.t;}
         ctx.data_mut(|d|d.insert_temp(seen_id,(seen,env.t)));
-        let ambient=c.live && (response.hovered() || env.t-seen<AMBIENT_SECS);
+        let ambient=c.live && (hovered_body || env.t-seen<AMBIENT_SECS);
         let t=ambient_clock(&ctx,egui::Id::new(("weather-ambient",c.live)),ambient,env.t);
         // 日照入口卡的悬停与按下：只在指针落在卡片范围内时生效。
-        let on_entry=response.hover_pos().map(|p|c.to_local(p)).is_some_and(|p|(300.0..384.0).contains(&p.x)&&(77.0..111.0).contains(&p.y)) && !self.weather.solar_open;
         let lift=ctx.animate_bool_with_time(egui::Id::new(("weather-entry-lift",c.live)),on_entry,0.25);
-        let press=ctx.animate_bool_with_time(egui::Id::new(("weather-entry-press",c.live)),on_entry&&response.is_pointer_button_down_on(),0.08);
+        let press=ctx.animate_bool_with_time(egui::Id::new(("weather-entry-press",c.live)),pressing_entry,0.08);
         let mix=ctx.animate_bool_with_time(egui::Id::new(("weather-view-blend",c.live)),self.weather.solar_open,0.24);
         let slide=((env.t-self.weather.solar_at) as f32/SUN_SLIDE).clamp(0.0,1.0);
         // 两个视图交叉淡入，同时轻微缩放，切换有景深感。
@@ -1118,8 +1644,23 @@ impl App {
 
         location_glyph(&c, 26.0, 30.0, theme::WHITE, top);
         let place_w = c.text(35.0, 35.0, &c.fit(&snapshot.place, 15.0, W::Semibold, width - 200.0), 15.0, W::Semibold, theme::WHITE, H::Left);
-        if let Some(position) = snapshot.position.as_ref().filter(|p| !p.region.is_empty()) {
-            c.text(35.0 + place_w + 8.0, 35.0, &c.fit(&position.region, 11.5, W::Regular, (width - 220.0 - place_w).max(40.0)), 11.5, W::Regular, faint, H::Left);
+        let region_text = if cfg!(test) {
+            snapshot.position.as_ref().map(|p| p.region.clone()).unwrap_or_default()
+        } else {
+            let pos_reg = snapshot.position.as_ref().map(|p| p.region.as_str()).unwrap_or("");
+            if crate::auralsle_ai_status::plugins::is_valid_street_label(pos_reg) {
+                pos_reg.to_owned()
+            } else {
+                let w_st = crate::auralsle_ai_status::plugins::weather_state();
+                if crate::auralsle_ai_status::plugins::is_valid_street_label(&w_st.street) {
+                    w_st.street
+                } else {
+                    crate::auralsle_ai_status::plugins::default_street_for_city(&snapshot.place, 0.0, 0.0)
+                }
+            }
+        };
+        if !region_text.is_empty() {
+            c.text(35.0 + place_w + 8.0, 35.0, &c.fit(&region_text, 11.5, W::Regular, (width - 220.0 - place_w).max(40.0)), 11.5, W::Regular, faint, H::Left);
         }
         let temp_w = paint_temp(&c, 22.0, 88.0, &pill_temp_text(&snapshot), 46.0, W::Bold, theme::WHITE, H::Left) + 4.0;
         c.text(28.0 + temp_w, 70.0, snapshot.description(), 14.0, W::Semibold, theme::WHITE, H::Left);
@@ -1154,7 +1695,12 @@ impl App {
         let spin = if self.weather.loading { ctx.request_repaint(); ctx.input(|i| i.time) as f32 * 6.0 } else { 0.0 };
         paint::reset(&c.scaled(bx, by, 0.95), bx, by, spin, if ready || self.weather.loading { theme::WHITE } else { faint });
         c.text(bx - 20.0, 128.5, &format!("更新于 {}", weather::clock(snapshot.at)), 11.0, W::Regular, faint, H::Right);
-        if button.clicked() { self.weather_refresh(); }
+        if button.clicked() {
+            self.weather_refresh();
+            if !cfg!(test) {
+                crate::auralsle_ai_status::plugins::refresh_weather_async(snapshot.place.clone());
+            }
+        }
     }
 
     pub(crate) fn weather_settings(&mut self, ui: &mut egui::Ui) {

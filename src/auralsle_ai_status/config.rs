@@ -412,6 +412,16 @@ pub struct Config {
     /// 是否开启后台定时自动检查更新，以及检查周期（小时）。
     pub auto_check_updates: bool,
     pub update_check_interval_hours: u32,
+    /// AI 灵动岛展示方案：1 = 方案 1（现有的分立 AI 额度 + AI 工作双页），2 = 方案 2（flyl1u/fly-island 合并视图：顶部同心双环额度 + 下方多会话列表）。
+    pub ai_island_scheme: u8,
+    /// fly-island 会话检测源开关：Claude Code (`~/.claude/projects/**/*.jsonl`)
+    pub fly_claude_sessions: bool,
+    /// fly-island 会话检测源开关：OpenAI Codex (`~/.codex/sessions/**/*.jsonl`)
+    pub fly_codex_sessions: bool,
+    /// fly-island 会话检测源开关：DeepSeek Harness (`~/.dsh/sessions/**/*.jsonl`)
+    pub fly_dsh_sessions: bool,
+    /// 无本机实时会话时是否展示 fly-island 演示会话以供预览
+    pub fly_demo_sessions: bool,
 }
 
 impl Default for Config {
@@ -624,6 +634,11 @@ impl Default for Config {
             mod_bt_devices_enabled: true,
             auto_check_updates: true,
             update_check_interval_hours: 24,
+            ai_island_scheme: 2,
+            fly_claude_sessions: true,
+            fly_codex_sessions: true,
+            fly_dsh_sessions: true,
+            fly_demo_sessions: false,
         }
     }
 }
@@ -1090,6 +1105,11 @@ impl Config {
             mod_bt_devices_enabled: bool_or(field(&v, "mod_bt_devices_enabled"), bool_or(field(&v, "mod_display_bt_enabled"), true)),
             auto_check_updates: bool_or(field(&v, "auto_check_updates"), d.auto_check_updates),
             update_check_interval_hours: i64_or(field(&v, "update_check_interval_hours"), d.update_check_interval_hours as i64).clamp(1, 720) as u32,
+            ai_island_scheme: i64_or(field(&v, "ai_island_scheme"), d.ai_island_scheme as i64).clamp(1, 2) as u8,
+            fly_claude_sessions: bool_or(field(&v, "fly_claude_sessions"), d.fly_claude_sessions),
+            fly_codex_sessions: bool_or(field(&v, "fly_codex_sessions"), d.fly_codex_sessions),
+            fly_dsh_sessions: bool_or(field(&v, "fly_dsh_sessions"), d.fly_dsh_sessions),
+            fly_demo_sessions: false,
         }
     }
 
@@ -1262,6 +1282,11 @@ impl Config {
             head.insert("mod_bt_devices_enabled".to_owned(), json!(self.mod_bt_devices_enabled));
             head.insert("auto_check_updates".to_owned(), json!(self.auto_check_updates));
             head.insert("update_check_interval_hours".to_owned(), json!(self.update_check_interval_hours));
+            head.insert("ai_island_scheme".to_owned(), json!(self.ai_island_scheme));
+            head.insert("fly_claude_sessions".to_owned(), json!(self.fly_claude_sessions));
+            head.insert("fly_codex_sessions".to_owned(), json!(self.fly_codex_sessions));
+            head.insert("fly_dsh_sessions".to_owned(), json!(self.fly_dsh_sessions));
+            head.insert("fly_demo_sessions".to_owned(), json!(self.fly_demo_sessions));
             head.insert("border_effect".to_owned(), json!(self.border_effect));
             head.insert("border_plays_on".to_owned(), json!(self.border_plays_on));
             head.insert("border_interval".to_owned(), json!(self.border_interval));

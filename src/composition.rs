@@ -66,7 +66,7 @@ fn enable_host_backdrop(hwnd: HWND) -> windows::core::Result<()> {
 /// 裁剪只负责让出点击，可见轮廓由各模糊块自己的圆角裁剪决定，所以按 `CLIP_GRID` 像素向外取整：
 /// 动画和歌词宽度变化时不必每帧重设窗口区域。每次重设都会让合成器重建这扇窗口，
 /// 在部分核显旧驱动上频繁重设会拖垮合成器（整机闪屏后卡死）。
-const CLIP_GRID: i32 = if cfg!(test) { 8 } else { 24 };
+const CLIP_GRID: i32 = 8;
 
 fn clip_rects(pieces: &[BlurPiece]) -> Vec<(i32, i32, i32, i32)> {
     let down = |v: f32| (v.floor() as i32).div_euclid(CLIP_GRID) * CLIP_GRID;

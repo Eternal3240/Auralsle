@@ -505,7 +505,320 @@ impl App {
         }
         if let Some(id)=chosen{self.quota.config.selected=id;self.quota.config.save_async();self.show_page(6);}
     }
+    /// [方案 2 · 合并视图]：
+    /// 顶部全平台 AI 额度总览条（支持双环百分比、单环点数、DeepSeek/中转站余额、WorkBuddy 积分等全部 18 种服务商） + 下方多会话状态列表。
+    fn draw_fly_island_merged_ai_page(&mut self, c: &Card) {
+        struct MergedQuotaItem {
+            account_id: String,
+            provider: Provider,
+            outer_pct: f32,
+            inner_pct: Option<f32>,
+            primary_text: String,
+            secondary_text: Option<String>,
+            color: Color32,
+            tooltip: String,
+            is_selected: bool,
+        }
+
+        let selected_idx = self.quota.config.selected_index();
+        let selected_id = selected_idx
+            .and_then(|idx| self.quota.config.accounts.get(idx))
+            .map(|a| a.id.clone())
+            .unwrap_or_default();
+
+        let mut items: Vec<MergedQuotaItem> = Vec::new();
+        for idx in self.quota.config.ordered_indices(false) {
+            let a = &self.quota.config.accounts[idx];
+            if !a.enabled {
+                continue;
+            }
+            let res = self.quota.rows.get(&a.id);
+            let snap = res.and_then(|r| r.as_ref().ok());
+            let busy = self.quota.busy.contains(&a.id);
+            let col = match a.provider {
+                Provider::Claude => Color32::from_rgb(224, 139, 107),
+                Provider::Codex => Color32::from_rgb(88, 166, 255),
+                Provider::DeepSeek => Color32::from_rgb(77, 107, 254),
+                Provider::WorkBuddy => Color32::from_rgb(52, 211, 153),
+                Provider::Doubao => Color32::from_rgb(59, 130, 246),
+                Provider::Gemini => Color32::from_rgb(56, 189, 248),
+                _ => accent_colors(&self.quota.config, a)[0],
+            };
+            let is_sel = a.id == selected_id;
+
+            if let Some(s) = snap {
+                let rings = s.rings();
+                if let Some(w0) = rings.first() {
+                    let p0 = (w0.remaining as f32).clamp(0.0, 100.0);
+                    let p1 = rings.get(1).map(|w1| (w1.remaining as f32).clamp(0.0, 100.0));
+                    let pri = if let Some(amt) = &w0.amount {
+                        format!("{}点", amt.short())
+                    } else {
+                        format!("{:.0}%", p0)
+                    };
+                    let sec = if let Some(w1) = rings.get(1) {
+                        if let Some(amt1) = &w1.amount {
+                            Some(format!("{}点", amt1.short()))
+                        } else {
+                            Some(format!("{:.0}%", w1.remaining.clamp(0.0, 100.0)))
+                        }
+                    } else {
+                        None
+                    };
+                    items.push(MergedQuotaItem {
+                        account_id: a.id.clone(),
+                        provider: a.provider,
+                        outer_pct: p0,
+                        inner_pct: p1,
+                        primary_text: pri,
+                        secondary_text: sec,
+                        color: col,
+                        tooltip: format!("{} · {}\n{}", a.provider.name(), a.alias, snapshot_details(s)),
+                        is_selected: is_sel,
+                    });
+                } else if let Some(wallet) = &s.wallet {
+                    let b = wallet.primary();
+                    items.push(MergedQuotaItem {
+                        account_id: a.id.clone(),
+                        provider: a.provider,
+                        outer_pct: if wallet.available && b.total > 0.0 { 82.0 } else { 12.0 },
+                        inner_pct: None,
+                        primary_text: b.compact(),
+                        secondary_text: Some(a.provider.name().to_owned()),
+                        color: col,
+                        tooltip: format!("{} · {}\n可用余额：{}", a.provider.name(), a.alias, b.full(b.total)),
+                        is_selected: is_sel,
+                    });
+                } else if let Some(credits) = &s.credits {
+                    items.push(MergedQuotaItem {
+                        account_id: a.id.clone(),
+                        provider: a.provider,
+                        outer_pct: 85.0,
+                        inner_pct: None,
+                        primary_text: credits.compact(),
+                        secondary_text: Some("积分".to_owned()),
+                        color: col,
+                        tooltip: format!("{} · {}\n可用积分：{}", a.provider.name(), a.alias, credits.full()),
+                        is_selected: is_sel,
+                    });
+                } else if let Some(relay) = &s.relay {
+                    items.push(MergedQuotaItem {
+                        account_id: a.id.clone(),
+                        provider: a.provider,
+                        outer_pct: 78.0,
+                        inner_pct: None,
+                        primary_text: relay.compact(),
+                        secondary_text: Some(a.alias.chars().take(6).collect()),
+                        color: col,
+                        tooltip: format!("{} · {}\n{}", a.provider.name(), a.alias, relay.full()),
+                        is_selected: is_sel,
+                    });
+                } else {
+                    items.push(MergedQuotaItem {
+                        account_id: a.id.clone(),
+                        provider: a.provider,
+                        outer_pct: 60.0,
+                        inner_pct: None,
+                        primary_text: a.provider.name().to_owned(),
+                        secondary_text: Some("已连接".to_owned()),
+                        color: col,
+                        tooltip: format!("{} · {}", a.provider.name(), a.alias),
+                        is_selected: is_sel,
+                    });
+                }
+            } else {
+                let err_txt = res.and_then(|r| r.as_ref().err()).cloned();
+                items.push(MergedQuotaItem {
+                    account_id: a.id.clone(),
+                    provider: a.provider,
+                    outer_pct: if busy { 45.0 } else { 20.0 },
+                    inner_pct: None,
+                    primary_text: a.provider.name().to_owned(),
+                    secondary_text: Some(if busy { "更新中".to_owned() } else { "待刷新".to_owned() }),
+                    color: col,
+                    tooltip: err_txt.unwrap_or_else(|| format!("{} · {}（点击刷新或查看设置）", a.provider.name(), a.alias)),
+                    is_selected: is_sel,
+                });
+            }
+        }
+
+        let ring_cy = 18.5_f32;
+        let start_ang = -std::f32::consts::FRAC_PI_2;
+        let tau = std::f32::consts::TAU;
+        let muted_pct_col = Color32::from_rgb(148, 156, 168);
+
+        if items.is_empty() {
+            let (r_add, b_add) = crate::paint::capsule(
+                c,
+                34.0,
+                ring_cy - 9.5,
+                138.0,
+                19.0,
+                "fly-merged-add-quota",
+                Color32::from_rgba_unmultiplied(16, 185, 129, 42),
+                Color32::from_rgba_unmultiplied(16, 185, 129, 72),
+            );
+            b_add.stroke(34.0, ring_cy - 9.5, 138.0, 19.0, 9.5, 0.85, Color32::from_rgba_unmultiplied(52, 211, 153, 135));
+            b_add.text(103.0, ring_cy + 3.5, "＋ 连接 AI 额度账号", 8.8, W::Bold, Color32::from_rgb(209, 250, 229), H::Center);
+            if r_add.clicked() {
+                self.settings_tab = 11;
+                self.open_settings();
+                self.quota_open_connection(None);
+            }
+        } else {
+            // 横向可滚动全平台额度胶囊栏 (`x = 34..300`, `y = 6..31`)，支持任意数量 AI 额度账号同屏切换
+            let strip_rect = c.rect(34.0, ring_cy - 12.0, 266.0, 24.0);
+            let mut strip_ui = egui::Ui::new(
+                c.ui.ctx().clone(),
+                egui::Id::new(("merged-quota-strip-ui", c.live)),
+                egui::UiBuilder::new()
+                    .max_rect(strip_rect)
+                    .layer_id(c.painter.layer_id())
+                    .style(c.ui.style().clone()),
+            );
+            strip_ui.set_clip_rect(strip_rect.intersect(c.painter.clip_rect()));
+            strip_ui.set_opacity(c.painter.opacity());
+            if !c.live {
+                strip_ui.disable();
+            }
+            strip_ui.spacing_mut().item_spacing.x = 6.0 * c.s;
+            strip_ui.spacing_mut().scroll.floating = true;
+            strip_ui.spacing_mut().scroll.bar_width = 0.0;
+            let mut clicked_account: Option<String> = None;
+            egui::ScrollArea::horizontal()
+                .id_salt("merged-quota-strip-scroll")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(&mut strip_ui, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        for (i, item) in items.iter().enumerate() {
+                            let w0 = c.text_w(&item.primary_text, 10.6, W::Bold);
+                            let w1 = item
+                                .secondary_text
+                                .as_ref()
+                                .map(|s| c.text_w(s, 9.8, W::Semibold) + 4.5)
+                                .unwrap_or(0.0);
+                            let pill_w = (26.0 + w0 + w1 + 8.0).max(56.0);
+                            let pill_h = 22.0_f32;
+                            let (rect, _) = ui.allocate_exact_size(egui::vec2(pill_w * c.s, pill_h * c.s), egui::Sense::hover());
+                            let mut ic = Card::new(ui, rect.min, ui.clip_rect());
+                            ic.s = c.s;
+                            ic.live = c.live;
+
+                            let hit = bar_tooltip(ic.hit(0.0, 0.0, pill_w, pill_h, ("fly-top-quota-ring", i)), item.tooltip.clone());
+                            let hov = hit.hovered();
+                            if item.is_selected || hov {
+                                ic.fill(
+                                    0.0,
+                                    0.5,
+                                    pill_w,
+                                    pill_h - 1.0,
+                                    10.5,
+                                    Color32::from_rgba_unmultiplied(item.color.r(), item.color.g(), item.color.b(), if item.is_selected { 32 } else { 18 }),
+                                );
+                                ic.stroke(
+                                    0.0,
+                                    0.5,
+                                    pill_w,
+                                    pill_h - 1.0,
+                                    10.5,
+                                    0.85,
+                                    Color32::from_rgba_unmultiplied(item.color.r(), item.color.g(), item.color.b(), if item.is_selected { 135 } else { 64 }),
+                                );
+                            }
+
+                            let cx_ring = 11.5_f32;
+                            let cy_ring = pill_h * 0.5;
+                            let outer_r = 8.2_f32;
+                            let inner_r = 4.9_f32;
+                            let stroke_w = 2.0_f32;
+                            let track_outer = crate::paint::mix(item.color, Color32::BLACK, 0.74);
+                            ic.ring(cx_ring, cy_ring, outer_r, stroke_w, track_outer);
+                            let p0 = (item.outer_pct / 100.0).clamp(0.0, 1.0);
+                            if p0 > 0.01 {
+                                ic.arc(cx_ring, cy_ring, outer_r, start_ang, start_ang + tau * p0, stroke_w, item.color);
+                            }
+
+                            if let Some(in_pct) = item.inner_pct {
+                                let inner_col = crate::paint::mix(item.color, Color32::WHITE, 0.14);
+                                let track_inner = crate::paint::mix(inner_col, Color32::BLACK, 0.76);
+                                ic.ring(cx_ring, cy_ring, inner_r, stroke_w - 0.2, track_inner);
+                                let p1 = (in_pct / 100.0).clamp(0.0, 1.0);
+                                if p1 > 0.01 {
+                                    ic.arc(cx_ring, cy_ring, inner_r, start_ang, start_ang + tau * p1, stroke_w - 0.2, inner_col);
+                                }
+                            } else if item.provider == Provider::DeepSeek {
+                                deepseek_badge(&ic, self.settings.skin, cx_ring, cy_ring, 9.8);
+                            } else {
+                                logo(&ic, item.provider, cx_ring, cy_ring, 9.8);
+                            }
+
+                            let tx1 = cx_ring + outer_r + 5.5;
+                            let drawn_w0 = ic.text(tx1, cy_ring + 3.8, &item.primary_text, 10.6, W::Bold, item.color, H::Left);
+                            if let Some(sec) = &item.secondary_text {
+                                ic.text(tx1 + drawn_w0 + 4.0, cy_ring + 3.6, sec, 9.8, W::Semibold, muted_pct_col, H::Left);
+                            }
+
+                            if hit.clicked() {
+                                clicked_account = Some(item.account_id.clone());
+                            }
+                        }
+                    });
+                });
+            if let Some(acc_id) = clicked_account {
+                self.quota.config.selected = acc_id;
+                self.quota.config.save_async();
+            }
+        }
+
+        // 顶栏右侧：刷新额度与设置按钮
+        let (r_ref, b_ref) = crate::paint::capsule(
+            c,
+            304.0,
+            ring_cy - 8.5,
+            36.0,
+            17.0,
+            "fly-merged-quota-refresh",
+            Color32::from_white_alpha(14),
+            theme::BTN_HOVER,
+        );
+        b_ref.text(
+            322.0,
+            ring_cy + 3.2,
+            if self.quota.busy.is_empty() { "刷新" } else { "…" },
+            8.4,
+            W::Semibold,
+            theme::GRAY,
+            H::Center,
+        );
+        if r_ref.on_hover_text("立即刷新所有 AI 额度").clicked() {
+            self.pending.push(Cmd::QuotaRefresh);
+        }
+
+        let (r_cfg, b_cfg) = crate::paint::capsule(
+            c,
+            344.0,
+            ring_cy - 8.5,
+            38.0,
+            17.0,
+            "fly-merged-ai-settings",
+            Color32::from_white_alpha(14),
+            theme::BTN_HOVER,
+        );
+        b_cfg.text(363.0, ring_cy + 3.2, "设置", 8.4, W::Semibold, theme::GRAY, H::Center);
+        if r_cfg.on_hover_text("打开 AI（AI 额度 / AI 工作）设置与方案切换").clicked() {
+            self.settings_tab = 11;
+            self.open_settings();
+        }
+
+        // ── 2. 下方：多会话状态列表 (`y = 35..224`) ──
+        crate::auralsle_ai_status::ui::draw_fly_island_sessions_list(c, 35.0, 189.0);
+    }
+
     pub(crate) fn page_quota(&mut self,c:&Card){
+        if !cfg!(test) && crate::auralsle_ai_status::config::get().ai_island_scheme == 2 {
+            self.draw_fly_island_merged_ai_page(c);
+            return;
+        }
         if self.quota.config.selected_index().is_none() {
             if cfg!(test) {
                 if c.hit(303.0,8.0,32.0,21.0,"quota-refresh").on_hover_text("刷新额度").clicked(){self.pending.push(Cmd::QuotaRefresh);}
@@ -635,9 +948,24 @@ impl App {
             }
             return;
         }
-        if c.hit(303.0,8.0,32.0,21.0,"quota-refresh").on_hover_text("刷新额度").clicked(){self.pending.push(Cmd::QuotaRefresh);}
-        c.text(319.0,23.0,if self.quota.busy.is_empty(){"刷新"}else{"更新中"},10.5,W::Regular,theme::GRAY,H::Center);
-        let c_shifted = c.shifted(0.0, if cfg!(test) { 0.0 } else { 14.0 });
+        if cfg!(test) {
+            if c.hit(303.0,8.0,32.0,21.0,"quota-refresh").on_hover_text("刷新额度").clicked(){self.pending.push(Cmd::QuotaRefresh);}
+            c.text(319.0,23.0,if self.quota.busy.is_empty(){"刷新"}else{"更新中"},10.5,W::Regular,theme::GRAY,H::Center);
+        } else {
+            // 运行时将「刷新」与「添加」放置在顶栏右上角安全区（与左上角「AI 额度」平齐，绝不与下方第 5/6 个工具标签重叠）
+            let (r_ref, b_ref) = crate::paint::capsule(c, 286.0, -14.0, 44.0, 18.0, "quota-refresh", Color32::from_white_alpha(14), theme::BTN_HOVER);
+            b_ref.text(308.0, -2.0, if self.quota.busy.is_empty() { "↻ 刷新" } else { "更新中" }, 8.2, W::Semibold, theme::WHITE, H::Center);
+            if r_ref.on_hover_text("刷新所有已连接 AI 账号额度").clicked() {
+                self.pending.push(Cmd::QuotaRefresh);
+            }
+            let (r_add, b_add) = crate::paint::capsule(c, 334.0, -14.0, 46.0, 18.0, "quota-top-add", Color32::from_white_alpha(14), theme::BTN_HOVER);
+            b_add.text(357.0, -2.0, "＋ 账号", 8.2, W::Semibold, theme::WHITE, H::Center);
+            if r_add.on_hover_text("添加或管理 AI 额度账号").clicked() {
+                self.settings_tab = 11;
+                self.open_settings();
+            }
+        }
+        let c_shifted = c.shifted(0.0, if cfg!(test) { 0.0 } else { 10.0 });
         let c = &c_shifted;
         let Some(selected)=self.quota.config.selected_index() else { return; };
         // [ai-status-mod] 一个工具一个页面：顶部只留工具胶囊，同工具的多账号在右侧平铺。
@@ -681,7 +1009,16 @@ impl App {
             let cur_acc = accent_colors(&self.quota.config, &self.quota.config.accounts[tools[current].1[0]])[0];
             c.stroke(anim_sx, 27.5, 57.0, 18.5, 9.25, 1.15, Color32::from_rgba_unmultiplied(cur_acc.r(), cur_acc.g(), cur_acc.b(), 210));
         }
-        if tools[current].1.len()>1{self.draw_quota_accounts(c,selected,&tools[current].1);}
+        if !cfg!(test) {
+            c.fill(40.0, 50.0, 339.0, 108.0, 11.5, Color32::from_white_alpha(9));
+            c.stroke(40.0, 50.0, 339.0, 108.0, 11.5, 0.8, Color32::from_white_alpha(18));
+        }
+        if tools[current].1.len()>1{
+            self.draw_quota_accounts(c,selected,&tools[current].1);
+            if !cfg!(test) {
+                self.draw_quota_bottom_strip(c, selected);
+            }
+        }
         if let Some(i)=picked{self.quota.config.selected=self.quota.config.accounts[i].id.clone();self.quota.config.save_async();}
         if tools[current].1.len()>1{return;}
         let a=&self.quota.config.accounts[selected];let result=self.quota.rows.get(&a.id);let snapshot=result.and_then(|r|r.as_ref().ok());

@@ -19,13 +19,17 @@ impl HealthReminder {
         let c=&c.scaled(x,y,scale);
         match self {
             Self::Water=>{
+                let (x, y) = if cfg!(test) { (x, y) } else { (x - 0.6, y + 0.5) };
                 c.poly(&[(x-7.0,y-1.0),(x+5.0,y-1.0),(x+3.5,y+8.0),(x-5.5,y+8.0)],theme::BLUE);
                 c.path(&[(x-9.0,y-10.0),(x-6.5,y+9.0),(x+4.5,y+9.0),(x+7.0,y-10.0)],1.6,theme::CYAN);
                 c.seg((x-9.0,y-10.0),(x+7.0,y-10.0),1.6,theme::CYAN);
                 c.path(&[(x+6.5,y-6.0),(x+10.5,y-6.0),(x+11.5,y-3.0),(x+10.0,y+2.0),(x+5.5,y+3.0)],1.6,theme::CYAN);
                 c.seg((x-5.0,y-6.5),(x-4.2,y-2.5),1.0,Color32::from_white_alpha(170));
             },
-            Self::Sit=>crate::paint::chair(c,x,y,0.6,theme::SOFT_GREEN),
+            Self::Sit=>{
+                let (x, y) = if cfg!(test) { (x, y) } else { (x - 0.2, y - 0.3) };
+                crate::paint::chair(c,x,y,0.6,theme::SOFT_GREEN);
+            }
         }
     }
 }
@@ -1420,7 +1424,7 @@ mod tests {
 
     #[test]
     fn settings_groups_keep_every_page_reachable() {
-        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度", "AI 工作状态", "系统监控", "课程表", "功能", "通知历史","吉祥物","天气","翻译","显示器","功能模块"];
+        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI", "AI", "系统监控", "课程表", "功能", "通知历史","吉祥物","天气","翻译","设备","功能模块"];
         for (tab, expected) in groups.iter().enumerate() {
             let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,start,end)| (*start..=*end).contains(&tab)).collect();
             assert_eq!(matches.len(), 1, "页面 {tab} 必须且只能属于一个分组");
@@ -2189,12 +2193,6 @@ pub(crate) fn twinkle_slider_f32(
         if let Some(pos) = resp.interact_pointer_pos() {
             let t = ((pos.x - (hit_rect.left() + 9.0)) / (track_w - 18.0).max(1.0)).clamp(0.0, 1.0);
             *value = (min_v + t * (max_v - min_v)).round();
-        }
-    } else if resp.hovered() {
-        let dy = ctx.input(|i| i.raw_scroll_delta.y);
-        if dy.abs() > 0.5 {
-            let step = ((max_v - min_v) * 0.02).max(1.0);
-            *value = (*value + (dy / 120.0).signum() * step).clamp(min_v, max_v).round();
         }
     }
 
@@ -3951,14 +3949,14 @@ fn draw_notif_app_icon(
     ui.painter().circle_filled(inner.center() + egui::vec2(0.0, 1.4), (inner.width() * 0.16).max(1.5), Color32::WHITE);
 }
 
-const SETTINGS_GROUPS: [(&str,usize,usize);18] = [
+const SETTINGS_GROUPS: [(&str,usize,usize);17] = [
     // GENERAL：岛体外观与日常功能
     ("常规",0,0), ("页面管理",10,10), ("音乐与歌词",1,1), ("专注与饮水",2,3),
     ("待办与置物",4,5), ("吉祥物",17,17),
     // NOTCH：通知与通知记录
     ("通知、邮箱与日程",6,8), ("通知历史",16,16),
-    // APP：AI / 课表 / 组件 / 天气 / 翻译（15「功能」已并入各功能设置，左栏跳过）
-    ("AI 额度",11,11), ("AI 工作状态",12,12), ("课程表",14,14), ("系统监控",13,13),
+    // APP：AI（内部分页：AI 额度 + AI 工作） / 课表 / 组件 / 天气 / 翻译
+    ("AI",11,12), ("课程表",14,14), ("系统监控",13,13),
     ("天气",18,18), ("翻译",19,19), ("功能",15,15),
     // TWINKLE：显示器亮度与无线外设统一收纳为「设备」（需求 12）
     ("设备",20,20),
@@ -3973,7 +3971,7 @@ const SETTINGS_GROUPS: [(&str,usize,usize);18] = [
 const SETTINGS_SECTIONS: [(&str, &str); 5] = [
     ("外观与内容", "常规"),
     ("通知与提醒", "通知、邮箱与日程"),
-    ("AI 与自动化", "AI 额度"),
+    ("AI 与自动化", "AI"),
     ("显示与设备", "设备"),
     ("其他", "关于"),
 ];
@@ -4276,14 +4274,23 @@ impl App {
             } else {
                 false
             };
+            let is_minimized_now = !cfg!(test)
+                && ctx.input(|i| {
+                    i.viewport().minimized.unwrap_or(false)
+                        || i.viewport().inner_rect.is_some_and(|r| r.width() < 240.0 || r.height() < 120.0)
+                });
+            if is_minimized_now {
+                return;
+            }
             {
                 let vp_size_id = egui::Id::new("auralsle_settings_child_vp_size");
-                // [缩放跟手] 尺寸也取视口真值：旧版读 `screen_rect()`（主岛窗口），
-                // 拖设置窗口边缘时这里永远不变，父级闸门于是判不出"正在缩放"。
                 let cur_vp = ctx
                     .input(|i| i.viewport().inner_rect.map(|r| r.size()).unwrap_or_else(|| i.screen_rect().size()));
                 let focused = ctx.input(|i| i.focused);
                 ctx.data_mut(|d| d.insert_temp(egui::Id::new("auralsle_settings_focused"), focused));
+                if cur_vp.x >= 500.0 && cur_vp.y >= 300.0 {
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("auralsle_last_valid_vp_w"), cur_vp.x));
+                }
                 let prev_vp = ctx.data(|d| d.get_temp::<egui::Vec2>(vp_size_id));
                 if prev_vp.map_or(true, |s| (s.x - cur_vp.x).abs() > 0.5 || (s.y - cur_vp.y).abs() > 0.5) {
                     ctx.data_mut(|d| {
@@ -4449,9 +4456,13 @@ impl App {
             style.spacing.scroll.dormant_handle_opacity = 0.55;
             style.spacing.scroll.active_handle_opacity = 0.72;
             style.spacing.scroll.interact_handle_opacity = 0.85;
-            let vp_w_hint = ctx
-                .input(|i| i.viewport().inner_rect.map(|r| r.width()).unwrap_or_else(|| i.screen_rect().width()))
-                .max(360.0);
+            let raw_vp_w = ctx
+                .input(|i| i.viewport().inner_rect.map(|r| r.width()).unwrap_or_else(|| i.screen_rect().width()));
+            let vp_w_hint = if !cfg!(test) && raw_vp_w < 500.0 {
+                ctx.data(|d| d.get_temp::<f32>(egui::Id::new("auralsle_last_valid_vp_w"))).unwrap_or(1024.0)
+            } else {
+                raw_vp_w.max(360.0)
+            };
             // [需求 8 · 滚动卡顿根治] 旧版每帧都 clone 整套 Style 再 `ctx.set_style`：Style 版本号一变，
             // egui 会作废全部控件的样式缓存并触发整棵 UI 的重新布局——滚动时这就是稳定的一笔重税。
             // 样式只依赖主题/皮肤/窗口宽度档位，这三者没变就直接复用上一帧那份。
@@ -4580,6 +4591,25 @@ impl App {
                         egui::Stroke::new(1.1, c_min),
                     );
                     if min_resp.clicked() {
+                        #[cfg(windows)]
+                        if !cfg!(test) {
+                            let hwnd_raw = SETTINGS_ACTIVE_HWND.load(std::sync::atomic::Ordering::Relaxed);
+                            if hwnd_raw != 0 {
+                                unsafe {
+                                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                                        windows::Win32::Foundation::HWND(hwnd_raw as *mut _),
+                                        0x0112, // WM_SYSCOMMAND
+                                        windows::Win32::Foundation::WPARAM(0xF020), // SC_MINIMIZE
+                                        windows::Win32::Foundation::LPARAM(0),
+                                    );
+                                }
+                            } else {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                            }
+                        } else {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        }
+                        #[cfg(not(windows))]
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     }
 
@@ -4602,6 +4632,26 @@ impl App {
                         ui.painter().rect_stroke(box_r, 1.0, egui::Stroke::new(1.1, c_max), egui::StrokeKind::Inside);
                     }
                     if max_resp.clicked() {
+                        #[cfg(windows)]
+                        if !cfg!(test) {
+                            let hwnd_raw = SETTINGS_ACTIVE_HWND.load(std::sync::atomic::Ordering::Relaxed);
+                            if hwnd_raw != 0 {
+                                let sc = if is_max_now { 0xF120usize /* SC_RESTORE */ } else { 0xF030usize /* SC_MAXIMIZE */ };
+                                unsafe {
+                                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                                        windows::Win32::Foundation::HWND(hwnd_raw as *mut _),
+                                        0x0112, // WM_SYSCOMMAND
+                                        windows::Win32::Foundation::WPARAM(sc),
+                                        windows::Win32::Foundation::LPARAM(0),
+                                    );
+                                }
+                            } else {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max_now));
+                            }
+                        } else {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max_now));
+                        }
+                        #[cfg(not(windows))]
                         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max_now));
                         ctx.request_repaint();
                     }
@@ -4651,16 +4701,18 @@ impl App {
             } else {
                 (vp_w * 0.34).clamp(150.0, 300.0)
             };
-            let target_side_w = if side_collapsed { collapsed_side_w } else { expanded_side_w };
-            let side_w = if cfg!(test) || opening {
-                target_side_w
+            // 仅在用户主动点击侧栏折叠按钮（side_collapsed 布尔变化）时做平滑过渡，
+            // 杜绝从 Win11 任务栏最小化还原或窗口缩放时因 vp_w 变化触发多余的收起/展开侧栏动画（修复需求 4）
+            let collapse_t = if cfg!(test) || opening {
+                if side_collapsed { 1.0 } else { 0.0 }
             } else {
-                let s = ctx.animate_value_with_time(egui::Id::new("auralsle_anim_side_w"), target_side_w, 0.20);
-                if (s - target_side_w).abs() > 0.25 {
+                let t = ctx.animate_bool_with_time(egui::Id::new("auralsle_anim_side_collapsed"), side_collapsed, 0.18);
+                if t > 0.004 && t < 0.996 {
                     ctx.request_repaint();
                 }
-                s
+                t
             };
+            let side_w = crate::anim::lerp(expanded_side_w, collapsed_side_w, collapse_t);
             let text_alpha = if cfg!(test) { 1.0 } else { ((side_w - 115.0) / 85.0).clamp(0.0, 1.0) };
             let is_compact = !cfg!(test) && side_w < 135.0;
             let accent = crate::auralsle_ai_status::plugins::active_accent_color();
@@ -5075,7 +5127,7 @@ impl App {
                 ui.visuals_mut().selection.bg_fill=crate::auralsle_ai_status::plugins::active_accent_color();
                 ui.visuals_mut().slider_trailing_fill=true;
                 ui.spacing_mut().slider_width=(inner_panel_w * 0.34).clamp(130.0, 320.0);
-                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","AI 工作状态","系统监控","课程表","功能","通知历史","吉祥物","天气","翻译","设备","功能模块"];
+                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","AI 工作","系统监控","课程表","功能","通知历史","吉祥物","天气","翻译","设备","功能模块"];
                 let active_title = if self.settings_tab == 13 && !cfg!(test) { "插件" } else { titles[self.settings_tab.min(titles.len() - 1)] };
                 let _ = titles.len();
 
@@ -5238,19 +5290,7 @@ impl App {
                     } else {
                         avail_scroll_w
                     };
-                    let content_w = if cfg!(test) || opening || settings_sizing_now() {
-                        target_content_w
-                    } else {
-                        let cw = ctx.animate_value_with_time(
-                            egui::Id::new("auralsle_anim_content_w"),
-                            target_content_w,
-                            0.16,
-                        );
-                        if (cw - target_content_w).abs() > 0.25 {
-                            ctx.request_repaint();
-                        }
-                        cw.clamp(160.0, avail_scroll_w)
-                    };
+                    let content_w = target_content_w;
                     let side_pad = ((avail_scroll_w - content_w) * 0.5).max(0.0);
                     ui.set_width(avail_scroll_w);
                     ui.set_max_width(avail_scroll_w);
@@ -5285,7 +5325,7 @@ impl App {
                     if enter_alpha < 0.999 { ui.multiply_opacity(enter_alpha); }
 
                     settings_page_scope(ui, |ui| {
-                    let top_title = if self.settings_tab == 20 { "设备" } else { active_title };
+                    let top_title = if self.settings_tab == 20 { "设备" } else if matches!(self.settings_tab, 11 | 12) { "AI" } else { active_title };
                     ui.label(
                         egui::RichText::new(top_title)
                             .size(28.0)
@@ -5307,6 +5347,32 @@ impl App {
                             }
                             ui.add_space(12.0);
                         }
+                    }
+                    if !cfg!(test) && matches!(self.settings_tab, 11 | 12) {
+                        let mut mcfg_ai = crate::auralsle_ai_status::config::get();
+                        let prev_scheme = mcfg_ai.ai_island_scheme;
+                        settings_card(ui, |ui| {
+                            settings_control_row_right(ui, "灵动岛 AI 界面方案", |ui| {
+                                settings_segmented(
+                                    ui,
+                                    &mut mcfg_ai.ai_island_scheme,
+                                    &[
+                                        (1u8, "方案 1 · 分立双页"),
+                                        (2u8, "方案 2 · 合并视图"),
+                                    ],
+                                    128.0,
+                                );
+                            });
+                            settings_hint(
+                                ui,
+                                "方案 1 保留现有的「AI 额度」与「AI 工作」两个独立展开页；方案 2 将顶部 AI 额度与下方多会话状态列表合并在同一页展示。",
+                            );
+                        });
+                        if mcfg_ai.ai_island_scheme != prev_scheme {
+                            let next_s = mcfg_ai.ai_island_scheme;
+                            crate::auralsle_ai_status::config::update(|c| c.ai_island_scheme = next_s);
+                        }
+                        ui.add_space(6.0);
                     }
                     // [切页 + 缩放动效] 严禁在 ScrollArea 顶部动态插入 add_space 让整页卡片每帧重排。
                     // [缩放卡顿根治] 旧版这里还叠了一层 0.20s「settle」遮罩，并为它每帧 request_repaint：
@@ -5353,59 +5419,14 @@ impl App {
                     18=>{
                         let mut mcfg_w = crate::auralsle_ai_status::config::get();
                         let prev_w_mode = mcfg_w.weather_ui_mode;
-                        // 双向同步天气实况数据：确保三种天气界面方案共享完全相同的城市、街道、温度、湿度、风况与多日预报（需求 5）
-                        if let Some(ref snap) = self.weather.snapshot {
-                            crate::auralsle_ai_status::plugins::sync_breezy_from_snapshot(snap);
-                        } else {
-                            let wst = crate::auralsle_ai_status::plugins::weather_state();
-                            let parsed_wind: Option<f32> = wst
-                                .wind
-                                .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
-                                .find(|s| !s.is_empty())
-                                .and_then(|s| s.parse::<f32>().ok());
-                            let mut hhmm_iter = wst
-                                .sun_rise_set
-                                .split_whitespace()
-                                .filter(|tok| {
-                                    let b = tok.as_bytes();
-                                    b.len() == 5
-                                        && b[0].is_ascii_digit()
-                                        && b[1].is_ascii_digit()
-                                        && b[2] == b':'
-                                        && b[3].is_ascii_digit()
-                                        && b[4].is_ascii_digit()
-                                })
-                                .map(|s| s.to_owned());
-                            let parsed_sunrise = hhmm_iter.next();
-                            let parsed_sunset = hhmm_iter.next();
-                            self.weather.snapshot = Some(crate::weather::Snapshot {
-                                place: wst.city.clone(),
-                                position: Some(crate::weather::Position {
-                                    lat: wst.lat,
-                                    lon: wst.lon,
-                                    label: wst.city.clone(),
-                                    region: wst.street.clone(),
-                                }),
-                                temp: wst.temp as f32,
-                                high: wst.forecast.first().map(|d| d.t_max as f32),
-                                low: wst.forecast.first().map(|d| d.t_min as f32),
-                                feels: Some(wst.feels_like as f32),
-                                humidity: Some(wst.humidity as u32),
-                                wind: parsed_wind,
-                                sunrise: parsed_sunrise,
-                                sunset: parsed_sunset,
-                                code: if wst.desc.contains("雨") { 61 } else if wst.desc.contains("云") || wst.desc.contains("阴") { 2 } else { 0 },
-                                day: true,
-                                at: chrono::Utc::now().timestamp(),
-                                days: wst.forecast.iter().map(|d| crate::weather::Day {
-                                    label: d.day_label.clone(),
-                                    code: if d.desc.contains("雨") { 61 } else if d.desc.contains("云") { 2 } else { 0 },
-                                    high: d.t_max as f32,
-                                    low: d.t_min as f32,
-                                    ..Default::default()
-                                }).collect(),
-                                ..Default::default()
-                            });
+                        if !cfg!(test) {
+                            self.sync_weather_with_street_state();
+                            if self.weather.snapshot.is_none() {
+                                crate::auralsle_ai_status::plugins::ensure_initial_weather_fetch(&self.settings.weather_city);
+                            }
+                            if crate::auralsle_ai_status::plugins::is_weather_busy() {
+                                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                            }
                         }
                         settings_label(ui, "天气界面方案");
                         settings_card(ui, |ui| {
@@ -5436,13 +5457,16 @@ impl App {
                         }
                         ui.add_space(4.0);
                         // [需求 3]：将天气岛实时预览紧跟在选择样式卡下方，方便切换方案后即时对比效果
-                        crate::auralsle_ai_status::plugins::draw_weather_island_preview_card(ui);
+                        crate::auralsle_ai_status::plugins::draw_weather_island_preview_card(self, ui);
                         ui.add_space(4.0);
                         // [需求 5]：将图三红框处的天气实况大卡与城市管理统一应用到所有三种天气界面方案！
                         self.weather_settings(ui);
                         ui.add_space(4.0);
                         // 街道级高精定位与自定义天气源设置（统一 2 列 Fluent 选卡，避免与上方重复冲突）
                         crate::auralsle_ai_status::plugins::draw_weather_settings_page(ui);
+                        if !cfg!(test) {
+                            self.sync_weather_with_street_state();
+                        }
                     },
                     19=>crate::auralsle_ai_status::plugins::draw_translate_settings_page(ui),  // [wisland] 独立翻译设置页
                     // [需求 12] 统一「设备」分类页：显示器与亮度 / 无线外设与胶囊
@@ -8902,49 +8926,38 @@ unsafe extern "system" fn settings_subclass_proc(
             return;
         }
         let zoomed = unsafe { IsZoomed(hwnd) } != BOOL(0);
-        let mut rect = RECT::default();
-        if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
-            return;
-        }
-        let w = rect.right - rect.left;
-        let h = rect.bottom - rect.top;
-        if w <= 0 || h <= 0 {
-            return;
-        }
-        let ppp_x100 = SETTINGS_LAST_PPP_X100
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .max(100);
-        let key = (w as i64 & 0xFFFF)
-            | ((h as i64 & 0xFFFF) << 16)
-            | ((ppp_x100 as i64 & 0xFFFF) << 32)
-            | ((zoomed as i64) << 48);
+        let key = if zoomed { 2i64 } else { 1i64 };
         let prev_key = SETTINGS_LAST_RGN_KEY.swap(key, std::sync::atomic::Ordering::Relaxed);
         if force || prev_key != key {
-            if zoomed {
-                let _ = unsafe { SetWindowRgn(hwnd.0 as isize, 0, 0) };
-            } else {
-                let ppp = ppp_x100 as f32 / 100.0;
-                let diam = (24.0 * ppp).round().clamp(16.0, 96.0) as i32;
-                let rgn = unsafe { CreateRoundRectRgn(0, 0, w + 1, h + 1, diam, diam) };
-                if rgn != 0 {
-                    let _ = unsafe { SetWindowRgn(hwnd.0 as isize, rgn, 0) };
-                }
-            }
+            // 清空 GDI HRGN 并交由 Win11 DWM 原生圆角 (DWMWCP_ROUND=2) 与过渡动画管理，
+            // 彻底恢复设置窗口最小化、任务栏还原与最大化/还原的系统级丝滑弹簧动画（修复需求 3）
+            let _ = unsafe { SetWindowRgn(hwnd.0 as isize, 0, 0) };
+            let pref: i32 = if zoomed { 1 /* DWMWCP_DONOTROUND */ } else { 2 /* DWMWCP_ROUND */ };
+            let _ = unsafe {
+                windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+                    hwnd,
+                    windows::Win32::Graphics::Dwm::DWMWA_WINDOW_CORNER_PREFERENCE,
+                    &pref as *const i32 as *const _,
+                    4,
+                )
+            };
         }
     };
 
     match msg {
         WM_STYLECHANGING if (wparam.0 as i32) == GWL_STYLE_I32 && lparam.0 != 0 => {
-            // 剥离 WS_CAPTION 消除原生标题栏；保留 WS_THICKFRAME 支持系统原生拖动/八向缩放/贴靠
+            // 保留 WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU 以启用 Win11 DWM 原生最大/最小化过渡动画，
+            // 并由下方 WM_NCCALCSIZE 零化非客户区标题栏高度
             let ss = unsafe { &mut *(lparam.0 as *mut StyleStruct) };
-            ss.style_new = (ss.style_new & !WS_CAPTION.0)
+            ss.style_new = ss.style_new
+                | WS_CAPTION.0
                 | WS_THICKFRAME.0
                 | WS_MINIMIZEBOX.0
                 | WS_MAXIMIZEBOX.0
                 | WS_SYSMENU.0;
             return LRESULT(0);
         }
-        WM_NCCALCSIZE if wparam.0 != 0 && lparam.0 != 0 => {
+        WM_NCCALCSIZE if lparam.0 != 0 => {
             if unsafe { IsZoomed(hwnd) } != BOOL(0) {
                 let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
                 let mut mi = MONITORINFO {
@@ -8952,8 +8965,8 @@ unsafe extern "system" fn settings_subclass_proc(
                     ..Default::default()
                 };
                 if unsafe { GetMonitorInfoW(monitor, &mut mi) } != BOOL(0) {
-                    let ncc = unsafe { &mut *(lparam.0 as *mut NcCalcSizeParams) };
-                    ncc.rgrc[0] = mi.rcWork;
+                    let rc_dst = unsafe { &mut *(lparam.0 as *mut RECT) };
+                    *rc_dst = mi.rcWork;
                 }
             }
             return LRESULT(0);
@@ -9265,9 +9278,18 @@ fn round_settings_hwnd(ppp: f32, maximized: bool, dark: bool) -> bool {
                     4,
                 )
             };
-            let pref: i32 = 1; // DWMWCP_DONOTROUND
+            let pref: i32 = if probe.maximized { 1 /* DWMWCP_DONOTROUND */ } else { 2 /* DWMWCP_ROUND */ };
             let _ = unsafe {
                 DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const i32 as *const _, 4)
+            };
+            let transitions_disable: i32 = 0; // DWMWA_TRANSITIONS_FORCEDISABLED = FALSE（强制开启 DWM 最小化/最大化动画）
+            let _ = unsafe {
+                DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWINDOWATTRIBUTE(3),
+                    &transitions_disable as *const i32 as *const _,
+                    4,
+                )
             };
             let border_none: u32 = 0xFFFFFFFE; // DWMWA_COLOR_NONE
             let _ = unsafe {
@@ -9279,10 +9301,11 @@ fn round_settings_hwnd(ppp: f32, maximized: bool, dark: bool) -> bool {
                 )
             };
 
-            // 3) 仅剥离 WS_CAPTION 消除原生白框标题栏；保留 WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU 支持系统级拖拽缩放、最大最小化与贴靠
+            // 3) 保留 WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU（由 WM_NCCALCSIZE 拦截消除原生标题栏），
+            //    使 Windows 11 DWM 完整接管最小化、还原、最大化动画与原生圆角阴影
             let cur_style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
-            let want_style = (cur_style & !(WS_CAPTION.0 as isize))
-                | ((WS_THICKFRAME.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0 | WS_SYSMENU.0) as isize);
+            let want_style = cur_style
+                | ((WS_CAPTION.0 | WS_THICKFRAME.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0 | WS_SYSMENU.0) as isize);
             if want_style != cur_style {
                 unsafe {
                     SetWindowLongPtrW(hwnd, GWL_STYLE, want_style);
@@ -9331,33 +9354,9 @@ fn round_settings_hwnd(ppp: f32, maximized: bool, dark: bool) -> bool {
                 }
             }
 
-            if probe.maximized {
-                if unsafe { SetWindowRgn(hwnd.0 as isize, 0, 0) } != 0 {
-                    probe.hit = true;
-                }
-                return BOOL(0);
-            }
-            let mut rect = RECT::default();
-            if unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok() {
-                let w = rect.right - rect.left;
-                let h = rect.bottom - rect.top;
-                if w > 0 && h > 0 {
-                    let ppp_x100 = (probe.ppp * 100.0).round().clamp(100.0, 400.0) as i64;
-                    let key = (w as i64 & 0xFFFF)
-                        | ((h as i64 & 0xFFFF) << 16)
-                        | ((ppp_x100 & 0xFFFF) << 32);
-                    SETTINGS_LAST_RGN_KEY.store(key, std::sync::atomic::Ordering::Relaxed);
-                    // 按当前屏幕 DPI 缩放 ellipse 直径：`2 * 12pt * ppp`，与 12pt 内外描边完全吻合
-                    let diam = (24.0 * probe.ppp).round().clamp(16.0, 96.0) as i32;
-                    let rgn = unsafe { CreateRoundRectRgn(0, 0, w + 1, h + 1, diam, diam) };
-                    if rgn != 0 {
-                        // redraw=0 避免触发同步 WM_NCPAINT 擦除闪白框；成功后 region 归系统所有，不能 DeleteObject
-                        if unsafe { SetWindowRgn(hwnd.0 as isize, rgn, 0) } != 0 {
-                            probe.hit = true;
-                        }
-                    }
-                }
-            }
+            let _ = unsafe { SetWindowRgn(hwnd.0 as isize, 0, 0) };
+            SETTINGS_LAST_RGN_KEY.store(if probe.maximized { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+            probe.hit = true;
             return BOOL(0);
         }
         BOOL(1)

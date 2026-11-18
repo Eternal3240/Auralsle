@@ -759,12 +759,14 @@ pub(crate) fn draw_settings(ui: &mut egui::Ui) {
 
     // ── 4. 统一亮度与每屏规则（P1-2 + P1-5）──
     settings_label(ui, "统一亮度与电源规则");
+    let mut read_only_on_startup = !tw_cfg.restore_on_startup;
     setting_row_card(
         ui,
-        "启动时恢复上次亮度",
-        "退出时记录每块屏的亮度，下次启动写回屏幕。",
-        &mut tw_cfg.restore_on_startup,
+        "启动时仅读取当前屏幕亮度（不覆盖现有亮度）",
+        "重新打开灵屿时直接读取显示器当前硬件亮度并同步滑块位置，不会用旧缓存覆盖现有屏幕亮度。",
+        &mut read_only_on_startup,
     );
+    tw_cfg.restore_on_startup = false;
     setting_row_card(
         ui,
         "锁屏或会话切换时禁用 DDC/CI 写入",

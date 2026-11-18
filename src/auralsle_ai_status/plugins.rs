@@ -79,19 +79,202 @@ pub struct WislandWeatherState {
     pub locate_status: String,
     pub hourly: Vec<HourlyPoint>,
     pub forecast: Vec<DailyForecast>,
+    pub synced_from_live: bool,
 }
 
-fn build_hourly(base_temp: i32, now_hour: u32) -> Vec<HourlyPoint> {
-    let offsets = [0i32, 1, 2, 1, -1, -2, -3, -1];
+pub fn build_hourly_realistic(
+    cur_temp: i32,
+    t_min: i32,
+    t_max: i32,
+    now_hour: u32,
+    lat: f64,
+    lon: f64,
+) -> Vec<HourlyPoint> {
+    let lo = t_min.min(cur_temp - 2);
+    let hi = t_max.max(cur_temp + 2).max(lo + 3);
+    let mid = (lo + hi) as f32 * 0.5;
+    let amp = ((hi - lo) as f32 * 0.5).max(1.5);
+    let micro = (((lat * 100.0 + lon * 100.0).sin()) * 0.6).clamp(-0.6, 0.6) as f32;
+    // 昼夜温度相位：05:00 最低，14:00 最高
+    let diurnal_at = |h: u32| -> f32 {
+        let rad = ((h as f32 - 5.0) / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        mid + amp * rad.sin() + micro
+    };
+    let anchor_delta = cur_temp as f32 - diurnal_at(now_hour % 24);
     (0..8)
         .map(|i| {
             let h = (now_hour + i as u32 * 3) % 24;
+            let t_val = if i == 0 {
+                cur_temp
+            } else {
+                let decay = (1.0 - i as f32 * 0.14).clamp(0.15, 0.88);
+                (diurnal_at(h) + anchor_delta * decay).round() as i32
+            };
             HourlyPoint {
                 hour_label: if i == 0 { "现在".into() } else { format!("{h:02}:00") },
-                temp: base_temp + offsets[i],
+                temp: t_val,
             }
         })
         .collect()
+}
+
+fn build_hourly(base_temp: i32, now_hour: u32) -> Vec<HourlyPoint> {
+    build_hourly_realistic(base_temp, base_temp - 4, base_temp + 3, now_hour, 28.1812, 112.9445)
+}
+
+/// 判断字符串是否为有效的区县/街道级地址（排除空白、`湖南 · 中国`、`中国` 等粗粒度国家/省份后缀）。
+pub fn is_valid_street_label(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() || t == "实时气象站" || t == "当地" {
+        return false;
+    }
+    if t.contains("中国") || t.eq_ignore_ascii_case("china") {
+        return false;
+    }
+    t.contains('区')
+        || t.contains('街')
+        || t.contains('路')
+        || t.contains('道')
+        || t.contains('镇')
+        || t.contains('县')
+        || t.contains('园')
+        || t.contains("广场")
+        || t.contains('巷')
+        || t.contains('里')
+        || t.contains('湾')
+        || t.contains('村')
+        || t.chars().count() >= 4
+}
+
+/// 根据城市名称与经纬度匹配默认核心区县与街道（兜底映射表）。
+pub fn default_street_for_city(city: &str, lat: f64, lon: f64) -> String {
+    for &(c, st, la, lo) in &STREET_PRESETS {
+        if (lat - la).abs() < 0.015 && (lon - lo).abs() < 0.015 {
+            return st.to_owned();
+        }
+        let _ = c;
+    }
+    let c_short = city.trim().trim_end_matches(['市', '省', '区', '县']);
+    for &(c, st, _, _) in &STREET_PRESETS {
+        let p_short = c.trim_end_matches('市');
+        if !c_short.is_empty() && (c_short.contains(p_short) || p_short.contains(c_short)) {
+            return st.to_owned();
+        }
+    }
+    const EXTRA_STREETS: &[(&str, &str)] = &[
+        ("重庆", "渝中区 · 解放碑街道"),
+        ("天津", "和平区 · 五大道街道"),
+        ("西安", "雁塔区 · 小寨路街道"),
+        ("苏州", "姑苏区 · 平江街道"),
+        ("厦门", "思明区 · 厦港街道"),
+        ("青岛", "市南区 · 五四广场街道"),
+        ("大连", "中山区 · 人民路街道"),
+        ("郑州", "金水区 · 花园路街道"),
+        ("合肥", "蜀山区 · 三里庵街道"),
+        ("福州", "鼓楼区 · 东街街道"),
+        ("济南", "历下区 · 泉城路街道"),
+        ("昆明", "五华区 · 护国街道"),
+        ("沈阳", "和平区 · 太原街街道"),
+        ("哈尔滨", "南岗区 · 奋斗路街道"),
+        ("长春", "朝阳区 · 桂林街道"),
+        ("石家庄", "长安区 · 中山东路街道"),
+        ("太原", "迎泽区 · 柳巷街道"),
+        ("南昌", "东湖区 · 八一公园街道"),
+        ("南宁", "青秀区 · 中山街道"),
+        ("贵阳", "云岩区 · 中华中路街道"),
+        ("兰州", "城关区 · 酒泉路街道"),
+        ("海口", "龙华区 · 海垦街道"),
+        ("乌鲁木齐", "天山区 · 解放北路街道"),
+        ("拉萨", "城关区 · 八廓街道"),
+        ("银川", "兴庆区 · 解放西街街道"),
+        ("西宁", "城中区 · 人民街街道"),
+        ("呼和浩特", "赛罕区 · 大学西路街道"),
+        ("佛山", "禅城区 · 祖庙街道"),
+        ("东莞", "南城街道 · 鸿福路"),
+        ("宁波", "海曙区 · 鼓楼街道"),
+        ("无锡", "梁溪区 · 崇安寺街道"),
+        ("珠海", "香洲区 · 吉大街道"),
+    ];
+    for &(k, st) in EXTRA_STREETS {
+        if !c_short.is_empty() && (c_short.contains(k) || k.contains(c_short)) {
+            return st.to_owned();
+        }
+    }
+    if !c_short.is_empty() {
+        format!("{c_short}核心区 · 中心街道")
+    } else {
+        "岳麓区 · 麓山南路街道".to_owned()
+    }
+}
+
+/// 根据城市与经纬度解析精准街道名（优先匹配预设坐标，其次在线逆地理编码，最后城市核心街道兜底）。
+pub fn resolve_street_for_position(city: &str, lat: f64, lon: f64) -> String {
+    for &(_c, st, la, lo) in &STREET_PRESETS {
+        if (lat - la).abs() < 0.015 && (lon - lo).abs() < 0.015 {
+            return st.to_owned();
+        }
+    }
+    let cfg = config::get();
+    let city_short = city.trim().trim_end_matches('市');
+    let cfg_short = cfg.weather_city.trim().trim_end_matches('市');
+    if !city_short.is_empty()
+        && city_short == cfg_short
+        && is_valid_street_label(&cfg.weather_street)
+        && ((lat - cfg.weather_lat).abs() < 0.08 && (lon - cfg.weather_lon).abs() < 0.08
+            || (lat.abs() < 0.01 && lon.abs() < 0.01))
+    {
+        return cfg.weather_street.trim().to_owned();
+    }
+    if !cfg!(test) && (lat.abs() > 0.05 || lon.abs() > 0.05) {
+        let nom_url = format!(
+            "https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={lat:.5}&lon={lon:.5}&zoom=18&addressdetails=1&accept-language=zh-CN"
+        );
+        if let Some(v) = ureq_get_json(&nom_url, 3) {
+            if let Some(addr) = v.get("address") {
+                let dist = addr
+                    .get("suburb")
+                    .or_else(|| addr.get("city_district"))
+                    .or_else(|| addr.get("district"))
+                    .or_else(|| addr.get("town"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let rd = addr
+                    .get("road")
+                    .or_else(|| addr.get("neighbourhood"))
+                    .or_else(|| addr.get("quarter"))
+                    .or_else(|| addr.get("pedestrian"))
+                    .or_else(|| addr.get("Subdistrict"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let combined = match (!dist.is_empty(), !rd.is_empty()) {
+                    (true, true) => format!("{dist} · {rd}"),
+                    (true, false) => dist.to_owned(),
+                    (false, true) => rd.to_owned(),
+                    (false, false) => String::new(),
+                };
+                if is_valid_street_label(&combined) {
+                    return combined;
+                }
+            }
+        }
+    }
+    default_street_for_city(city, lat, lon)
+}
+
+/// 统一将城市与街道格式化为精准到街道的显示文本（如：`长沙 · 岳麓区 · 麓山南路街道`）。
+pub fn format_street_address(city: &str, street: &str) -> String {
+    let city_clean = city.trim().trim_end_matches('市');
+    let city_disp = if city_clean.is_empty() { "长沙" } else { city_clean };
+    let valid_st = if is_valid_street_label(street) {
+        street.trim().to_owned()
+    } else {
+        default_street_for_city(city_disp, 0.0, 0.0)
+    };
+    if valid_st.starts_with(city_disp) || valid_st.starts_with(city.trim()) {
+        valid_st
+    } else {
+        format!("{city_disp} · {valid_st}")
+    }
 }
 
 impl Default for WislandWeatherState {
@@ -124,6 +307,7 @@ impl Default for WislandWeatherState {
                 DailyForecast { day_label: "大后天".into(), desc: "小雨".into(), t_min: 10, t_max: 17 },
                 DailyForecast { day_label: "第5天".into(), desc: "晴朗".into(), t_min: 11, t_max: 20 },
             ],
+            synced_from_live: false,
         }
     }
 }
@@ -131,6 +315,48 @@ impl Default for WislandWeatherState {
 static WISLAND_WEATHER: OnceLock<Mutex<WislandWeatherState>> = OnceLock::new();
 static WEATHER_FETCHING: AtomicBool = AtomicBool::new(false);
 static STREET_LOCATING: AtomicBool = AtomicBool::new(false);
+static STREET_WEATHER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LAST_APPLIED_STREET_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WEATHER_REQ_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn is_weather_busy() -> bool {
+    WEATHER_FETCHING.load(Ordering::Relaxed) || STREET_LOCATING.load(Ordering::Relaxed)
+}
+
+pub fn bump_street_weather_seq() {
+    STREET_WEATHER_SEQ.fetch_add(1, Ordering::SeqCst);
+}
+
+/// 当 Open-Meteo 在 `weather::parse` 中解析出 `hourly.temperature_2m` 时，实时同步至街道逐时趋势列表。
+pub fn record_open_meteo_hourly(_place: &str, cur_temp: f32, value: &serde_json::Value) {
+    let Some(h_temps) = value.pointer("/hourly/temperature_2m").and_then(|x| x.as_array()) else {
+        return;
+    };
+    let now_h = Local::now().hour() as usize;
+    let h_times = value.pointer("/hourly/time").and_then(|x| x.as_array());
+    let start_idx = h_times
+        .and_then(|times| {
+            let suffix = format!("T{now_h:02}:00");
+            times.iter().position(|t| t.as_str().is_some_and(|s| s.ends_with(&suffix)))
+        })
+        .unwrap_or(now_h.min(h_temps.len().saturating_sub(1)));
+    let mut hp = Vec::with_capacity(8);
+    for i in 0..8 {
+        let idx = (start_idx + i * 3).min(h_temps.len().saturating_sub(1));
+        if let Some(tv) = h_temps.get(idx).and_then(|x| x.as_f64()) {
+            let h = (now_h + i * 3) % 24;
+            hp.push(HourlyPoint {
+                hour_label: if i == 0 { "现在".into() } else { format!("{h:02}:00") },
+                temp: if i == 0 { cur_temp.round() as i32 } else { tv.round() as i32 },
+            });
+        }
+    }
+    if hp.len() >= 4 {
+        if let Ok(mut g) = WISLAND_WEATHER.get_or_init(|| Mutex::new(WislandWeatherState::default())).lock() {
+            g.hourly = hp;
+        }
+    }
+}
 
 /// 返回当前选中的天气数据源名称与官网链接（修复需求 2：选择彩云源/和风源后顶部数据来源仍显示 Open-Meteo 的问题）。
 pub fn active_weather_source_info() -> (String, &'static str) {
@@ -151,6 +377,22 @@ pub fn active_weather_source_info() -> (String, &'static str) {
     }
 }
 
+static INITIAL_WEATHER_BOOTSTRAPPED: AtomicBool = AtomicBool::new(false);
+
+pub fn ensure_initial_weather_fetch(city_hint: &str) {
+    if cfg!(test) {
+        return;
+    }
+    if !INITIAL_WEATHER_BOOTSTRAPPED.swap(true, Ordering::SeqCst) {
+        let hint = city_hint.trim();
+        if hint.is_empty() {
+            locate_street_async();
+        } else {
+            refresh_weather_async(hint.to_owned());
+        }
+    }
+}
+
 pub fn weather_state() -> WislandWeatherState {
     let cfg = config::get();
     let mut g = WISLAND_WEATHER
@@ -158,18 +400,32 @@ pub fn weather_state() -> WislandWeatherState {
         .lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    if !cfg.weather_city.trim().is_empty() {
-        g.city = cfg.weather_city.clone();
+    if !g.synced_from_live {
+        if !cfg.weather_city.trim().is_empty() {
+            g.city = cfg.weather_city.clone();
+        }
+        if is_valid_street_label(&cfg.weather_street) {
+            g.street = cfg.weather_street.clone();
+        }
+        g.lat = cfg.weather_lat;
+        g.lon = cfg.weather_lon;
+        if !cfg.weather_desc.trim().is_empty() {
+            g.desc = cfg.weather_desc.clone();
+        }
+        g.temp = cfg.weather_temp;
     }
-    if !cfg.weather_street.trim().is_empty() {
-        g.street = cfg.weather_street.clone();
+    if !is_valid_street_label(&g.street) {
+        g.street = if is_valid_street_label(&cfg.weather_street) {
+            cfg.weather_street.clone()
+        } else {
+            default_street_for_city(&g.city, g.lat, g.lon)
+        };
     }
-    g.lat = cfg.weather_lat;
-    g.lon = cfg.weather_lon;
-    if !cfg.weather_desc.trim().is_empty() {
-        g.desc = cfg.weather_desc.clone();
+    if g.hourly.is_empty() || g.hourly.first().map(|p| p.temp) != Some(g.temp) {
+        let t_min = g.forecast.first().map(|d| d.t_min).unwrap_or(g.temp - 4);
+        let t_max = g.forecast.first().map(|d| d.t_max).unwrap_or(g.temp + 3);
+        g.hourly = build_hourly_realistic(g.temp, t_min, t_max, Local::now().hour(), g.lat, g.lon);
     }
-    g.temp = cfg.weather_temp;
     g.source_name = match cfg.weather_source {
         1 => "和风/中国天气".into(),
         2 => "Wttr.in".into(),
@@ -200,30 +456,69 @@ fn wmo_code_desc(code: i64) -> &'static str {
     }
 }
 
+fn desc_to_wmo_code(desc: &str) -> u8 {
+    let d = desc.trim();
+    if d.contains("雷") {
+        95
+    } else if d.contains("雪") {
+        71
+    } else if d.contains("毛毛雨") || d.contains("细雨") {
+        51
+    } else if d.contains("阵雨") {
+        80
+    } else if d.contains("雨") {
+        61
+    } else if d.contains("雾") || d.contains("霾") {
+        45
+    } else if d.contains("阴") {
+        3
+    } else if d.contains("多云") {
+        2
+    } else {
+        0
+    }
+}
+
+fn preset_metrics_for(city: &str, street: &str) -> (i32, &'static str, u8) {
+    let short_city = city.trim_end_matches('市');
+    if street.contains("黄兴中路") || street.contains("五一广场") {
+        (23, "晴转多云", 50)
+    } else if short_city == "北京" {
+        (16, "晴朗", 38)
+    } else if short_city == "上海" {
+        (21, "多云", 62)
+    } else if short_city == "广州" {
+        (26, "晴间多云", 68)
+    } else if short_city == "深圳" {
+        (27, "晴朗", 70)
+    } else if short_city == "武汉" {
+        (20, "晴转多云", 56)
+    } else if short_city == "成都" {
+        (19, "阴转多云", 66)
+    } else if short_city == "杭州" {
+        (21, "晴间多云", 58)
+    } else if short_city == "南京" {
+        (19, "晴朗", 52)
+    } else {
+        (22, "晴间多云", 54)
+    }
+}
+
 fn match_preset_location(query: &str) -> Option<(&'static str, &'static str, f64, f64, i32, &'static str, u8)> {
     let q = query.trim();
+    // 1) 优先按具体街道匹配（避免同城不同街道如「麓山南路街道」与「黄兴中路街道」串位）
+    for &(city, street, lat, lon) in &STREET_PRESETS {
+        let st_tail = street.split('·').next_back().unwrap_or(street).trim();
+        if !q.is_empty() && (q.contains(street) || (!st_tail.is_empty() && q.contains(st_tail))) {
+            let (t, desc, hum) = preset_metrics_for(city, street);
+            return Some((city, street, lat, lon, t, desc, hum));
+        }
+    }
+    // 2) 再按城市匹配
     for &(city, street, lat, lon) in &STREET_PRESETS {
         let short_city = city.trim_end_matches('市');
-        if q.contains(short_city) || street.contains(q) || q.contains(street) {
-            let (t, desc, hum) = if short_city == "北京" {
-                (16, "晴朗", 38)
-            } else if short_city == "上海" {
-                (21, "多云", 62)
-            } else if short_city == "广州" {
-                (26, "晴间多云", 68)
-            } else if short_city == "深圳" {
-                (27, "晴朗", 70)
-            } else if short_city == "武汉" {
-                (20, "晴转多云", 56)
-            } else if short_city == "成都" {
-                (19, "阴转多云", 66)
-            } else if short_city == "杭州" {
-                (21, "晴间多云", 58)
-            } else if short_city == "南京" {
-                (19, "晴朗", 52)
-            } else {
-                (22, "晴间多云", 54)
-            };
+        if !q.is_empty() && (q.contains(short_city) || street.contains(q)) {
+            let (t, desc, hum) = preset_metrics_for(city, street);
             return Some((city, street, lat, lon, t, desc, hum));
         }
     }
@@ -517,6 +812,174 @@ pub(crate) fn geolocate_precise() -> Option<(f64, f64, String, String)> {
     Some((lat, lon, city, street))
 }
 
+pub fn wisland_to_weather_snapshot(w_st: &WislandWeatherState) -> crate::weather::Snapshot {
+    let clean_desc = w_st
+        .desc
+        .trim_start_matches(['☀', '☁', '❄', '⛈', '⛅', ' '])
+        .trim()
+        .to_owned();
+    let code = desc_to_wmo_code(&clean_desc);
+    let wind_kmh = w_st
+        .wind
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .filter(|s| !s.is_empty())
+        .next_back()
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(12.0);
+    let mut sr_str = "06:44".to_owned();
+    let mut ss_str = "17:36".to_owned();
+    for part in w_st.sun_rise_set.split('·') {
+        let p = part.trim();
+        let hhmm: String = p.chars().take_while(|c| c.is_ascii_digit() || *c == ':').collect();
+        if hhmm.len() == 5 && hhmm.contains(':') {
+            if p.contains("日出") {
+                sr_str = hhmm;
+            } else if p.contains("日落") {
+                ss_str = hhmm;
+            }
+        }
+    }
+    let today = Local::now().date_naive();
+    let weekdays = ["一", "二", "三", "四", "五", "六", "日"];
+    let mut days = Vec::with_capacity(crate::weather::FORECAST_DAYS);
+    for idx in 0..crate::weather::FORECAST_DAYS {
+        let d_date = today
+            .checked_add_days(chrono::Days::new(idx as u64))
+            .unwrap_or(today);
+        let date_str = d_date.format("%Y-%m-%d").to_string();
+        let label = match idx {
+            0 => "今天".to_owned(),
+            1 => "明天".to_owned(),
+            _ => format!("周{}", weekdays[d_date.weekday().num_days_from_monday() as usize]),
+        };
+        if let Some(fc) = w_st.forecast.get(idx) {
+            let fc_code = desc_to_wmo_code(&fc.desc);
+            days.push(crate::weather::Day {
+                label,
+                date: date_str,
+                high: fc.t_max as f32,
+                low: fc.t_min as f32,
+                code: fc_code,
+                rain: if fc.desc.contains("雨") { 65 } else { 0 },
+            });
+        } else {
+            let base_hi = w_st.forecast.last().map(|d| d.t_max).unwrap_or(w_st.temp + 3);
+            let base_lo = w_st.forecast.last().map(|d| d.t_min).unwrap_or(w_st.temp - 4);
+            let delta = if idx % 2 == 0 { 1 } else { -1 };
+            days.push(crate::weather::Day {
+                label,
+                date: date_str,
+                high: (base_hi + delta) as f32,
+                low: (base_lo + delta) as f32,
+                code,
+                rain: 0,
+            });
+        }
+    }
+    let high = days.first().map(|d| d.high).or(Some((w_st.temp + 3) as f32));
+    let low = days.first().map(|d| d.low).or(Some((w_st.temp - 4) as f32));
+    let valid_street = if is_valid_street_label(&w_st.street) {
+        w_st.street.trim().to_owned()
+    } else {
+        default_street_for_city(&w_st.city, w_st.lat, w_st.lon)
+    };
+    let pos = crate::weather::Position {
+        lat: w_st.lat,
+        lon: w_st.lon,
+        label: w_st.city.trim().to_owned(),
+        region: valid_street,
+    };
+    crate::weather::Snapshot {
+        condition: if clean_desc.is_empty() { None } else { Some(clean_desc) },
+        attributions: Vec::new(),
+        place: w_st.city.trim().to_owned(),
+        position: Some(pos),
+        auto: false,
+        temp: w_st.temp as f32,
+        feels: Some(w_st.feels_like as f32),
+        humidity: Some(w_st.humidity as u32),
+        wind: Some(wind_kmh),
+        code,
+        day: (6..19).contains(&Local::now().hour()),
+        high,
+        low,
+        sunrise: Some(sr_str),
+        sunset: Some(ss_str),
+        sun_times: None,
+        days,
+        at: chrono::Utc::now().timestamp(),
+    }
+}
+
+/// 若「街道级定位」触发了街道切换或街道实况更新，取出最新合成的 `Snapshot` 同步至 `App::weather`。
+pub fn take_pending_street_snapshot() -> Option<(crate::weather::Snapshot, String, crate::weather::Position)> {
+    let cur = STREET_WEATHER_SEQ.load(Ordering::SeqCst);
+    let prev = LAST_APPLIED_STREET_SEQ.swap(cur, Ordering::SeqCst);
+    if cur == prev {
+        return None;
+    }
+    let w_st = weather_state();
+    let snap = wisland_to_weather_snapshot(&w_st);
+    let pos = snap.position.clone().unwrap_or(crate::weather::Position {
+        lat: w_st.lat,
+        lon: w_st.lon,
+        label: w_st.city.clone(),
+        region: w_st.street.clone(),
+    });
+    Some((snap, w_st.city, pos))
+}
+
+/// 立即应用用户在「街道级定位」中选择的城市与街道（0ms 更新内存状态与两个预览界面，并启动后台实况拉取）。
+pub fn apply_street_selection(city: &str, street: &str, lat: f64, lon: f64) {
+    let city_clean = if city.trim().is_empty() {
+        "长沙市".to_owned()
+    } else {
+        city.trim().to_owned()
+    };
+    let street_clean = if is_valid_street_label(street) {
+        street.trim().to_owned()
+    } else {
+        default_street_for_city(&city_clean, lat, lon)
+    };
+    let (fallback_t, fallback_desc, fallback_hum) = preset_metrics_for(&city_clean, &street_clean);
+    let now_h = Local::now().hour();
+    let t_min = fallback_t - 5;
+    let t_max = fallback_t + 3;
+    let hourly = build_hourly_realistic(fallback_t, t_min, t_max, now_h, lat, lon);
+    let forecast = vec![
+        DailyForecast { day_label: "今天".into(), desc: fallback_desc.to_owned(), t_min, t_max },
+        DailyForecast { day_label: "明天".into(), desc: "多云".into(), t_min: t_min - 1, t_max: t_max - 1 },
+        DailyForecast { day_label: "后天".into(), desc: "晴间多云".into(), t_min, t_max },
+        DailyForecast { day_label: "大后天".into(), desc: "阵雨".into(), t_min: t_min - 2, t_max: t_max - 3 },
+        DailyForecast { day_label: "第5天".into(), desc: "晴朗".into(), t_min: t_min - 1, t_max: t_max - 1 },
+    ];
+    config::update(|c| {
+        c.weather_city = city_clean.clone();
+        c.weather_street = street_clean.clone();
+        c.weather_lat = lat;
+        c.weather_lon = lon;
+        c.weather_desc = fallback_desc.to_owned();
+        c.weather_temp = fallback_t;
+    });
+    if let Ok(mut g) = WISLAND_WEATHER.get_or_init(|| Mutex::new(WislandWeatherState::default())).lock() {
+        g.city = city_clean.clone();
+        g.street = street_clean.clone();
+        g.lat = lat;
+        g.lon = lon;
+        g.temp = fallback_t;
+        g.feels_like = fallback_t - 1;
+        g.humidity = fallback_hum;
+        g.desc = fallback_desc.to_owned();
+        g.hourly = hourly;
+        g.forecast = forecast;
+        g.updated_at = Local::now().format("%H:%M 更新").to_string();
+        g.locate_status = format!("已切换街道：{} · {} ({lat:.4}, {lon:.4})", city_clean, street_clean);
+        g.synced_from_live = true;
+    }
+    bump_street_weather_seq();
+    refresh_weather_for_street_async(city_clean, street_clean, lat, lon);
+}
+
 pub fn locate_street_async() {
     if STREET_LOCATING.swap(true, Ordering::SeqCst) {
         return;
@@ -538,14 +1001,17 @@ pub fn locate_street_async() {
             if !c_out.is_empty() {
                 city = c_out;
             }
-            if !s_out.is_empty() {
+            if is_valid_street_label(&s_out) {
                 street = s_out;
+            } else {
+                street = resolve_street_for_position(&city, lat, lon);
             }
             resolved = !city.is_empty();
         }
 
         if !resolved {
-            if let Some((p_city, p_street, p_lat, p_lon, _, _, _)) = match_preset_location(&city) {
+            let query = format!("{} {}", city, street);
+            if let Some((p_city, p_street, p_lat, p_lon, _, _, _)) = match_preset_location(&query) {
                 city = p_city.to_owned();
                 street = p_street.to_owned();
                 lat = p_lat;
@@ -559,25 +1025,8 @@ pub fn locate_street_async() {
             }
         }
 
-        config::update(|c| {
-            c.weather_city = city.clone();
-            c.weather_street = street.clone();
-            c.weather_lat = lat;
-            c.weather_lon = lon;
-        });
-        if let Ok(mut slot) = WISLAND_WEATHER.get_or_init(|| Mutex::new(WislandWeatherState::default())).lock() {
-            slot.city = city.clone();
-            slot.street = street.clone();
-            slot.lat = lat;
-            slot.lon = lon;
-            slot.locate_status = if street.is_empty() {
-                format!("已定位：{city} ({lat:.4}, {lon:.4})")
-            } else {
-                format!("已精准定位：{city} · {street} ({lat:.4}, {lon:.4})")
-            };
-        }
         STREET_LOCATING.store(false, Ordering::SeqCst);
-        refresh_weather_async(city);
+        apply_street_selection(&city, &street, lat, lon);
     });
 }
 
@@ -592,125 +1041,124 @@ pub fn search_street_async(query: String) {
         return;
     }
     std::thread::spawn(move || {
+        let cfg_init = config::get();
+        let mut final_city = cfg_init.weather_city.clone();
+        let mut final_street = cfg_init.weather_street.clone();
+        let mut final_lat = cfg_init.weather_lat;
+        let mut final_lon = cfg_init.weather_lon;
         let mut matched = false;
+
         if let Some((c, st, la, lo, _, _, _)) = match_preset_location(&q) {
-            config::update(|cfg| {
-                cfg.weather_city = c.to_owned();
-                cfg.weather_street = st.to_owned();
-                cfg.weather_lat = la;
-                cfg.weather_lon = lo;
-            });
+            final_city = c.to_owned();
+            final_street = st.to_owned();
+            final_lat = la;
+            final_lon = lo;
             matched = true;
         }
 
         #[cfg(windows)]
         if !matched {
-            use std::os::windows::process::CommandExt;
             let url = format!(
                 "https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=1&accept-language=zh-CN&q={}",
                 url_encode_utf8(&q)
             );
-            {
-                {
-                    if let Some(arr) = ureq_get_json(&url, 4) {
-                        if let Some(first) = arr.as_array().and_then(|a| a.first()) {
-                            let la = first
-                                .get("lat")
-                                .and_then(|x| x.as_str())
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .unwrap_or(28.1812);
-                            let lo = first
-                                .get("lon")
-                                .and_then(|x| x.as_str())
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .unwrap_or(112.9445);
-                            let mut c_name = String::new();
-                            let mut s_name = String::new();
-                            if let Some(addr) = first.get("address") {
-                                c_name = addr
-                                    .get("city")
-                                    .or_else(|| addr.get("county"))
-                                    .or_else(|| addr.get("state"))
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("")
-                                    .to_owned();
-                                let dist = addr
-                                    .get("suburb")
-                                    .or_else(|| addr.get("city_district"))
-                                    .or_else(|| addr.get("district"))
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("");
-                                let rd = addr
-                                    .get("road")
-                                    .or_else(|| addr.get("neighbourhood"))
-                                    .or_else(|| addr.get("quarter"))
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("");
-                                s_name = match (!dist.is_empty(), !rd.is_empty()) {
-                                    (true, true) => format!("{dist} · {rd}"),
-                                    (true, false) => dist.to_owned(),
-                                    (false, true) => rd.to_owned(),
-                                    (false, false) => q.clone(),
-                                };
-                            }
-                            if s_name.is_empty() {
-                                s_name = q.clone();
-                            }
-                            config::update(|cfg| {
-                                if !c_name.is_empty() {
-                                    cfg.weather_city = c_name;
-                                }
-                                cfg.weather_street = s_name;
-                                cfg.weather_lat = la;
-                                cfg.weather_lon = lo;
-                            });
-                            matched = true;
-                        }
+            if let Some(arr) = ureq_get_json(&url, 4) {
+                if let Some(first) = arr.as_array().and_then(|a| a.first()) {
+                    let la = first
+                        .get("lat")
+                        .and_then(|x| x.as_str())
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(final_lat);
+                    let lo = first
+                        .get("lon")
+                        .and_then(|x| x.as_str())
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(final_lon);
+                    let mut c_name = String::new();
+                    let mut s_name = String::new();
+                    if let Some(addr) = first.get("address") {
+                        c_name = addr
+                            .get("city")
+                            .or_else(|| addr.get("county"))
+                            .or_else(|| addr.get("state"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_owned();
+                        let dist = addr
+                            .get("suburb")
+                            .or_else(|| addr.get("city_district"))
+                            .or_else(|| addr.get("district"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("");
+                        let rd = addr
+                            .get("road")
+                            .or_else(|| addr.get("neighbourhood"))
+                            .or_else(|| addr.get("quarter"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("");
+                        s_name = match (!dist.is_empty(), !rd.is_empty()) {
+                            (true, true) => format!("{dist} · {rd}"),
+                            (true, false) => dist.to_owned(),
+                            (false, true) => rd.to_owned(),
+                            (false, false) => q.clone(),
+                        };
                     }
+                    if !c_name.is_empty() {
+                        final_city = c_name;
+                    }
+                    final_street = if is_valid_street_label(&s_name) {
+                        s_name
+                    } else {
+                        default_street_for_city(&final_city, la, lo)
+                    };
+                    final_lat = la;
+                    final_lon = lo;
+                    matched = true;
                 }
             }
         }
 
-        if !matched {
-            config::update(|cfg| {
-                cfg.weather_street = q.clone();
-            });
+        if !matched && is_valid_street_label(&q) {
+            final_street = q.clone();
         }
         STREET_LOCATING.store(false, Ordering::SeqCst);
-        let city = config::get().weather_city;
-        refresh_weather_async(city);
+        apply_street_selection(&final_city, &final_street, final_lat, final_lon);
     });
 }
 
 /// 异步刷新街道级实时天气、24h逐时曲线与 5 日预报（支持内置源与自定义天气源 URL 模板）。
 pub fn refresh_weather_async(city: String) {
-    if WEATHER_FETCHING.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    std::thread::spawn(move || {
-        let cfg = config::get();
-        let city_name = if city.trim().is_empty() {
+    let cfg = config::get();
+    let city_name = if city.trim().is_empty() {
+        if cfg.weather_city.trim().is_empty() {
             "长沙市".to_owned()
         } else {
-            city.trim().to_owned()
-        };
-        let (preset_city, preset_street, preset_lat, preset_lon, fallback_t, fallback_desc, fallback_hum) =
-            match_preset_location(&city_name).unwrap_or((
-                "长沙市",
-                "岳麓区 · 麓山南路街道",
-                28.1812,
-                112.9445,
-                22,
-                "晴间多云",
-                54,
-            ));
-        let lat = if cfg.weather_lat.abs() > 0.01 { cfg.weather_lat } else { preset_lat };
-        let lon = if cfg.weather_lon.abs() > 0.01 { cfg.weather_lon } else { preset_lon };
-        let street_name = if !cfg.weather_street.trim().is_empty() {
-            cfg.weather_street.trim().to_owned()
-        } else {
-            preset_street.to_owned()
-        };
+            cfg.weather_city.trim().to_owned()
+        }
+    } else {
+        city.trim().to_owned()
+    };
+    let street_name = if is_valid_street_label(&cfg.weather_street) {
+        cfg.weather_street.trim().to_owned()
+    } else {
+        default_street_for_city(&city_name, cfg.weather_lat, cfg.weather_lon)
+    };
+    let (lat, lon) = if cfg.weather_lat.abs() > 0.01 || cfg.weather_lon.abs() > 0.01 {
+        (cfg.weather_lat, cfg.weather_lon)
+    } else if let Some((_, _, la, lo, _, _, _)) = match_preset_location(&format!("{city_name} {street_name}")) {
+        (la, lo)
+    } else {
+        (28.1812, 112.9445)
+    };
+    refresh_weather_for_street_async(city_name, street_name, lat, lon);
+}
+
+pub fn refresh_weather_for_street_async(city_name: String, street_name: String, lat: f64, lon: f64) {
+    let req_id = WEATHER_REQ_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    WEATHER_FETCHING.store(true, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let cfg = config::get();
+        let (fallback_t, fallback_desc, fallback_hum) = preset_metrics_for(&city_name, &street_name);
         let now_h = Local::now().hour();
         let src_name = match cfg.weather_source {
             1 => "和风/中国天气".to_owned(),
@@ -725,9 +1173,14 @@ pub fn refresh_weather_async(city: String) {
             }
             _ => "Open-Meteo".to_owned(),
         };
+        let valid_street = if is_valid_street_label(&street_name) {
+            street_name.clone()
+        } else {
+            default_street_for_city(&city_name, lat, lon)
+        };
         let mut st = WislandWeatherState {
-            city: if city_name.is_empty() { preset_city.to_owned() } else { city_name.clone() },
-            street: street_name.clone(),
+            city: city_name.clone(),
+            street: valid_street.clone(),
             lat,
             lon,
             desc: fallback_desc.to_owned(),
@@ -743,20 +1196,23 @@ pub fn refresh_weather_async(city: String) {
             life_tip: "街道空气洁净适宜出行 · 午后舒适宜人".into(),
             source_name: src_name.clone(),
             updated_at: Local::now().format("%H:%M 更新").to_string(),
-            locate_status: format!("{} · {} ({lat:.4}, {lon:.4})", city_name, street_name),
-            hourly: build_hourly(fallback_t, now_h),
+            locate_status: format!("{} · {} ({lat:.4}, {lon:.4})", city_name, valid_street),
+            hourly: build_hourly_realistic(fallback_t, fallback_t - 5, fallback_t + 3, now_h, lat, lon),
             forecast: vec![
-                DailyForecast { day_label: "今天".into(), desc: format!("☀ {fallback_desc}"), t_min: fallback_t - 6, t_max: fallback_t + 2 },
-                DailyForecast { day_label: "明天".into(), desc: "多云".into(), t_min: fallback_t - 7, t_max: fallback_t + 1 },
-                DailyForecast { day_label: "后天".into(), desc: "晴间多云".into(), t_min: fallback_t - 6, t_max: fallback_t + 2 },
-                DailyForecast { day_label: "大后天".into(), desc: "小雨".into(), t_min: fallback_t - 8, t_max: fallback_t - 2 },
-                DailyForecast { day_label: "第5天".into(), desc: "晴朗".into(), t_min: fallback_t - 7, t_max: fallback_t + 1 },
+                DailyForecast { day_label: "今天".into(), desc: fallback_desc.to_owned(), t_min: fallback_t - 5, t_max: fallback_t + 3 },
+                DailyForecast { day_label: "明天".into(), desc: "多云".into(), t_min: fallback_t - 6, t_max: fallback_t + 2 },
+                DailyForecast { day_label: "后天".into(), desc: "晴间多云".into(), t_min: fallback_t - 5, t_max: fallback_t + 3 },
+                DailyForecast { day_label: "大后天".into(), desc: "小雨".into(), t_min: fallback_t - 7, t_max: fallback_t - 1 },
+                DailyForecast { day_label: "第5天".into(), desc: "晴朗".into(), t_min: fallback_t - 6, t_max: fallback_t + 2 },
             ],
+            synced_from_live: true,
         };
+
+        let mut got_hourly_from_net = false;
+        let mut got_daily_from_net = false;
 
         #[cfg(windows)]
         {
-            use std::os::windows::process::CommandExt;
             let key = cfg.weather_api_key.trim();
             let caiyun_token = if key.is_empty() { "TAkhjf8d1nlSlspN" } else { key };
             let url = if cfg.weather_source == 4 && !cfg.weather_custom_url.trim().is_empty() {
@@ -765,7 +1221,7 @@ pub fn refresh_weather_async(city: String) {
                     .replace("{lat}", &format!("{lat:.4}"))
                     .replace("{lon}", &format!("{lon:.4}"))
                     .replace("{city}", &url_encode_utf8(&city_name))
-                    .replace("{street}", &url_encode_utf8(&street_name))
+                    .replace("{street}", &url_encode_utf8(&valid_street))
                     .replace("{key}", key)
             } else if cfg.weather_source == 1 && !key.is_empty() {
                 format!("https://devapi.qweather.com/v7/weather/now?location={lon:.4},{lat:.4}&key={key}")
@@ -775,132 +1231,186 @@ pub fn refresh_weather_async(city: String) {
                 format!("https://api.caiyunapp.com/v2.6/{caiyun_token}/{lon:.4},{lat:.4}/realtime")
             } else {
                 format!(
-                    "https://api.open-meteo.com/v1/forecast?latitude={lat:.4}&longitude={lon:.4}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,surface_pressure&hourly=temperature_2m&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=5"
+                    "https://api.open-meteo.com/v1/forecast?latitude={lat:.4}&longitude={lon:.4}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,surface_pressure&hourly=temperature_2m&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=auto&forecast_days=7"
                 )
             };
-            {
-                {
-                    if let Some(v) = ureq_get_json(&url, 4) {
-                        // 1) Open-Meteo 格式
-                        if let Some(cur) = v.get("current") {
-                            if let Some(t) = cur.get("temperature_2m").and_then(|x| x.as_f64()) {
-                                st.temp = t.round() as i32;
-                            }
-                            if let Some(fl) = cur.get("apparent_temperature").and_then(|x| x.as_f64()) {
-                                st.feels_like = fl.round() as i32;
-                            }
-                            if let Some(h) = cur.get("relative_humidity_2m").and_then(|x| x.as_u64()) {
-                                st.humidity = h.clamp(0, 100) as u8;
-                            }
-                            if let Some(code) = cur.get("weather_code").and_then(|x| x.as_i64()) {
-                                st.desc = wmo_code_desc(code)
-                                    .trim_start_matches(|c: char| !c.is_alphabetic() && !('\u{4e00}'..='\u{9fff}').contains(&c))
-                                    .trim()
-                                    .to_owned();
-                            }
-                            if let Some(ws) = cur.get("wind_speed_10m").and_then(|x| x.as_f64()) {
-                                st.wind = format!("风速 {:.1} km/h", ws);
-                            }
-                            if let Some(pr) = cur.get("surface_pressure").and_then(|x| x.as_f64()) {
-                                st.pressure = format!("{:.0} hPa", pr);
-                            }
-                        }
-                        // 2) 和风天气 QWeather (`now.temp` / `now.text`) 格式
-                        if let Some(now_obj) = v.get("now") {
-                            if let Some(t) = now_obj.get("temp").and_then(|x| x.as_str()).and_then(|s| s.parse::<f64>().ok()) {
-                                st.temp = t.round() as i32;
-                            }
-                            if let Some(fl) = now_obj.get("feelsLike").and_then(|x| x.as_str()).and_then(|s| s.parse::<f64>().ok()) {
-                                st.feels_like = fl.round() as i32;
-                            }
-                            if let Some(txt) = now_obj.get("text").and_then(|x| x.as_str()) {
-                                st.desc = txt.to_owned();
-                            }
-                            if let Some(hum) = now_obj.get("humidity").and_then(|x| x.as_str()).and_then(|s| s.parse::<u8>().ok()) {
-                                st.humidity = hum.min(100);
-                            }
-                        }
-                        // 3) 彩云天气 (`result.realtime`) 格式
-                        if let Some(rt) = v.pointer("/result/realtime") {
-                            if let Some(t) = rt.get("temperature").and_then(|x| x.as_f64()) {
-                                st.temp = t.round() as i32;
-                            }
-                            if let Some(fl) = rt.get("apparent_temperature").and_then(|x| x.as_f64()) {
-                                st.feels_like = fl.round() as i32;
-                            }
-                            if let Some(aqi_v) = rt.pointer("/air_quality/aqi/chn").and_then(|x| x.as_u64()) {
-                                st.aqi_num = aqi_v as u16;
-                                st.aqi = format!("AQI {aqi_v}");
-                            }
-                        }
-                        // 4) OpenWeatherMap (`main.temp`) 或通用自定义 JSON (`temp` / `temperature`) 格式
-                        if let Some(main_obj) = v.get("main") {
-                            if let Some(t) = main_obj.get("temp").and_then(|x| x.as_f64()) {
-                                st.temp = (if t > 150.0 { t - 273.15 } else { t }).round() as i32;
-                            }
-                        } else if let Some(t) = v.get("temp").or_else(|| v.get("temperature")).and_then(|x| x.as_f64()) {
+
+            let parse_open_meteo_into = |v: &serde_json::Value,
+                                         st: &mut WislandWeatherState,
+                                         override_cur: bool,
+                                         got_h: &mut bool,
+                                         got_d: &mut bool| {
+                if override_cur {
+                    if let Some(cur) = v.get("current") {
+                        if let Some(t) = cur.get("temperature_2m").and_then(|x| x.as_f64()) {
                             st.temp = t.round() as i32;
                         }
-                        if let Some(d_str) = v.get("desc").or_else(|| v.get("weather")).and_then(|x| x.as_str()) {
-                            st.desc = d_str.to_owned();
+                        if let Some(fl) = cur.get("apparent_temperature").and_then(|x| x.as_f64()) {
+                            st.feels_like = fl.round() as i32;
                         }
-
-                        if let Some(hourly) = v.get("hourly").and_then(|h| h.get("temperature_2m")).and_then(|x| x.as_array()) {
-                            let mut hp = Vec::new();
-                            for i in 0..8 {
-                                let idx = (now_h as usize + i * 3).min(hourly.len().saturating_sub(1));
-                                if let Some(tv) = hourly.get(idx).and_then(|x| x.as_f64()) {
-                                    let h = (now_h + i as u32 * 3) % 24;
-                                    hp.push(HourlyPoint {
-                                        hour_label: if i == 0 { "现在".into() } else { format!("{h:02}:00") },
-                                        temp: tv.round() as i32,
-                                    });
-                                }
-                            }
-                            if hp.len() >= 4 {
-                                st.hourly = hp;
-                            }
+                        if let Some(h) = cur.get("relative_humidity_2m").and_then(|x| x.as_u64()) {
+                            st.humidity = h.clamp(0, 100) as u8;
                         }
-                        if let Some(daily) = v.get("daily") {
-                            let codes = daily.get("weather_code").and_then(|x| x.as_array());
-                            let tmaxs = daily.get("temperature_2m_max").and_then(|x| x.as_array());
-                            let tmins = daily.get("temperature_2m_min").and_then(|x| x.as_array());
-                            if let (Some(codes), Some(tmaxs), Some(tmins)) = (codes, tmaxs, tmins) {
-                                let labels = ["今天", "明天", "后天", "大后天", "第5天"];
-                                let mut fc = Vec::new();
-                                for i in 0..5.min(codes.len()).min(tmaxs.len()).min(tmins.len()) {
-                                    let c = codes[i].as_i64().unwrap_or(1);
-                                    let hi = tmaxs[i].as_f64().unwrap_or(20.0).round() as i32;
-                                    let lo = tmins[i].as_f64().unwrap_or(12.0).round() as i32;
-                                    fc.push(DailyForecast {
-                                        day_label: labels[i].to_owned(),
-                                        desc: wmo_code_desc(c).to_owned(),
-                                        t_min: lo,
-                                        t_max: hi,
-                                    });
-                                }
-                                if !fc.is_empty() {
-                                    st.forecast = fc;
-                                }
-                            }
+                        if let Some(code) = cur.get("weather_code").and_then(|x| x.as_i64()) {
+                            st.desc = wmo_code_desc(code)
+                                .trim_start_matches(|c: char| !c.is_alphabetic() && !('\u{4e00}'..='\u{9fff}').contains(&c))
+                                .trim()
+                                .to_owned();
+                        }
+                        if let Some(ws) = cur.get("wind_speed_10m").and_then(|x| x.as_f64()) {
+                            st.wind = format!("实时风速 · {:.0}km/h", ws);
+                        }
+                        if let Some(pr) = cur.get("surface_pressure").and_then(|x| x.as_f64()) {
+                            st.pressure = format!("{:.0} hPa", pr);
                         }
                     }
+                }
+                if let Some(hourly) = v.get("hourly").and_then(|h| h.get("temperature_2m")).and_then(|x| x.as_array()) {
+                    let h_times = v.get("hourly").and_then(|h| h.get("time")).and_then(|x| x.as_array());
+                    let start_idx = h_times
+                        .and_then(|times| {
+                            let suffix = format!("T{now_h:02}:00");
+                            times.iter().position(|t| t.as_str().is_some_and(|s| s.ends_with(&suffix)))
+                        })
+                        .unwrap_or((now_h as usize).min(hourly.len().saturating_sub(1)));
+                    let mut hp = Vec::with_capacity(8);
+                    for i in 0..8 {
+                        let idx = (start_idx + i * 3).min(hourly.len().saturating_sub(1));
+                        if let Some(tv) = hourly.get(idx).and_then(|x| x.as_f64()) {
+                            let h = (now_h + i as u32 * 3) % 24;
+                            hp.push(HourlyPoint {
+                                hour_label: if i == 0 { "现在".into() } else { format!("{h:02}:00") },
+                                temp: if i == 0 { st.temp } else { tv.round() as i32 },
+                            });
+                        }
+                    }
+                    if hp.len() >= 4 {
+                        st.hourly = hp;
+                        *got_h = true;
+                    }
+                }
+                if let Some(daily) = v.get("daily") {
+                    if let (Some(sr), Some(ss)) = (
+                        daily.get("sunrise").and_then(|x| x.as_array()).and_then(|a| a.first()).and_then(|x| x.as_str()).and_then(|s| s.get(11..16)),
+                        daily.get("sunset").and_then(|x| x.as_array()).and_then(|a| a.first()).and_then(|x| x.as_str()).and_then(|s| s.get(11..16)),
+                    ) {
+                        st.sun_rise_set = format!("{sr} 日出 · {ss} 日落");
+                    }
+                    let codes = daily.get("weather_code").and_then(|x| x.as_array());
+                    let tmaxs = daily.get("temperature_2m_max").and_then(|x| x.as_array());
+                    let tmins = daily.get("temperature_2m_min").and_then(|x| x.as_array());
+                    if let (Some(codes), Some(tmaxs), Some(tmins)) = (codes, tmaxs, tmins) {
+                        let labels = ["今天", "明天", "后天", "大后天", "第5天", "第6天", "第7天"];
+                        let mut fc = Vec::new();
+                        for i in 0..7.min(codes.len()).min(tmaxs.len()).min(tmins.len()) {
+                            let c = codes[i].as_i64().unwrap_or(1);
+                            let hi = tmaxs[i].as_f64().unwrap_or(20.0).round() as i32;
+                            let lo = tmins[i].as_f64().unwrap_or(12.0).round() as i32;
+                            fc.push(DailyForecast {
+                                day_label: labels[i].to_owned(),
+                                desc: wmo_code_desc(c).to_owned(),
+                                t_min: lo,
+                                t_max: hi,
+                            });
+                        }
+                        if !fc.is_empty() {
+                            st.forecast = fc;
+                            *got_d = true;
+                        }
+                    }
+                }
+            };
+
+            if let Some(v) = ureq_get_json(&url, 4) {
+                parse_open_meteo_into(&v, &mut st, true, &mut got_hourly_from_net, &mut got_daily_from_net);
+                // 2) 和风天气 QWeather (`now.temp` / `now.text`) 格式
+                if let Some(now_obj) = v.get("now") {
+                    if let Some(t) = now_obj.get("temp").and_then(|x| x.as_str()).and_then(|s| s.parse::<f64>().ok()) {
+                        st.temp = t.round() as i32;
+                    }
+                    if let Some(fl) = now_obj.get("feelsLike").and_then(|x| x.as_str()).and_then(|s| s.parse::<f64>().ok()) {
+                        st.feels_like = fl.round() as i32;
+                    }
+                    if let Some(txt) = now_obj.get("text").and_then(|x| x.as_str()) {
+                        st.desc = txt.to_owned();
+                    }
+                    if let Some(hum) = now_obj.get("humidity").and_then(|x| x.as_str()).and_then(|s| s.parse::<u8>().ok()) {
+                        st.humidity = hum.min(100);
+                    }
+                }
+                // 3) 彩云天气 (`result.realtime`) 格式
+                if let Some(rt) = v.pointer("/result/realtime") {
+                    if let Some(t) = rt.get("temperature").and_then(|x| x.as_f64()) {
+                        st.temp = t.round() as i32;
+                    }
+                    if let Some(fl) = rt.get("apparent_temperature").and_then(|x| x.as_f64()) {
+                        st.feels_like = fl.round() as i32;
+                    }
+                    if let Some(hum) = rt.get("humidity").and_then(|x| x.as_f64()) {
+                        let hum_pct = if hum <= 1.0 { (hum * 100.0).round() as u8 } else { hum.round() as u8 };
+                        st.humidity = hum_pct.min(100);
+                    }
+                    if let Some(aqi_v) = rt.pointer("/air_quality/aqi/chn").and_then(|x| x.as_u64()) {
+                        st.aqi_num = aqi_v as u16;
+                        st.aqi = format!("AQI {aqi_v}");
+                    }
+                }
+                // 4) OpenWeatherMap (`main.temp`) 或通用自定义 JSON (`temp` / `temperature`) 格式
+                if let Some(main_obj) = v.get("main") {
+                    if let Some(t) = main_obj.get("temp").and_then(|x| x.as_f64()) {
+                        st.temp = (if t > 150.0 { t - 273.15 } else { t }).round() as i32;
+                    }
+                } else if let Some(t) = v.get("temp").or_else(|| v.get("temperature")).and_then(|x| x.as_f64()) {
+                    st.temp = t.round() as i32;
+                }
+                if let Some(d_str) = v.get("desc").or_else(|| v.get("weather")).and_then(|x| x.as_str()) {
+                    st.desc = d_str.to_owned();
+                }
+            }
+
+            // 若当前选择了彩云/和风/Wttr 等仅返回实况的源，自动用街道经纬度请求 Open-Meteo 补齐真实的 24h 街道逐时趋势与多日预报
+            if !got_hourly_from_net || !got_daily_from_net {
+                let om_url = format!(
+                    "https://api.open-meteo.com/v1/forecast?latitude={lat:.4}&longitude={lon:.4}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,surface_pressure&hourly=temperature_2m&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=auto&forecast_days=7"
+                );
+                if let Some(om_v) = ureq_get_json(&om_url, 4) {
+                    let override_cur = cfg.weather_source == 0;
+                    parse_open_meteo_into(&om_v, &mut st, override_cur, &mut got_hourly_from_net, &mut got_daily_from_net);
                 }
             }
         }
 
-        config::update(|c| {
-            c.weather_city = st.city.clone();
-            c.weather_street = st.street.clone();
-            c.weather_lat = st.lat;
-            c.weather_lon = st.lon;
-            c.weather_desc = st.desc.clone();
-            c.weather_temp = st.temp;
-        });
-        if let Ok(mut slot) = WISLAND_WEATHER.get_or_init(|| Mutex::new(WislandWeatherState::default())).lock() {
-            *slot = st;
+        // 确保 24h 街道逐时趋势首点（「现在」）严格等于当前实况温度，离线或接口未返回 hourly 时按实况温度与昼夜温差动态生成
+        if !got_hourly_from_net || st.hourly.is_empty() {
+            let t_min = st.forecast.first().map(|d| d.t_min).unwrap_or(st.temp - 4);
+            let t_max = st.forecast.first().map(|d| d.t_max).unwrap_or(st.temp + 3);
+            st.hourly = build_hourly_realistic(st.temp, t_min, t_max, now_h, lat, lon);
+        } else if let Some(first) = st.hourly.first_mut() {
+            let delta = st.temp - first.temp;
+            first.temp = st.temp;
+            if delta.abs() >= 2 {
+                for (idx, pt) in st.hourly.iter_mut().enumerate().skip(1) {
+                    let weight = (1.0 - idx as f32 * 0.15).clamp(0.0, 0.75);
+                    pt.temp += (delta as f32 * weight).round() as i32;
+                }
+            }
         }
-        WEATHER_FETCHING.store(false, Ordering::SeqCst);
+
+        if WEATHER_REQ_GEN.load(Ordering::SeqCst) == req_id {
+            config::update(|c| {
+                c.weather_city = st.city.clone();
+                c.weather_street = st.street.clone();
+                c.weather_lat = st.lat;
+                c.weather_lon = st.lon;
+                c.weather_desc = st.desc.clone();
+                c.weather_temp = st.temp;
+            });
+            if let Ok(mut slot) = WISLAND_WEATHER.get_or_init(|| Mutex::new(WislandWeatherState::default())).lock() {
+                *slot = st;
+            }
+            bump_street_weather_seq();
+            WEATHER_FETCHING.store(false, Ordering::SeqCst);
+        }
     });
 }
 
@@ -1585,8 +2095,43 @@ pub fn draw(ui: &mut egui::Ui) {
 
     draw_win_widgets_settings_inner(ui, &mut cfg);
 
+    // [编译修复] `preset_switched` 只存在于天气设置页，本函数里从未定义；去掉守卫。
     if cfg != before {
-        config::update(|c| *c = cfg);
+        let manual_weather_edited = cfg.weather_city != before.weather_city
+            || cfg.weather_street != before.weather_street
+            || (cfg.weather_lat - before.weather_lat).abs() > 1e-5
+            || (cfg.weather_lon - before.weather_lon).abs() > 1e-5
+            || cfg.weather_desc != before.weather_desc
+            || cfg.weather_temp != before.weather_temp;
+        let new_cfg = cfg.clone();
+        config::update(|c| *c = new_cfg);
+        if manual_weather_edited {
+            if let Ok(mut g) = WISLAND_WEATHER.get_or_init(|| Mutex::new(WislandWeatherState::default())).lock() {
+                if !cfg.weather_city.trim().is_empty() {
+                    g.city = cfg.weather_city.trim().to_owned();
+                }
+                if is_valid_street_label(&cfg.weather_street) {
+                    g.street = cfg.weather_street.trim().to_owned();
+                }
+                g.lat = cfg.weather_lat;
+                g.lon = cfg.weather_lon;
+                if !cfg.weather_desc.trim().is_empty() {
+                    g.desc = cfg.weather_desc.trim().to_owned();
+                }
+                if g.temp != cfg.weather_temp {
+                    g.temp = cfg.weather_temp;
+                    g.feels_like = cfg.weather_temp - 1;
+                    let t_min = g.forecast.first().map(|d| d.t_min).unwrap_or(g.temp - 4);
+                    let t_max = g.forecast.first().map(|d| d.t_max).unwrap_or(g.temp + 3);
+                    g.hourly = build_hourly_realistic(g.temp, t_min, t_max, Local::now().hour(), g.lat, g.lon);
+                }
+                g.updated_at = Local::now().format("%H:%M 更新").to_string();
+                g.locate_status = format!("{} · {} ({:.4}, {:.4})", g.city, g.street, g.lat, g.lon);
+                g.synced_from_live = true;
+            }
+            bump_street_weather_seq();
+            ui.ctx().request_repaint();
+        }
     }
 }
 
@@ -2798,31 +3343,46 @@ pub fn draw_shadcn_plugin_island_page(
 
 /// 将 `self.weather.snapshot` (0.6.64 经典天气城市/实况) 实时同步至 Breezy / Shadcn 天气状态，实现三种天气界面方案 100% 功能与数据同质化（需求 5）。
 pub fn sync_breezy_from_snapshot(snap: &crate::weather::Snapshot) {
+    let cfg = config::get();
     let Ok(mut g) = WISLAND_WEATHER.get_or_init(|| Mutex::new(WislandWeatherState::default())).lock() else { return };
     let city_clean = snap.place.trim().to_owned();
+    let city_changed = !city_clean.is_empty() && g.city.trim_end_matches('市') != city_clean.trim_end_matches('市');
     if !city_clean.is_empty() {
-        g.city = city_clean;
+        g.city = city_clean.clone();
     }
     if let Some(pos) = &snap.position {
-        if !pos.region.trim().is_empty() {
-            g.street = pos.region.trim().to_owned();
-        }
         g.lat = pos.lat as f64;
         g.lon = pos.lon as f64;
+        if is_valid_street_label(&pos.region) {
+            g.street = pos.region.trim().to_owned();
+        } else if !city_changed && is_valid_street_label(&g.street) {
+            // 保留当前已选街道，不因 Open-Meteo 的 "湖南 · 中国" 覆盖掉具体街道
+        } else if !city_changed && is_valid_street_label(&cfg.weather_street) {
+            g.street = cfg.weather_street.trim().to_owned();
+        } else {
+            g.street = default_street_for_city(&g.city, g.lat, g.lon);
+        }
+    } else if !is_valid_street_label(&g.street) || city_changed {
+        g.street = default_street_for_city(&g.city, g.lat, g.lon);
     }
-    g.temp = snap.temp.round() as i32;
-    if let Some(feels) = snap.feels {
-        g.feels_like = feels.round() as i32;
-    }
+    let new_temp = snap.temp.round() as i32;
+    let temp_changed = g.temp != new_temp || !g.synced_from_live || city_changed;
+    g.temp = new_temp;
+    g.feels_like = snap.feels.map(|f| f.round() as i32).unwrap_or(new_temp);
     if let Some(hum) = snap.humidity {
         g.humidity = hum.min(100) as u8;
     }
     if let Some(w) = snap.wind {
         g.wind = format!("实时风速 · {:.0}km/h", w);
     }
-    g.desc = crate::weather::describe(snap.code).to_owned();
+    g.desc = snap.description().to_owned();
     if let (Some(sr), Some(ss)) = (&snap.sunrise, &snap.sunset) {
         g.sun_rise_set = format!("{sr} 日出 · {ss} 日落");
+    }
+    if snap.at > 0 {
+        if let Some(dt) = chrono::DateTime::from_timestamp(snap.at, 0) {
+            g.updated_at = dt.with_timezone(&Local).format("%H:%M 更新").to_string();
+        }
     }
     if !snap.days.is_empty() {
         g.forecast = snap
@@ -2838,6 +3398,20 @@ pub fn sync_breezy_from_snapshot(snap: &crate::weather::Snapshot) {
             })
             .collect();
     }
+    let t_min = snap
+        .low
+        .map(|v| v.round() as i32)
+        .or_else(|| g.forecast.first().map(|d| d.t_min))
+        .unwrap_or(new_temp - 4);
+    let t_max = snap
+        .high
+        .map(|v| v.round() as i32)
+        .or_else(|| g.forecast.first().map(|d| d.t_max))
+        .unwrap_or(new_temp + 3);
+    if temp_changed || g.hourly.is_empty() || g.hourly.first().map(|p| p.temp) != Some(new_temp) {
+        g.hourly = build_hourly_realistic(new_temp, t_min, t_max, Local::now().hour(), g.lat, g.lon);
+    }
+    g.synced_from_live = true;
 }
 
 // ---------------------------------------------------------------
@@ -2908,7 +3482,7 @@ fn draw_vector_weather_glyph(c: &crate::paint::Card, cx: f32, cy: f32, r: f32, d
     }
 }
 
-pub fn draw_weather_island_page(c: &crate::paint::Card) {
+pub fn draw_weather_island_page(c: &crate::paint::Card) -> bool {
     use crate::{
         paint::H,
         theme::{self, W},
@@ -2916,32 +3490,58 @@ pub fn draw_weather_island_page(c: &crate::paint::Card) {
     let cfg = config::get();
     let w_st = weather_state();
 
-    let left_x = 40.0_f32;
-    let total_w = 340.0_f32;
-    let top_y = 42.0_f32;
-    let body_h = 168.0_f32;
+    // 充分利用展开岛横向与纵向空间（x = 34..385, w = 351; y = 8..235），消除底部空白与卡片内文字截断
+    let left_x = 34.0_f32;
+    let total_w = 351.0_f32;
+    let top_y = 33.0_f32;
+    let body_h = 202.0_f32;
     let card_r = 11.0_f32;
     let tile_bg = theme::CARD;
 
-    // 次顶栏左端：当前天气数据源与更新时间胶囊（与右侧街道定位按钮同高对齐，填补次顶栏左侧空白并实时显示当前所选天气源）
-    c.fill(left_x, 12.0, 214.0, 20.0, 7.0, Color32::from_white_alpha(12));
-    c.circle(left_x + 9.5, 22.0, 2.4, Color32::from_rgb(56, 189, 248));
+    // 次顶栏左端 (y = 8..28)：当前天气数据源与更新时间胶囊
+    c.fill(left_x, 8.0, 232.0, 20.0, 7.0, Color32::from_white_alpha(13));
+    c.stroke(left_x, 8.0, 232.0, 20.0, 7.0, 0.7, Color32::from_white_alpha(20));
+    c.circle(left_x + 9.5, 18.0, 2.4, Color32::from_rgb(56, 189, 248));
     c.text(
         left_x + 16.0,
-        25.2,
-        &c.fit(&format!("数据源：{} · {}", w_st.source_name, w_st.updated_at), 8.2, W::Semibold, 192.0),
+        21.2,
+        &c.fit(&format!("数据源：{} · {}", w_st.source_name, w_st.updated_at), 8.2, W::Semibold, 208.0),
         8.2,
         W::Semibold,
         Color32::from_rgb(186, 230, 253),
         H::Left,
     );
 
-    // 次顶栏右端 (x = 324..380)：一键街道级定位胶囊按钮
+    // 次顶栏右端：立即刷新胶囊 + 街道定位胶囊
+    let fetching = WEATHER_FETCHING.load(Ordering::Relaxed);
+    let (ref_r, ref_c) = crate::paint::capsule(
+        c,
+        274.0,
+        8.0,
+        50.0,
+        20.0,
+        "breezy-top-refresh",
+        if fetching { Color32::from_rgb(14, 116, 144) } else { theme::BTN },
+        theme::BTN_HOVER,
+    );
+    ref_c.text(
+        299.0,
+        21.2,
+        if fetching { "同步中" } else { "↻ 刷新" },
+        8.0,
+        W::Semibold,
+        theme::WHITE,
+        H::Center,
+    );
+    if ref_r.on_hover_text("立即刷新当前街道天气与 24h 趋势").clicked() {
+        refresh_weather_async(w_st.city.clone());
+    }
+
     let locating = STREET_LOCATING.load(Ordering::Relaxed);
     let (loc_r, loc_c) = crate::paint::capsule(
         c,
-        324.0,
-        12.0,
+        329.0,
+        8.0,
         56.0,
         20.0,
         "breezy-street-locate",
@@ -2949,8 +3549,8 @@ pub fn draw_weather_island_page(c: &crate::paint::Card) {
         theme::BTN_HOVER,
     );
     loc_c.text(
-        352.0,
-        25.2,
+        357.0,
+        21.2,
         if locating { "定位中" } else { "街道定位" },
         8.2,
         W::Semibold,
@@ -2967,8 +3567,8 @@ pub fn draw_weather_island_page(c: &crate::paint::Card) {
         locate_street_async();
     }
 
-    // ── 左栏 (142px)：Breezy Weather 风格实况主卡（已移除底部多余按钮，升级为顶部街道胶囊 + 温度与矢量天气插画 + 2×2 四宫格指标卡） ──
-    let left_w = 142.0_f32;
+    // ── 左栏 (154px × 202px)：Breezy Weather 风格实况主卡 ──
+    let left_w = 154.0_f32;
     c.fill(left_x, top_y, left_w, body_h, card_r, tile_bg);
     c.stroke(left_x, top_y, left_w, body_h, card_r, 0.9, Color32::from_rgb(56, 189, 248).gamma_multiply(0.38));
 
@@ -2978,19 +3578,14 @@ pub fn draw_weather_island_page(c: &crate::paint::Card) {
     let hdr_w = left_w - 14.0;
     let hdr_h = 20.0;
     c.fill(hdr_x, hdr_y, hdr_w, hdr_h, 6.5, Color32::from_white_alpha(14));
-    // 矢量定位水滴针图标
-    c.circle(hdr_x + 9.0, hdr_y + 9.0, 2.8, Color32::from_rgb(56, 189, 248));
-    c.circle(hdr_x + 9.0, hdr_y + 9.0, 1.1, tile_bg);
-    let loc_title = format!(
-        "{} · {}",
-        w_st.city.trim_end_matches('市'),
-        w_st.street.split('·').next_back().unwrap_or(&w_st.street).trim()
-    );
+    c.circle(hdr_x + 8.5, hdr_y + 10.0, 2.6, Color32::from_rgb(56, 189, 248));
+    c.circle(hdr_x + 8.5, hdr_y + 10.0, 1.0, tile_bg);
+    let loc_title = format_street_address(&w_st.city, &w_st.street);
     c.text(
-        hdr_x + 15.5,
-        hdr_y + 13.2,
-        &c.fit(&loc_title, 8.2, W::Semibold, hdr_w - 20.0),
-        8.2,
+        hdr_x + 14.5,
+        hdr_y + 13.5,
+        &c.fit(&loc_title, 7.8, W::Semibold, hdr_w - 17.0),
+        7.8,
         W::Semibold,
         Color32::from_rgb(165, 243, 252),
         H::Left,
@@ -3002,72 +3597,95 @@ pub fn draw_weather_island_page(c: &crate::paint::Card) {
         refresh_weather_async(w_st.city.clone());
     }
 
-    // 2) 中部主温度 + 天气现象 + 矢量天气插画
+    // 2) 中部主温度 + 天气现象 + 高低温 + 矢量天气插画
     let clean_desc = w_st.desc.trim_start_matches(['☀', '☁', '❄', '⛈', '⛅', ' ']);
-    c.text(left_x + 10.0, top_y + 56.0, &format!("{}°", w_st.temp), 27.0, W::Bold, theme::WHITE, H::Left);
-    draw_vector_weather_glyph(c, left_x + left_w - 25.0, top_y + 47.0, 11.5, clean_desc);
+    c.text(left_x + 10.0, top_y + 57.0, &format!("{}°", w_st.temp), 28.0, W::Bold, theme::WHITE, H::Left);
+    draw_vector_weather_glyph(c, left_x + left_w - 26.0, top_y + 47.0, 12.5, clean_desc);
+    let hi_lo = w_st
+        .forecast
+        .first()
+        .map(|d| format!("{}°/{}°", d.t_max, d.t_min))
+        .unwrap_or_else(|| format!("{}°/{}°", w_st.temp + 3, w_st.temp - 4));
     c.text(
         left_x + 10.0,
-        top_y + 71.5,
-        &c.fit(&format!("{} · 体感 {}°C", clean_desc, w_st.feels_like), 8.5, W::Semibold, left_w - 20.0),
-        8.5,
+        top_y + 73.0,
+        &c.fit(&format!("{clean_desc} · 体感 {}° · {hi_lo}", w_st.feels_like), 8.2, W::Semibold, left_w - 18.0),
+        8.2,
         W::Semibold,
         Color32::from_rgb(250, 204, 21),
         H::Left,
     );
 
-    // 3) 下半部 2×2 精致四宫格指标卡（充分利用左卡下半空间，无多余按钮）
-    let grid_y0 = top_y + 79.0;
-    let cell_w = (left_w - 18.0) * 0.5; // 62px
-    let cell_h = 38.5_f32;
-    let gap = 4.0_f32;
+    // 3) 中下部 2×2 精致四宫格指标卡（无截断省略号）
+    let grid_y0 = top_y + 81.0;
+    let gap = 4.5_f32;
+    let cell_w = (left_w - 14.0 - gap) * 0.5; // 67.75px
+    let cell_h = 41.0_f32;
     let sub_bg = Color32::from_white_alpha(12);
 
-    let clean_uv = w_st.uv.trim_start_matches(['☀', ' ']);
-    let wind_short = w_st.wind.split('·').next().unwrap_or(&w_st.wind).trim();
-    let wind_spd = w_st.wind.split('·').nth(1).unwrap_or("12km/h").trim();
+    let clean_uv = w_st
+        .uv
+        .trim_start_matches(['☀', ' '])
+        .replace("弱 ", "")
+        .replace("中等 ", "");
+    let wind_short = w_st.wind.split('·').next().unwrap_or("实时风况").trim();
+    let wind_spd = w_st
+        .wind
+        .split('·')
+        .nth(1)
+        .unwrap_or(&w_st.wind)
+        .trim()
+        .replace("实时风速", "");
+    let aqi_clean = if w_st.aqi.starts_with("AQI") {
+        format!("优 · {}", w_st.aqi)
+    } else if w_st.aqi.contains("AQI") {
+        w_st.aqi.clone()
+    } else {
+        format!("AQI · {}", w_st.aqi)
+    };
+    let sun_clean = w_st
+        .sun_rise_set
+        .replace(" 日出 · ", " / ")
+        .replace("日出 · ", "/ ")
+        .replace(" 日落", "")
+        .trim()
+        .to_owned();
+
     let cells: [(bool, &str, String, Color32); 4] = [
-        (
-            cfg.weather_show_aqi,
-            "空气质量",
-            if w_st.aqi.contains('优') || w_st.aqi.contains('良') {
-                format!("{} · AQI", w_st.aqi)
-            } else {
-                format!("优 · AQI {}", w_st.aqi)
-            },
-            Color32::from_rgb(52, 211, 153),
-        ),
-        (
-            cfg.weather_show_uv_hum,
-            "湿度 / UV",
-            format!("{}% · {}", w_st.humidity, clean_uv),
-            Color32::from_rgb(56, 189, 248),
-        ),
-        (
-            cfg.weather_show_wind,
-            wind_short,
-            wind_spd.to_owned(),
-            Color32::from_rgb(129, 140, 248),
-        ),
-        (
-            cfg.weather_show_sun,
-            "日出 / 日落",
-            w_st.sun_rise_set.replace("日出 · ", "/ ").replace(" 日落", ""),
-            Color32::from_rgb(251, 191, 36),
-        ),
+        (cfg.weather_show_aqi, "空气质量", aqi_clean, Color32::from_rgb(52, 211, 153)),
+        (cfg.weather_show_uv_hum, "湿度 / UV", format!("{}% · {}", w_st.humidity, clean_uv), Color32::from_rgb(56, 189, 248)),
+        (cfg.weather_show_wind, wind_short, wind_spd, Color32::from_rgb(129, 140, 248)),
+        (cfg.weather_show_sun, "日出 / 日落", sun_clean, Color32::from_rgb(251, 191, 36)),
     ];
 
+    let mut sun_clicked = false;
     for (idx, (_, label, val, dot_col)) in cells.iter().enumerate() {
         let col = idx % 2;
         let row = idx / 2;
         let cx = left_x + 7.0 + col as f32 * (cell_w + gap);
         let cy = grid_y0 + row as f32 * (cell_h + gap);
-        c.fill(cx, cy, cell_w, cell_h, 7.0, sub_bg);
-        c.circle(cx + 8.0, cy + 11.0, 2.2, *dot_col);
+        let mut cell_bg = sub_bg;
+        if idx == 3 {
+            let sun_hit = c.hit(cx, cy, cell_w, cell_h, "breezy-sun-entry")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("查看日出日落与昼夜弧线");
+            if sun_hit.hovered() {
+                cell_bg = Color32::from_rgba_unmultiplied(251, 191, 36, 36);
+            }
+            if sun_hit.clicked() {
+                sun_clicked = true;
+            }
+        }
+        c.fill(cx, cy, cell_w, cell_h, 7.0, cell_bg);
+        if idx == 3 {
+            c.stroke(cx, cy, cell_w, cell_h, 7.0, 0.65, Color32::from_rgba_unmultiplied(251, 191, 36, 72));
+            c.path(&[(cx + cell_w - 7.5, cy + cell_h * 0.5 - 3.0), (cx + cell_w - 5.0, cy + cell_h * 0.5), (cx + cell_w - 7.5, cy + cell_h * 0.5 + 3.0)], 1.1, Color32::from_rgb(251, 191, 36));
+        }
+        c.circle(cx + 7.5, cy + 11.5, 2.2, *dot_col);
         c.text(
-            cx + 13.0,
-            cy + 13.8,
-            &c.fit(label, 7.5, W::Regular, cell_w - 16.0),
+            cx + 12.5,
+            cy + 14.2,
+            &c.fit(label, 7.5, W::Regular, cell_w - 15.0),
             7.5,
             W::Regular,
             theme::GRAY,
@@ -3075,16 +3693,32 @@ pub fn draw_weather_island_page(c: &crate::paint::Card) {
         );
         c.text(
             cx + 6.5,
-            cy + 29.5,
-            &c.fit(val, 8.2, W::Bold, cell_w - 11.0),
-            8.2,
+            cy + 31.0,
+            &c.fit(val, 8.0, W::Bold, cell_w - 10.0),
+            8.0,
             W::Bold,
             theme::WHITE,
             H::Left,
         );
     }
 
-    // ── 右栏 (192px)：24h 逐时温度趋势曲线卡 + 5 日温度区间条预报卡 ──
+    // 4) 左栏底部大气压与出行舒适度条（充分利用左卡下半空间）
+    let tip_y = grid_y0 + cell_h * 2.0 + gap * 2.0 + 1.0;
+    let tip_h = (top_y + body_h - tip_y - 6.0).max(20.0);
+    c.fill(hdr_x, tip_y, hdr_w, tip_h, 6.5, sub_bg);
+    c.circle(hdr_x + 8.0, tip_y + tip_h * 0.5, 2.0, Color32::from_rgb(52, 211, 153));
+    let tip_short = w_st.life_tip.split('·').next().unwrap_or(&w_st.life_tip).trim();
+    c.text(
+        hdr_x + 13.5,
+        tip_y + tip_h * 0.5 + 3.0,
+        &c.fit(&format!("{} · {}", w_st.pressure, tip_short), 7.4, W::Semibold, hdr_w - 17.0),
+        7.4,
+        W::Semibold,
+        Color32::from_rgb(212, 214, 222),
+        H::Left,
+    );
+
+    // ── 右栏 (191px × 202px)：24h 逐时温度趋势曲线卡 + 完整 5 日温度区间条预报卡 ──
     let rx = left_x + left_w + 6.0;
     let right_w = total_w - left_w - 6.0;
 
@@ -3092,8 +3726,8 @@ pub fn draw_weather_island_page(c: &crate::paint::Card) {
     let show_d = cfg.weather_show_daily;
 
     if show_h && show_d {
-        let h_card_h = 66.0_f32;
-        let d_card_h = body_h - h_card_h - 6.0;
+        let h_card_h = 78.0_f32;
+        let d_card_h = body_h - h_card_h - 6.0; // 118.0px -> 完整展示 5 日预报！
         draw_breezy_hourly_card(c, rx, top_y, right_w, h_card_h, card_r, tile_bg, &w_st);
         draw_breezy_daily_card(c, rx, top_y + h_card_h + 6.0, right_w, d_card_h, card_r, tile_bg, &w_st);
     } else if show_h {
@@ -3101,41 +3735,71 @@ pub fn draw_weather_island_page(c: &crate::paint::Card) {
     } else {
         draw_breezy_daily_card(c, rx, top_y, right_w, body_h, card_r, tile_bg, &w_st);
     }
+    sun_clicked
 }
 
-/// [Shadcn UI 新版天气岛 (`weather_ui_mode == 2`, 需求 14)]：
-/// 遵循 https://ui.shadcn.com/ Bento Card 设计规范：
-/// - 顶栏「街道定位」按钮位于 `x = 292..344` 安全区，绝不与音乐声波 (`356..378`) 重叠；
-/// - 上舱 (`x=38, y=38, w=342, h=64`)：Shadcn Hero 实况主卡（左侧超大号紧致气温 + 矢量气象徽标 + 街道 Badge，右侧 2×2 精致胶囊指标矩阵）；
-/// - 左下舱 (`x=38, y=108, w=168, h=110`)：24H 逐时温度趋势渐变面积图卡；
-/// - 右下舱 (`x=212, y=108, w=168, h=110`)：5 日温差进度条预报卡。
-pub fn draw_shadcn_weather_island_page(c: &crate::paint::Card) {
+/// [Shadcn UI 现代卡片天气岛 (`weather_ui_mode == 2`)]：
+/// 全宽高利用率 Bento 布局 (`x = 34..385, y = 8..235`)：
+/// - 上舱 (`x=34, y=33, w=351, h=72`)：Shadcn Hero 实况主卡（左侧大号气温 + 矢量气象徽标 + 街道级精准地址 Badge，右侧 2×2 指标矩阵）；
+/// - 左下舱 (`x=34, y=111, w=172, h=124`)：24H 街道逐时气温渐变面积图卡；
+/// - 右下舱 (`x=213, y=111, w=172, h=124`)：完整 5 日趋势与温差轨预报卡。
+pub fn draw_shadcn_weather_island_page(c: &crate::paint::Card) -> bool {
     use crate::{
         paint::H,
         theme::{self, W},
     };
     let w_st = weather_state();
+    let left_x = 34.0_f32;
+    let total_w = 351.0_f32;
 
-    // 次顶栏左端：当前天气数据源与更新时间胶囊（实时显示彩云天气/和风天气/Open-Meteo，与右侧街道定位胶囊同高对齐）
-    c.fill(38.0, 12.0, 218.0, 20.0, 7.0, Color32::from_rgba_unmultiplied(24, 26, 34, 195));
-    c.stroke(38.0, 12.0, 218.0, 20.0, 7.0, 0.7, Color32::from_white_alpha(20));
-    c.circle(47.5, 22.0, 2.4, Color32::from_rgb(56, 189, 248));
+    // 次顶栏左端 (y = 8..28)：当前天气数据源与更新时间胶囊
+    c.fill(left_x, 8.0, 232.0, 20.0, 7.0, Color32::from_rgba_unmultiplied(24, 26, 34, 195));
+    c.stroke(left_x, 8.0, 232.0, 20.0, 7.0, 0.7, Color32::from_white_alpha(20));
+    c.circle(left_x + 9.5, 18.0, 2.4, Color32::from_rgb(56, 189, 248));
     c.text(
-        54.0,
-        25.2,
-        &c.fit(&format!("数据源：{} · {}", w_st.source_name, w_st.updated_at), 8.2, W::Semibold, 196.0),
+        left_x + 16.0,
+        21.2,
+        &c.fit(&format!("数据源：{} · {}", w_st.source_name, w_st.updated_at), 8.2, W::Semibold, 208.0),
         8.2,
         W::Semibold,
         Color32::from_rgb(186, 230, 253),
         H::Left,
     );
 
-    // 次顶栏右端 (x = 324..380)：街道定位胶囊
+    // 次顶栏右端：刷新胶囊 + 街道定位胶囊
+    let fetching = WEATHER_FETCHING.load(Ordering::Relaxed);
+    let (ref_r, ref_c) = crate::paint::capsule(
+        c,
+        274.0,
+        8.0,
+        50.0,
+        20.0,
+        "shadcn-top-refresh",
+        if fetching {
+            Color32::from_rgb(14, 116, 144)
+        } else {
+            Color32::from_rgba_unmultiplied(39, 39, 42, 215)
+        },
+        Color32::from_rgba_unmultiplied(63, 63, 70, 235),
+    );
+    ref_c.text(
+        299.0,
+        21.2,
+        if fetching { "同步中" } else { "↻ 刷新" },
+        8.0,
+        W::Semibold,
+        theme::WHITE,
+        H::Center,
+    );
+    if ref_r.on_hover_text("立即刷新当前街道天气与 24h 趋势").clicked() {
+        refresh_weather_async(w_st.city.clone());
+    }
+
     let locating = STREET_LOCATING.load(Ordering::Relaxed);
     let (loc_r, loc_c) = crate::paint::capsule(
         c,
-        324.0,
-        12.0,
+        329.0,
+        8.0,
         56.0,
         20.0,
         "shadcn-street-locate",
@@ -3147,8 +3811,8 @@ pub fn draw_shadcn_weather_island_page(c: &crate::paint::Card) {
         Color32::from_rgba_unmultiplied(63, 63, 70, 235),
     );
     loc_c.text(
-        352.0,
-        25.2,
+        357.0,
+        21.2,
         if locating { "定位中" } else { "街道定位" },
         8.2,
         W::Semibold,
@@ -3157,8 +3821,7 @@ pub fn draw_shadcn_weather_island_page(c: &crate::paint::Card) {
     );
     if loc_r
         .on_hover_text(format!(
-            "当前街道：{} · {}
-点击重新定位当前街道",
+            "当前街道：{} · {}\n点击重新定位当前街道",
             w_st.city, w_st.street
         ))
         .clicked()
@@ -3166,109 +3829,170 @@ pub fn draw_shadcn_weather_island_page(c: &crate::paint::Card) {
         locate_street_async();
     }
 
-    let card_bg = Color32::from_rgba_unmultiplied(15, 16, 22, 182);
-    let card_border = Color32::from_white_alpha(22);
+    let card_bg = Color32::from_rgba_unmultiplied(15, 16, 22, 188);
+    let card_border = Color32::from_white_alpha(24);
     let muted_fg = Color32::from_rgb(161, 161, 170);
     let sky_acc = Color32::from_rgb(56, 189, 248);
     let amber_acc = Color32::from_rgb(250, 204, 21);
 
-    // ── 1) 上舱：Shadcn Hero 实况主卡 (x=38, y=38, w=342, h=64) ──
-    let (hx, hy, hw, hh) = (38.0_f32, 38.0_f32, 342.0_f32, 64.0_f32);
+    // ── 1) 上舱：Shadcn Hero 实况主卡 (x=34, y=33, w=351, h=72) ──
+    let (hx, hy, hw, hh) = (left_x, 33.0_f32, total_w, 72.0_f32);
     c.fill(hx, hy, hw, hh, 11.0, card_bg);
     c.stroke(hx, hy, hw, hh, 11.0, 1.0, card_border);
     c.seg((hx + 11.0, hy + 0.8), (hx + hw - 11.0, hy + 0.8), 0.7, Color32::from_white_alpha(28));
 
     let clean_desc = w_st.desc.trim_start_matches(['☀', '☁', '❄', '⛈', '⛅', ' ']);
-    draw_vector_weather_glyph(c, hx + 24.0, hy + 24.0, 11.0, clean_desc);
-    c.text(hx + 42.0, hy + 33.5, &format!("{}°", w_st.temp), 25.0, W::Bold, theme::WHITE, H::Left);
-
-    // 街道胶囊 Badge（点击刷新天气）
-    let loc_label = format!(
-        "{} · {}",
-        w_st.city.trim_end_matches('市'),
-        w_st.street.split('·').next_back().unwrap_or(&w_st.street).trim()
-    );
-    let badge_x = hx + 10.0;
-    let badge_y = hy + 41.0;
-    let badge_w = 156.0_f32;
-    c.fill(badge_x, badge_y, badge_w, 17.0, 5.5, Color32::from_white_alpha(14));
-    c.stroke(badge_x, badge_y, badge_w, 17.0, 5.5, 0.7, sky_acc.gamma_multiply(0.45));
-    c.circle(badge_x + 8.0, badge_y + 8.5, 2.4, sky_acc);
+    draw_vector_weather_glyph(c, hx + 25.0, hy + 25.0, 12.0, clean_desc);
+    let temp_w = c.text(hx + 44.0, hy + 35.5, &format!("{}°", w_st.temp), 27.0, W::Bold, theme::WHITE, H::Left);
+    let desc_x = (hx + 48.0 + temp_w).max(hx + 96.0);
+    let hi_lo = w_st
+        .forecast
+        .first()
+        .map(|d| format!("{}°/{}°", d.t_max, d.t_min))
+        .unwrap_or_else(|| format!("{}°/{}°", w_st.temp + 3, w_st.temp - 4));
     c.text(
-        badge_x + 14.5,
-        badge_y + 12.0,
-        &c.fit(&format!("{loc_label} · {clean_desc} (体感{}°)", w_st.feels_like), 7.8, W::Semibold, badge_w - 18.0),
-        7.8,
-        W::Semibold,
-        Color32::from_rgb(228, 228, 231),
+        desc_x,
+        hy + 22.0,
+        &c.fit(&format!("{clean_desc} · {hi_lo}"), 8.8, W::Bold, (hx + 170.0 - desc_x).max(40.0)),
+        8.8,
+        W::Bold,
+        amber_acc,
         H::Left,
     );
-    if c.hit(badge_x, badge_y, badge_w, 17.0, "shadcn-w-refresh")
+    c.text(
+        desc_x,
+        hy + 35.5,
+        &format!("体感 {}°C · {}", w_st.feels_like, w_st.pressure),
+        7.6,
+        W::Semibold,
+        muted_fg,
+        H::Left,
+    );
+
+    // 街道胶囊 Badge（精准显示到街道，点击刷新天气）
+    let loc_label = format_street_address(&w_st.city, &w_st.street);
+    let badge_x = hx + 10.0;
+    let badge_y = hy + 46.5;
+    let badge_w = 160.0_f32;
+    c.fill(badge_x, badge_y, badge_w, 18.5, 6.0, Color32::from_white_alpha(14));
+    c.stroke(badge_x, badge_y, badge_w, 18.5, 6.0, 0.7, sky_acc.gamma_multiply(0.45));
+    c.circle(badge_x + 8.5, badge_y + 9.2, 2.5, sky_acc);
+    c.text(
+        badge_x + 14.5,
+        badge_y + 13.0,
+        &c.fit(&loc_label, 7.8, W::Semibold, badge_w - 18.0),
+        7.8,
+        W::Semibold,
+        Color32::from_rgb(186, 230, 253),
+        H::Left,
+    );
+    if c.hit(badge_x, badge_y, badge_w, 18.5, "shadcn-w-refresh")
         .on_hover_text("点击刷新实时街道天气")
         .clicked()
     {
         refresh_weather_async(w_st.city.clone());
     }
 
-    // 右侧 2×2 Shadcn 指标微卡矩阵 (x=204..372)
-    let clean_uv = w_st.uv.trim_start_matches(['☀', ' ']);
-    let wind_short = w_st.wind.replace(" · ", " ");
-    let sun_short = w_st.sun_rise_set.replace("日出 · ", "/ ").replace(" 日落", "");
+    // 右侧 2×2 Shadcn 指标微卡矩阵 (x = hx + 176..hx + 344)
+    let clean_uv = w_st
+        .uv
+        .trim_start_matches(['☀', ' '])
+        .replace("弱 ", "")
+        .replace("中等 ", "");
+    let wind_short = w_st
+        .wind
+        .split('·')
+        .next_back()
+        .unwrap_or(&w_st.wind)
+        .trim()
+        .to_owned();
+    let sun_short = w_st
+        .sun_rise_set
+        .replace(" 日出 · ", " / ")
+        .replace("日出 · ", "/ ")
+        .replace(" 日落", "");
+    let aqi_clean = if w_st.aqi.starts_with("AQI") {
+        format!("优 · {}", w_st.aqi)
+    } else if w_st.aqi.contains("AQI") {
+        w_st.aqi.clone()
+    } else {
+        format!("AQI · {}", w_st.aqi)
+    };
     let metrics = [
-        (
-            "空气质量",
-            if w_st.aqi.contains('优') || w_st.aqi.contains('良') {
-                format!("AQI · {}", w_st.aqi)
-            } else {
-                format!("优 · AQI {}", w_st.aqi)
-            },
-            Color32::from_rgb(52, 211, 153),
-        ),
-        ("相对湿度", format!("{}% · {}", w_st.humidity, clean_uv), sky_acc),
-        ("实时风况", wind_short, Color32::from_rgb(168, 85, 247)),
+        ("空气质量", aqi_clean, Color32::from_rgb(52, 211, 153)),
+        ("湿度 / UV", format!("{}% · {}", w_st.humidity, clean_uv), sky_acc),
+        ("实时风速", wind_short, Color32::from_rgb(168, 85, 247)),
         ("日出日落", sun_short, amber_acc),
     ];
+    let mut sun_clicked = false;
     for (idx, (m_lbl, m_val, m_col)) in metrics.iter().enumerate() {
         let col = idx % 2;
         let row = idx / 2;
-        let mx = hx + 166.0 + col as f32 * 85.0;
-        let my = hy + 7.0 + row as f32 * 26.0;
-        let mw = 81.0_f32;
-        let mh = 23.0_f32;
-        c.fill(mx, my, mw, mh, 6.0, Color32::from_white_alpha(11));
-        c.circle(mx + 6.5, my + 7.5, 1.8, *m_col);
-        c.text(mx + 11.8, my + 9.8, m_lbl, 6.8, W::Semibold, muted_fg, H::Left);
-        c.text(mx + 6.5, my + 19.2, &c.fit(m_val, 7.6, W::Bold, mw - 10.0), 7.6, W::Bold, theme::WHITE, H::Left);
+        let mx = hx + 175.0 + col as f32 * 85.5;
+        let my = hy + 7.5 + row as f32 * 29.5;
+        let mw = 81.5_f32;
+        let mh = 26.5_f32;
+        let mut m_bg = Color32::from_white_alpha(12);
+        if idx == 3 {
+            let sun_hit = c.hit(mx, my, mw, mh, "shadcn-sun-entry")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("查看日出日落与昼夜弧线");
+            if sun_hit.hovered() {
+                m_bg = Color32::from_rgba_unmultiplied(245, 158, 11, 38);
+            }
+            if sun_hit.clicked() {
+                sun_clicked = true;
+            }
+        }
+        c.fill(mx, my, mw, mh, 6.5, m_bg);
+        if idx == 3 {
+            c.stroke(mx, my, mw, mh, 6.5, 0.65, Color32::from_rgba_unmultiplied(245, 158, 11, 78));
+            c.path(&[(mx + mw - 7.5, my + mh * 0.5 - 2.8), (mx + mw - 5.2, my + mh * 0.5), (mx + mw - 7.5, my + mh * 0.5 + 2.8)], 1.1, amber_acc);
+        }
+        c.circle(mx + 6.5, my + 8.5, 1.9, *m_col);
+        c.text(mx + 11.8, my + 10.8, m_lbl, 7.0, W::Semibold, muted_fg, H::Left);
+        c.text(mx + 6.5, my + 21.8, &c.fit(m_val, 7.8, W::Bold, mw - 10.0), 7.8, W::Bold, theme::WHITE, H::Left);
     }
 
-    // ── 2) 左下舱：Shadcn 24H 逐时趋势面积卡 (x=38, y=108, w=168, h=110) ──
-    let (lx, ly, lw, lh) = (38.0_f32, 108.0_f32, 168.0_f32, 110.0_f32);
+    // ── 2) 左下舱：Shadcn 24H 逐时趋势面积卡 (x=34, y=111, w=172, h=124) ──
+    let (lx, ly, lw, lh) = (left_x, 111.0_f32, 172.0_f32, 124.0_f32);
     c.fill(lx, ly, lw, lh, 11.0, card_bg);
     c.stroke(lx, ly, lw, lh, 11.0, 1.0, card_border);
-    c.text(lx + 10.0, ly + 15.0, "24H 街道逐时气温", 8.2, W::Bold, muted_fg, H::Left);
+    c.text(lx + 10.0, ly + 15.5, "24H 街道逐时气温", 8.4, W::Bold, sky_acc, H::Left);
 
     let pts_data = &w_st.hourly;
     if pts_data.len() >= 2 {
-        let min_t = pts_data.iter().map(|p| p.temp).min().unwrap_or(15) as f32;
-        let max_t = (pts_data.iter().map(|p| p.temp).max().unwrap_or(25) as f32).max(min_t + 2.0);
         let n = pts_data.len().min(6);
+        let slice = &pts_data[..n];
+        let min_i = slice.iter().map(|p| p.temp).min().unwrap_or(15);
+        let max_i = slice.iter().map(|p| p.temp).max().unwrap_or(25);
+        c.text(
+            lx + lw - 10.0,
+            ly + 15.5,
+            &format!("{min_i}°~{max_i}°"),
+            7.4,
+            W::Semibold,
+            muted_fg,
+            H::Right,
+        );
+        let min_t = min_i as f32;
+        let max_t = (max_i as f32).max(min_t + 2.0);
         let pad_x = 16.0_f32;
         let span_w = (lw - pad_x * 2.0).max(40.0);
-        let curve_top = ly + 34.0;
-        let curve_h = 48.0_f32;
-        let base_line_y = curve_top + curve_h + 6.0;
+        let curve_top = ly + 35.0;
+        let curve_h = 58.0_f32;
+        let base_line_y = curve_top + curve_h + 7.0;
 
         let mut coords = Vec::with_capacity(n);
-        for (i, pt) in pts_data.iter().take(n).enumerate() {
+        for (i, pt) in slice.iter().enumerate() {
             let px = lx + pad_x + (i as f32 / (n - 1) as f32) * span_w;
             let norm = ((pt.temp as f32 - min_t) / (max_t - min_t)).clamp(0.0, 1.0);
             let py = curve_top + (1.0 - norm) * curve_h;
             coords.push((px, py, pt));
         }
-        // 绘制柔和半透明面积填充
         let mut mesh = egui::Mesh::default();
         for (i, &(px, py, _)) in coords.iter().enumerate() {
-            mesh.colored_vertex(c.pos(px, py), Color32::from_rgba_unmultiplied(56, 189, 248, 52));
+            mesh.colored_vertex(c.pos(px, py), Color32::from_rgba_unmultiplied(56, 189, 248, 58));
             mesh.colored_vertex(c.pos(px, base_line_y), Color32::TRANSPARENT);
             if i > 0 {
                 let b = (i as u32 - 1) * 2;
@@ -3278,42 +4002,44 @@ pub fn draw_shadcn_weather_island_page(c: &crate::paint::Card) {
         }
         c.painter.add(egui::Shape::mesh(mesh));
         let line_pts: Vec<(f32, f32)> = coords.iter().map(|&(px, py, _)| (px, py)).collect();
-        c.path(&line_pts, 1.6, sky_acc);
+        c.path(&line_pts, 1.7, sky_acc);
         for (px, py, pt) in coords {
-            c.circle(px, py, 2.3, theme::WHITE);
+            c.circle(px, py, 2.4, theme::WHITE);
             c.circle(px, py, 1.4, sky_acc);
-            c.text(px, py - 4.5, &format!("{}°", pt.temp), 7.4, W::Bold, theme::WHITE, H::Center);
-            c.text(px, ly + lh - 7.0, &pt.hour_label, 7.0, W::Regular, muted_fg, H::Center);
+            c.text(px, py - 4.8, &format!("{}°", pt.temp), 7.6, W::Bold, theme::WHITE, H::Center);
+            c.text(px, ly + lh - 7.5, &pt.hour_label, 7.2, W::Regular, muted_fg, H::Center);
         }
     }
 
-    // ── 3) 右下舱：Shadcn 5 日温差条预报卡 (x=212, y=108, w=168, h=110) ──
-    let (rx, ry, rw, rh) = (212.0_f32, 108.0_f32, 168.0_f32, 110.0_f32);
+    // ── 3) 右下舱：Shadcn 完整 5 日温差条预报卡 (x=213, y=111, w=172, h=124) ──
+    let (rx, ry, rw, rh) = (left_x + 179.0, 111.0_f32, 172.0_f32, 124.0_f32);
     c.fill(rx, ry, rw, rh, 11.0, card_bg);
     c.stroke(rx, ry, rw, rh, 11.0, 1.0, card_border);
-    c.text(rx + 10.0, ry + 15.0, "5 日趋势与温差轨", 8.2, W::Bold, muted_fg, H::Left);
+    c.text(rx + 10.0, ry + 15.5, "5 日趋势与温差轨", 8.4, W::Bold, amber_acc, H::Left);
 
-    let count = 4usize;
+    let count = 5usize;
     let global_min = w_st.forecast.iter().take(count).map(|d| d.t_min).min().unwrap_or(10) as f32;
     let global_max = (w_st.forecast.iter().take(count).map(|d| d.t_max).max().unwrap_or(25) as f32).max(global_min + 2.0);
-    let step_y = 21.5_f32;
+    let step_y = 19.2_f32;
     for (i, d) in w_st.forecast.iter().take(count).enumerate() {
-        let row_y = ry + 32.0 + i as f32 * step_y;
+        let row_y = ry + 33.5 + i as f32 * step_y;
         c.text(rx + 10.0, row_y, &d.day_label, 8.0, W::Semibold, theme::WHITE, H::Left);
         let clean_d = d.desc.trim_start_matches(['☀', '☁', '❄', '⛈', '⛅', ' ']);
         draw_vector_weather_glyph(c, rx + 44.0, row_y - 3.0, 4.0, clean_d);
-        c.text(rx + 52.0, row_y, &c.fit(clean_d, 7.6, W::Regular, 32.0), 7.6, W::Regular, muted_fg, H::Left);
-        c.text(rx + 98.0, row_y, &format!("{}°", d.t_min), 7.6, W::Semibold, muted_fg, H::Right);
+        c.text(rx + 52.0, row_y, &c.fit(clean_d, 7.6, W::Regular, 34.0), 7.6, W::Regular, muted_fg, H::Left);
+        c.text(rx + 99.0, row_y, &format!("{}°", d.t_min), 7.6, W::Semibold, muted_fg, H::Right);
 
-        let bar_x = rx + 102.0;
-        let bar_w = 40.0_f32;
+        let bar_x = rx + 103.0;
+        let bar_w = 41.0_f32;
         let bar_y = row_y - 4.5;
-        c.fill(bar_x, bar_y, bar_w, 3.4, 1.7, Color32::from_white_alpha(20));
+        c.fill(bar_x, bar_y, bar_w, 3.5, 1.75, Color32::from_white_alpha(20));
         let u0 = ((d.t_min as f32 - global_min) / (global_max - global_min)).clamp(0.0, 0.88);
         let u1 = ((d.t_max as f32 - global_min) / (global_max - global_min)).clamp(u0 + 0.14, 1.0);
-        c.fill(bar_x + u0 * bar_w, bar_y, (u1 - u0) * bar_w, 3.4, 1.7, amber_acc);
+        c.fill(bar_x + u0 * bar_w, bar_y, (u1 - u0) * bar_w, 3.5, 1.75, amber_acc);
         c.text(rx + rw - 8.0, row_y, &format!("{}°", d.t_max), 7.8, W::Bold, theme::WHITE, H::Right);
     }
+    // [编译修复] 函数声明为 `-> bool`，但尾部只跑完循环没返回「太阳按钮是否被点」。
+    sun_clicked
 }
 
 fn draw_breezy_hourly_card(
@@ -3332,34 +4058,59 @@ fn draw_breezy_hourly_card(
     };
     c.fill(x, y, w, h, r, tile_bg);
     c.stroke(x, y, w, h, r, 0.85, Color32::from_rgb(56, 189, 248).gamma_multiply(0.35));
-    c.text(x + 10.0, y + 13.5, "24小时街道逐时趋势", 8.4, W::Bold, Color32::from_rgb(56, 189, 248), H::Left);
+    c.text(x + 10.0, y + 14.0, "24小时街道逐时趋势", 8.4, W::Bold, Color32::from_rgb(56, 189, 248), H::Left);
 
     let pts_data = &w_st.hourly;
     if pts_data.len() < 2 {
         return;
     }
-    let min_t = pts_data.iter().map(|p| p.temp).min().unwrap_or(15) as f32;
-    let max_t = (pts_data.iter().map(|p| p.temp).max().unwrap_or(25) as f32).max(min_t + 2.0);
     let n = pts_data.len().min(6);
-    let pad_x = 18.0_f32;
+    let slice = &pts_data[..n];
+    let min_i = slice.iter().map(|p| p.temp).min().unwrap_or(15);
+    let max_i = slice.iter().map(|p| p.temp).max().unwrap_or(25);
+    c.text(
+        x + w - 10.0,
+        y + 14.0,
+        &format!("{min_i}°~{max_i}°"),
+        7.4,
+        W::Semibold,
+        theme::GRAY,
+        H::Right,
+    );
+    let min_t = min_i as f32;
+    let max_t = (max_i as f32).max(min_t + 2.0);
+    let pad_x = 17.0_f32;
     let span_w = (w - pad_x * 2.0).max(40.0);
-    let curve_top = y + 26.0;
-    let curve_h = (h - 42.0).clamp(14.0, 56.0);
+    let curve_top = y + 28.0;
+    let curve_h = (h - 45.0).clamp(16.0, 56.0);
+    let base_line_y = curve_top + curve_h + 5.0;
 
     let mut coords = Vec::with_capacity(n);
-    for (i, pt) in pts_data.iter().take(n).enumerate() {
+    for (i, pt) in slice.iter().enumerate() {
         let px = x + pad_x + (i as f32 / (n - 1) as f32) * span_w;
         let norm = ((pt.temp as f32 - min_t) / (max_t - min_t)).clamp(0.0, 1.0);
         let py = curve_top + (1.0 - norm) * curve_h;
         coords.push((px, py, pt));
     }
 
+    let mut mesh = egui::Mesh::default();
+    for (i, &(px, py, _)) in coords.iter().enumerate() {
+        mesh.colored_vertex(c.pos(px, py), Color32::from_rgba_unmultiplied(56, 189, 248, 50));
+        mesh.colored_vertex(c.pos(px, base_line_y), Color32::TRANSPARENT);
+        if i > 0 {
+            let b = (i as u32 - 1) * 2;
+            mesh.add_triangle(b, b + 1, b + 2);
+            mesh.add_triangle(b + 1, b + 3, b + 2);
+        }
+    }
+    c.painter.add(egui::Shape::mesh(mesh));
+
     let line_pts: Vec<(f32, f32)> = coords.iter().map(|&(px, py, _)| (px, py)).collect();
-    c.path(&line_pts, 1.6, Color32::from_rgb(56, 189, 248));
+    c.path(&line_pts, 1.7, Color32::from_rgb(56, 189, 248));
     for (px, py, pt) in coords {
-        c.circle(px, py, 2.2, Color32::from_rgb(250, 204, 21));
-        c.text(px, py - 4.0, &format!("{}°", pt.temp), 7.6, W::Bold, theme::WHITE, H::Center);
-        c.text(px, y + h - 4.5, &pt.hour_label, 7.2, W::Regular, theme::GRAY, H::Center);
+        c.circle(px, py, 2.3, Color32::from_rgb(250, 204, 21));
+        c.text(px, py - 4.2, &format!("{}°", pt.temp), 7.6, W::Bold, theme::WHITE, H::Center);
+        c.text(px, y + h - 5.0, &pt.hour_label, 7.2, W::Regular, theme::GRAY, H::Center);
     }
 }
 
@@ -3379,24 +4130,24 @@ fn draw_breezy_daily_card(
     };
     c.fill(x, y, w, h, r, tile_bg);
     c.stroke(x, y, w, h, r, 0.85, Color32::from_rgb(250, 204, 21).gamma_multiply(0.35));
-    c.text(x + 10.0, y + 13.5, "5日趋势与温差条", 8.4, W::Bold, Color32::from_rgb(250, 204, 21), H::Left);
+    c.text(x + 10.0, y + 14.0, "5日趋势与温差条", 8.4, W::Bold, Color32::from_rgb(250, 204, 21), H::Left);
 
-    let count = if h >= 115.0 { 5 } else { 4 };
+    let count = 5usize;
     let global_min = w_st.forecast.iter().take(count).map(|d| d.t_min).min().unwrap_or(10) as f32;
     let global_max = (w_st.forecast.iter().take(count).map(|d| d.t_max).max().unwrap_or(25) as f32).max(global_min + 2.0);
-    let step_y = ((h - 20.0) / count as f32).clamp(15.5, 24.0);
+    let step_y = ((h - 22.0) / count as f32).clamp(16.0, 22.0);
 
     for (i, d) in w_st.forecast.iter().take(count).enumerate() {
-        let ry = y + 26.5 + i as f32 * step_y;
-        c.text(x + 10.0, ry, &d.day_label, 8.4, W::Semibold, theme::WHITE, H::Left);
+        let ry = y + 29.0 + i as f32 * step_y;
+        c.text(x + 10.0, ry, &d.day_label, 8.2, W::Semibold, theme::WHITE, H::Left);
         let clean_d = d.desc.trim_start_matches(['☀', '☁', '❄', '⛈', '⛅', ' ']);
-        draw_vector_weather_glyph(c, x + 44.5, ry - 3.0, 4.2, clean_d);
-        c.text(x + 52.5, ry, &c.fit(clean_d, 8.1, W::Regular, 36.0), 8.1, W::Regular, theme::GRAY, H::Left);
-        c.text(x + 103.0, ry, &format!("{}°", d.t_min), 8.0, W::Semibold, theme::GRAY, H::Right);
+        draw_vector_weather_glyph(c, x + 45.0, ry - 3.0, 4.2, clean_d);
+        c.text(x + 53.0, ry, &c.fit(clean_d, 8.0, W::Regular, 38.0), 8.0, W::Regular, theme::GRAY, H::Left);
+        c.text(x + 104.0, ry, &format!("{}°", d.t_min), 8.0, W::Semibold, theme::GRAY, H::Right);
 
-        let bar_x = x + 107.0;
-        let bar_w = (w - 135.0).max(24.0);
-        let bar_y = ry - 4.8;
+        let bar_x = x + 108.0;
+        let bar_w = (w - 136.0).max(28.0);
+        let bar_y = ry - 4.6;
         c.fill(bar_x, bar_y, bar_w, 3.6, 1.8, Color32::from_gray(44));
         let u0 = ((d.t_min as f32 - global_min) / (global_max - global_min)).clamp(0.0, 0.9);
         let u1 = ((d.t_max as f32 - global_min) / (global_max - global_min)).clamp(u0 + 0.12, 1.0);
@@ -3671,41 +4422,50 @@ pub fn draw_translate_island_page(c: &crate::paint::Card) {
 // 4. 独立「天气」设置页 (`settings_tab == 18`) — 街道级精准定位 + 自定义接入天气源
 // ---------------------------------------------------------------
 
-pub fn draw_weather_island_preview_card(ui: &mut egui::Ui) {
+pub fn draw_weather_island_preview_card(app: &mut crate::app::App, ui: &mut egui::Ui) {
     let cfg = config::get();
     let acc = active_accent_color();
     settings_label(ui, "天气岛实时预览");
     crate::extras::settings_card(ui, |ui| {
-        let preview_h = 248.0_f32;
+        let preview_h = 266.0_f32;
         let avail_w = (crate::extras::layout_avail_w(ui) - 8.0).max(180.0);
-        let scale_k = ((avail_w - 8.0) / 419.0).clamp(0.48, 1.0);
+        let scale_k = ((avail_w - 8.0) / 419.0).clamp(0.52, 1.08);
         let draw_w = 419.0 * scale_k;
         let draw_h = preview_h * scale_k;
         ui.vertical_centered(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(avail_w, draw_h + 10.0), Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(avail_w, draw_h + 8.0), Sense::hover());
             let island_r = Rect::from_center_size(rect.center(), egui::vec2(draw_w, draw_h));
             let preview_bg = active_win_fill(235).unwrap_or_else(|| Color32::from_rgb(32, 32, 32));
             ui.painter().rect_filled(island_r, 22.0 * scale_k, preview_bg);
             ui.painter().rect_stroke(
                 island_r,
                 22.0 * scale_k,
-                Stroke::new(1.0, Color32::from_white_alpha(36)),
+                Stroke::new(1.0_f32, Color32::from_white_alpha(36)),
                 egui::StrokeKind::Inside,
             );
             let mut pcard = crate::paint::Card::new(ui, island_r.min, island_r).scaled(0.0, 0.0, scale_k);
             pcard.live = true;
             if cfg.show_island_page_title {
-                pcard.text(38.0, 22.5, "天", 15.0, crate::theme::W::Bold, Color32::WHITE, crate::paint::H::Left);
-                let w1 = pcard.text_w("天", 15.0, crate::theme::W::Bold);
-                pcard.text(38.0 + w1, 22.5, "气", 15.0, crate::theme::W::Bold, acc, crate::paint::H::Left);
+                pcard.text(34.0, 22.5, "实时", 15.0, crate::theme::W::Bold, Color32::WHITE, crate::paint::H::Left);
+                let w1 = pcard.text_w("实时", 15.0, crate::theme::W::Bold);
+                pcard.text(34.0 + w1 + 1.5, 22.5, "天气", 15.0, crate::theme::W::Bold, acc, crate::paint::H::Left);
             }
-            pcard.text(209.5, 22.0, "11月14日 周六  12:00", 11.0, crate::theme::W::Semibold, Color32::from_gray(220), crate::paint::H::Center);
+            let now_dt = Local::now();
+            let wk = ["一", "二", "三", "四", "五", "六", "日"][now_dt.weekday().num_days_from_monday() as usize];
+            let top_clock = format!("{}月{}日 周{}  {}", now_dt.month(), now_dt.day(), wk, now_dt.format("%H:%M"));
+            pcard.text(209.5, 22.0, &top_clock, 11.0, crate::theme::W::Semibold, Color32::from_gray(220), crate::paint::H::Center);
             crate::paint::gear(&pcard, 394.0, 18.0, Color32::from_gray(175));
             let body_card = pcard.shifted(0.0, 22.0);
-            if cfg.weather_ui_mode == 2 {
-                draw_shadcn_weather_island_page(&body_card);
-            } else {
-                draw_weather_island_page(&body_card);
+            match cfg.weather_ui_mode {
+                1 => {
+                    app.draw_classic_weather_preview(&body_card);
+                }
+                2 => {
+                    draw_shadcn_weather_island_page(&body_card);
+                }
+                _ => {
+                    draw_weather_island_page(&body_card);
+                }
             }
         });
     });
@@ -3713,9 +4473,10 @@ pub fn draw_weather_island_preview_card(ui: &mut egui::Ui) {
 
 pub fn draw_weather_settings_page(ui: &mut egui::Ui) {
     let mut cfg = config::get();
-    let before = cfg.clone();
+    let mut before = cfg.clone();
     let acc = active_accent_color();
     let w_st = weather_state();
+    let mut preset_switched = false;
 
     // 街道级高精定位
     settings_label(ui, "街道级定位");
@@ -3735,14 +4496,22 @@ pub fn draw_weather_settings_page(ui: &mut egui::Ui) {
                 .clicked()
             {
                 locate_street_async();
+                ui.ctx().request_repaint();
             }
             if ui
                 .button("检索街道坐标")
                 .on_hover_text("根据上方填写的城市与街道名称解析精确经纬度并同步天气")
                 .clicked()
             {
+                config::update(|c| {
+                    c.weather_city = cfg.weather_city.clone();
+                    c.weather_street = cfg.weather_street.clone();
+                });
+                before = config::get();
                 let q = format!("{} {}", cfg.weather_city, cfg.weather_street);
                 search_street_async(q);
+                preset_switched = true;
+                ui.ctx().request_repaint();
             }
         });
 
@@ -3757,7 +4526,11 @@ pub fn draw_weather_settings_page(ui: &mut egui::Ui) {
             ui.add(egui::DragValue::new(&mut cfg.weather_temp).range(-40..=50).suffix("°C"));
             let fetching = WEATHER_FETCHING.load(Ordering::Relaxed);
             if ui.button(if fetching { "↻ 同步中…" } else { "立即刷新天气" }).clicked() {
-                refresh_weather_async(cfg.weather_city.clone());
+                apply_street_selection(&cfg.weather_city, &cfg.weather_street, cfg.weather_lat, cfg.weather_lon);
+                cfg = config::get();
+                before = cfg.clone();
+                preset_switched = true;
+                ui.ctx().request_repaint();
             }
         });
 
@@ -3767,17 +4540,11 @@ pub fn draw_weather_settings_page(ui: &mut egui::Ui) {
                 let active = cfg.weather_city == c_name && cfg.weather_street == st_name;
                 let tag = format!("{}·{}", c_name.trim_end_matches('市'), st_name.split('·').next_back().unwrap_or(st_name).trim());
                 if ui.selectable_label(active, RichText::new(tag).size(10.5)).clicked() {
-                    cfg.weather_city = c_name.to_owned();
-                    cfg.weather_street = st_name.to_owned();
-                    cfg.weather_lat = la;
-                    cfg.weather_lon = lo;
-                    config::update(|c| {
-                        c.weather_city = c_name.to_owned();
-                        c.weather_street = st_name.to_owned();
-                        c.weather_lat = la;
-                        c.weather_lon = lo;
-                    });
-                    refresh_weather_async(c_name.to_owned());
+                    apply_street_selection(c_name, st_name, la, lo);
+                    cfg = config::get();
+                    before = cfg.clone();
+                    preset_switched = true;
+                    ui.ctx().request_repaint();
                 }
             }
         });

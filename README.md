@@ -35,7 +35,7 @@
 - **关闭按钮黑线斜切修复**：重绘圆角裁剪与描边层序，右上角关闭按钮常态 / 悬停 / 按下均无斜向黑线。
 - **AI 工作状态覆盖 16 款客户端**：新增豆包、豆包工作、Gemini Antigravity、Grok Bot、WorkBuddy、Muse、Trae、Dot、Cursor 等窗口 / 进程识别与多会话日志流探测。
 
-> 完整版本记录见 [CHANGELOG.md](CHANGELOG.md)。
+> 版本记录（v2.0.1 起）见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 

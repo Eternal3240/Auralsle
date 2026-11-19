@@ -26,12 +26,25 @@
 
 ---
 
+## 🆕 最新版本 v3.5.0
+
+- **课程提醒弹窗圆角收束**：极简与大胶囊态的课程 / 会议提醒卡片圆角收敛到 `24px`，不再挤压两端文字与按钮。
+- **全局输入框光标**：设置搜索框、表单、待办、剪贴板搜索、日程编辑与翻译岛统一显示闪烁光标，修复零边距裁剪与静止帧停闪。
+- **搜索框去蓝描边**：取消聚焦时的蓝色描边与底部蓝线，改为柔和中性边框。
+- **天气岛实时预览重做**：预览同步当前皮肤底色与 `278px` 高度，接入 `skin_paint::recolor_layer`，不再发白发灰。
+- **关闭按钮黑线斜切修复**：重绘圆角裁剪与描边层序，右上角关闭按钮常态 / 悬停 / 按下均无斜向黑线。
+- **AI 工作状态覆盖 16 款客户端**：新增豆包、豆包工作、Gemini Antigravity、Grok Bot、WorkBuddy、Muse、Trae、Dot、Cursor 等窗口 / 进程识别与多会话日志流探测。
+
+> 完整版本记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+---
+
 ## ✨ 核心特性总览
 
 | 模块 | 能力亮点 |
 | --- | --- |
 | **🎭 形态、皮肤与动效** | 支持顶部 / 左侧 / 右侧三边停靠、刘海 / 胶囊双形态与多款主题皮肤（经典黑、奶油、毛玻璃浅/深、悬浮云、液态玻璃及 WinIslands 主题）；内置 **磁吸回弹 (`MagnetSpring`)**、**流光渐显 (`AnimatedContent`)** 与 **平滑滑动** 三套切页动效。 |
-| **🤖 AI 工作状态与额度** | 实时监听 **Claude Code / Codex / Gemini Antigravity / 豆包 / WorkBuddy / DeepSeek** 会话与进程生命周期；支持岛内呼吸灯、吉祥物联动及 `Ctrl+Alt+Y/N/T` 全局快捷审批；多服务商 AI 剩余额度与重置周期一处总览。 |
+| **🤖 AI 工作状态与额度** | 实时监听 **Claude Code / Codex / Gemini Antigravity / Gemini / 豆包 / 豆包工作 / Grok Bot / WorkBuddy / Muse / Trae / Dot / Cursor / Kiro / Windsurf / DeepSeek / Kimi** 共 16 款客户端的窗口、进程与本地会话日志；支持岛内呼吸灯、吉祥物联动及 `Ctrl+Alt+Y/N/T` 全局快捷审批；多服务商 AI 剩余额度与重置周期一处总览。 |
 | **🎵 媒体控制与逐字歌词** | 接入 Windows SMTC，并深度适配网易云音乐、QQ 音乐、酷狗、汽水音乐、波点与 Apple Music；支持横条 / 卡片 / 舞台三态展开与收起态歌词。 |
 | **💬 消息聚合与通知历史** | 微信多开分账号未读角标、QQ 与办公软件（企业微信/飞书/钉钉）通知聚合；自动识别并遮罩验证码；通知历史按应用分组，支持免打扰与一键清理。 |
 | **📋 置物架与图文剪贴板** | 临时文件拖放中转站 + 最多 30 条图文剪贴板历史；播放音乐期间近期复制可一键直达剪贴板；支持「鼠标离开 / 点击空白处 / 延时收起」三种闭岛策略。 |
@@ -69,7 +82,7 @@
 
 ### 3. AI 额度看板 & AI Agent 工作状态联动
 - **AI 额度**：集中查看 Claude、Codex、Gemini、豆包、Kiro、OpenCode Go、MiniMax、GLM 及主流中转站（New API / One API / Sub2API）账户余额与周期额度，可将常用账号钉选至收起态灵动岛。
-- **AI 工作状态**：本地只读增量监听 AI 客户端会话与钩子状态，在岛内呈现工作态指示灯、等待确认卡片及全局快捷键审批（`Ctrl+Alt+Y` / `N` / `T`）。
+- **AI 工作状态**：本地只读增量监听 16 款 AI 客户端的窗口标题、进程名与会话日志（Claude Code / Codex / Gemini Antigravity / 豆包 / 豆包工作 / Grok Bot / WorkBuddy / Muse / Trae / Dot / Cursor 等），在岛内呈现工作态指示灯、等待确认卡片及全局快捷键审批（`Ctrl+Alt+Y` / `N` / `T`）；多会话横向浏览时可分别归档。
 
 <p align="center">
   <img src="docs/images/settings-ai-quota.png" width="48.5%" alt="多服务商 AI 额度管理看板" />
@@ -109,7 +122,7 @@
   <img src="docs/images/settings-modules.png" width="48.5%" alt="功能模块总开关与实时内存资源监控" />
 </p>
 <p align="center">
-  <img src="docs/images/settings-about.png" width="76%" alt="关于 灵屿 AuraIsle v3.0.0 与开源致谢列表" />
+  <img src="docs/images/settings-about.png" width="76%" alt="关于 灵屿 AuraIsle v3.5.0 与开源致谢列表" />
 </p>
 
 ---
@@ -139,7 +152,7 @@
 - 自 **v2.0.1** 起可执行文件名为 `AuraIsle.exe`，配置与历史数据目录统一存于 `%APPDATA%\Auralsle`。
 - **关于首次运行 Windows SmartScreen 提示**（未经过签名校验的本地/测试构建，Windows 会显示「Windows 已保护你的电脑 · 发布者未知」）：
   - 下载后先在同目录比对 `SHA256SUMS.txt` 校验文件完整性；
-  - 点击弹窗里的 **「更多信息」→「仍要运行」**，或提前在 PowerShell 执行 `Unblock-File .\AuraIsle-Setup-v3.0.0-x64.exe`；
+  - 点击弹窗里的 **「更多信息」→「仍要运行」**，或提前在 PowerShell 执行 `Unblock-File .\AuraIsle-Setup-v3.5.0-x64.exe`；
   - 维护者若拥有受信任 CA 颁发的 Authenticode 证书（`.pfx` 或证书指纹），可执行 `.\scripts\package.ps1 -SignPfxPath <cert.pfx> -SignPfxPassword <pwd>` 自动对主程序与安装包签名。
 
 ---

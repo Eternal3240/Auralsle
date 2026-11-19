@@ -4286,15 +4286,17 @@ pub fn draw_translate_island_page(c: &crate::paint::Card) {
             .layer_id(c.painter.layer_id())
             .style(c.ui.style().clone()),
     );
-    ui_child.set_clip_rect(edit_rect.intersect(c.painter.clip_rect()));
+    ui_child.set_clip_rect(edit_rect.expand2(egui::vec2(2.0, 2.0)).intersect(c.painter.clip_rect()));
     ui_child.set_opacity(c.painter.opacity());
+    ui_child.visuals_mut().text_cursor.blink = true;
+    ui_child.visuals_mut().text_cursor.stroke = egui::Stroke::new(1.6, theme::WHITE);
     if !c.live {
         ui_child.disable();
     }
     let te = egui::TextEdit::multiline(&mut tr_in)
         .id(egui::Id::new("fly-tr-multiline-input"))
         .frame(false)
-        .margin(egui::Margin::ZERO)
+        .margin(egui::Margin::symmetric(2, 0))
         .text_color(theme::WHITE)
         .font(theme::font(11.2, W::Semibold))
         .hint_text(
@@ -4424,49 +4426,89 @@ pub fn draw_translate_island_page(c: &crate::paint::Card) {
 
 pub fn draw_weather_island_preview_card(app: &mut crate::app::App, ui: &mut egui::Ui) {
     let cfg = config::get();
-    let acc = active_accent_color();
+    let acc = Color32::from_rgb(56, 189, 248);
     settings_label(ui, "天气岛实时预览");
     crate::extras::settings_card(ui, |ui| {
-        let preview_h = 266.0_f32;
+        let preview_h = 278.0_f32;
         let avail_w = (crate::extras::layout_avail_w(ui) - 8.0).max(180.0);
-        let scale_k = ((avail_w - 8.0) / 419.0).clamp(0.52, 1.08);
+        let scale_k = ((avail_w - 8.0) / 419.0).clamp(0.52, 1.06);
         let draw_w = 419.0 * scale_k;
         let draw_h = preview_h * scale_k;
         ui.vertical_centered(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(avail_w, draw_h + 8.0), Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(avail_w, draw_h + 12.0), Sense::hover());
             let island_r = Rect::from_center_size(rect.center(), egui::vec2(draw_w, draw_h));
-            let preview_bg = active_win_fill(235).unwrap_or_else(|| Color32::from_rgb(32, 32, 32));
-            ui.painter().rect_filled(island_r, 22.0 * scale_k, preview_bg);
+            let is_light_skin = matches!(app.settings.skin, crate::model::Skin::Cream | crate::model::Skin::GlassLight);
+            let preview_bg = match app.settings.skin {
+                crate::model::Skin::Fluid => {
+                    let c0 = app.fluid.compose(209.5, 139.0, 419.0, preview_h, 1.0);
+                    if c0.a() > 0 {
+                        let af = c0.a() as f32 / 255.0;
+                        Color32::from_rgb(
+                            (c0.r() as f32 / af).clamp(24.0, 96.0) as u8,
+                            (c0.g() as f32 / af).clamp(24.0, 96.0) as u8,
+                            (c0.b() as f32 / af).clamp(26.0, 102.0) as u8,
+                        )
+                    } else {
+                        Color32::from_rgb(40, 42, 46)
+                    }
+                }
+                crate::model::Skin::Cream | crate::model::Skin::GlassLight => app.preview_fill(),
+                crate::model::Skin::GlassDark => Color32::from_rgb(30, 32, 38),
+                crate::model::Skin::LiquidGlass => Color32::from_rgb(36, 40, 48),
+                crate::model::Skin::Classic => active_win_fill(235).unwrap_or_else(|| Color32::from_rgb(24, 26, 32)),
+            };
+            let rim_col = if is_light_skin {
+                Color32::from_black_alpha(28)
+            } else {
+                Color32::from_rgba_premultiplied(28, 30, 34, 28)
+            };
+            ui.painter().rect_filled(island_r.translate(egui::vec2(0.0, 2.0)), 24.0 * scale_k, Color32::from_black_alpha(48));
+            ui.painter().rect_filled(island_r, 24.0 * scale_k, preview_bg);
             ui.painter().rect_stroke(
                 island_r,
-                22.0 * scale_k,
-                Stroke::new(1.0_f32, Color32::from_white_alpha(36)),
+                24.0 * scale_k,
+                Stroke::new(1.0_f32, rim_col),
                 egui::StrokeKind::Inside,
             );
             let mut pcard = crate::paint::Card::new(ui, island_r.min, island_r).scaled(0.0, 0.0, scale_k);
             pcard.live = true;
+            let content_from = crate::skin_paint::shape_count(ui.ctx(), pcard.painter.layer_id());
             if cfg.show_island_page_title {
-                pcard.text(34.0, 22.5, "实时", 15.0, crate::theme::W::Bold, Color32::WHITE, crate::paint::H::Left);
+                pcard.text(34.0, 24.0, "实时", 15.0, crate::theme::W::Bold, Color32::WHITE, crate::paint::H::Left);
                 let w1 = pcard.text_w("实时", 15.0, crate::theme::W::Bold);
-                pcard.text(34.0 + w1 + 1.5, 22.5, "天气", 15.0, crate::theme::W::Bold, acc, crate::paint::H::Left);
+                pcard.text(34.0 + w1 + 1.5, 24.0, "天气", 15.0, crate::theme::W::Bold, acc, crate::paint::H::Left);
             }
             let now_dt = Local::now();
             let wk = ["一", "二", "三", "四", "五", "六", "日"][now_dt.weekday().num_days_from_monday() as usize];
-            let top_clock = format!("{}月{}日 周{}  {}", now_dt.month(), now_dt.day(), wk, now_dt.format("%H:%M"));
-            pcard.text(209.5, 22.0, &top_clock, 11.0, crate::theme::W::Semibold, Color32::from_gray(220), crate::paint::H::Center);
-            crate::paint::gear(&pcard, 394.0, 18.0, Color32::from_gray(175));
-            let body_card = pcard.shifted(0.0, 22.0);
+            let top_clock = format!("{}月{}日 周{}  {}", now_dt.month(), now_dt.day(), wk, now_dt.format("%H:%M:%S"));
+            pcard.text(209.5, 23.0, &top_clock, 10.8, crate::theme::W::Semibold, Color32::from_gray(225), crate::paint::H::Center);
+            crate::paint::gear(&pcard, 385.0, 19.0, Color32::from_gray(180));
+            let body_card = pcard.shifted(0.0, 24.0);
             match cfg.weather_ui_mode {
                 1 => {
                     app.draw_classic_weather_preview(&body_card);
                 }
                 2 => {
-                    draw_shadcn_weather_island_page(&body_card);
+                    let _ = draw_shadcn_weather_island_page(&body_card);
                 }
                 _ => {
-                    draw_weather_island_page(&body_card);
+                    let _ = draw_weather_island_page(&body_card);
                 }
             }
+            // 底部简洁页指示点，与真实天气岛 278px 高度比例一致
+            let dot_y = preview_h - 10.5;
+            for i in 0..5 {
+                let dx = 209.5 + (i as f32 - 2.0) * 10.0;
+                if i == 2 {
+                    pcard.fill(dx - 7.0, dot_y - 2.4, 14.0, 4.8, 2.4, acc);
+                } else {
+                    pcard.circle(dx, dot_y, 2.2, Color32::from_white_alpha(48));
+                }
+            }
+            // 关键：对预览层执行与主岛一致的 skin_paint::recolor_layer，消除 egui sRGB 预乘导致卡片发白灰块的问题
+            let content_end = crate::skin_paint::shape_count(ui.ctx(), pcard.painter.layer_id());
+            let preview_palette = app.skin_palette().unwrap_or(crate::skin_paint::GLASS_DARK);
+            crate::skin_paint::recolor_layer(ui.ctx(), pcard.painter.layer_id(), &[(content_from, content_end)], &preview_palette);
         });
     });
 }

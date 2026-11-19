@@ -221,6 +221,12 @@ fn app_keywords(key: &str) -> &'static [&'static str] {
         &["zcode"]
     } else if k.contains("cursor") {
         &["cursor"]
+    } else if k.contains("trae") {
+        &["trae"]
+    } else if k.contains("muse") {
+        &["muse", "musework"]
+    } else if k == "dot" || k.starts_with("dot-") || k.contains("dots") {
+        &["dot", "dots"]
     } else if k.contains("windsurf") {
         &["windsurf"]
     } else if k.contains("kiro") {
@@ -2367,6 +2373,27 @@ fn paint_fly_provider_badge(c: &Card, cx: f32, cy: f32, provider_key: &str) {
     } else if pk.contains("deepseek") || pk.contains("dsh") {
         c.circle(cx, cy, 6.2, Color32::from_rgb(77, 107, 254));
         c.centered_text(cx, cy, "D", 7.8, W::Bold, Color32::WHITE, H::Center);
+    } else if pk.contains("doubao") || pk.contains("豆包") {
+        draw_icon(c, "doubao", cx, cy, 13.0, Color32::from_rgb(62, 109, 240));
+    } else if pk.contains("antigravity") || pk.contains("gemini") {
+        draw_icon(c, "antigravity", cx, cy, 13.0, Color32::from_rgb(78, 149, 255));
+    } else if pk.contains("workbuddy") || pk.contains("codebuddy") {
+        draw_icon(c, "workbuddy", cx, cy, 13.0, Color32::from_rgb(16, 185, 129));
+    } else if pk.contains("grok") {
+        draw_icon(c, "grokbot", cx, cy, 13.0, Color32::from_rgb(228, 228, 234));
+    } else if pk.contains("cursor") {
+        c.fill(cx - 6.2, cy - 6.2, 12.4, 12.4, 3.2, Color32::from_rgb(38, 42, 52));
+        c.stroke(cx - 6.2, cy - 6.2, 12.4, 12.4, 3.2, 1.0, Color32::from_rgb(180, 190, 210));
+        c.centered_text(cx, cy, "C", 7.8, W::Bold, Color32::WHITE, H::Center);
+    } else if pk.contains("trae") {
+        c.circle(cx, cy, 6.2, Color32::from_rgb(16, 185, 129));
+        c.centered_text(cx, cy, "T", 7.8, W::Bold, Color32::WHITE, H::Center);
+    } else if pk.contains("muse") {
+        c.circle(cx, cy, 6.2, Color32::from_rgb(124, 58, 237));
+        c.centered_text(cx, cy, "M", 7.8, W::Bold, Color32::WHITE, H::Center);
+    } else if pk == "dot" || pk.starts_with("dot-") || pk.contains("dots") {
+        c.circle(cx, cy, 6.2, Color32::from_rgb(240, 244, 248));
+        c.circle(cx, cy, 2.6, Color32::from_rgb(20, 22, 26));
     } else {
         c.circle(cx, cy, 6.2, Color32::from_rgb(52, 211, 153));
         c.centered_text(cx, cy, "A", 7.8, W::Bold, Color32::BLACK, H::Center);
@@ -3349,6 +3376,62 @@ pub fn draw_settings(ui: &mut egui::Ui) {
             "DeepSeek Harness (DSH) 会话实时探测 (~/.dsh/sessions)",
             "读取 DSH 终端会话状态与生命周期 Hook",
             &mut cfg.fly_dsh_sessions,
+        );
+        crate::extras::twinkle_card_break(ui);
+        setting_row(
+            ui,
+            "豆包 / 豆包工作实时探测 (%LOCALAPPDATA%\\Doubao)",
+            "实时读取豆包与豆包工作桌面端日志流（saman_frontend / agent_infra），精准检测思考、工具执行、命令确认与任务完成状态",
+            &mut cfg.fly_doubao_sessions,
+        );
+        crate::extras::twinkle_card_break(ui);
+        setting_row(
+            ui,
+            "Gemini Antigravity 实时探测 (~/.gemini/antigravity)",
+            "读取 Antigravity 本机对话轨迹（transcript.jsonl），精准检测模型思考、工具调用、等待确认与完成状态",
+            &mut cfg.fly_antigravity_sessions,
+        );
+        crate::extras::twinkle_card_break(ui);
+        setting_row(
+            ui,
+            "WorkBuddy / CodeBuddy 实时探测 (~/.workbuddy/projects)",
+            "读取 WorkBuddy 本机会话 JSONL 流，实时追踪函数调用、思考与任务完成",
+            &mut cfg.fly_workbuddy_sessions,
+        );
+        crate::extras::twinkle_card_break(ui);
+        setting_row(
+            ui,
+            "Cursor Agent 实时探测 (~/.cursor/projects)",
+            "读取 Cursor Agent 轨迹（agent-transcripts/*.jsonl），同步编码、工具调用与完成状态",
+            &mut cfg.fly_cursor_sessions,
+        );
+        crate::extras::twinkle_card_break(ui);
+        setting_row(
+            ui,
+            "Grok Bot 实时探测 (%APPDATA%\\Grok Bot / ~/.grokbot)",
+            "读取 Grok Bot 本机会话与结构化日志流，过滤心跳噪声并检测 Agent 运行与完成",
+            &mut cfg.fly_grokbot_sessions,
+        );
+        crate::extras::twinkle_card_break(ui);
+        setting_row(
+            ui,
+            "Trae / Trae CN 实时探测 (%APPDATA%\\Trae / ~/.trae)",
+            "读取 Trae / Trae CN 的 SOLO 与 Builder 会话及日志流，检测工具执行、等待确认与完成",
+            &mut cfg.fly_trae_sessions,
+        );
+        crate::extras::twinkle_card_break(ui);
+        setting_row(
+            ui,
+            "Muse / MuseWork 实时探测 (~/.muse / %APPDATA%\\Muse)",
+            "读取 Muse / Muse Code 本机会话 JSONL 与运行日志，实时同步 Agent 状态",
+            &mut cfg.fly_muse_sessions,
+        );
+        crate::extras::twinkle_card_break(ui);
+        setting_row(
+            ui,
+            "Dot / Dots 实时探测 (~/.dot / %APPDATA%\\Dot)",
+            "读取 Dot / Dots Agent 本机会话与日志流，实时同步任务状态与命令确认",
+            &mut cfg.fly_dot_sessions,
         );
         crate::extras::twinkle_card_break(ui);
         ui.horizontal_wrapped(|ui| {

@@ -1127,10 +1127,10 @@ impl App {
             if course && !info.is_empty() {
                 nc.centered_text(64.0,84.0,&nc.fit(&info,10.5,W::Regular,268.0),10.5,W::Regular,Color32::from_rgb(255,190,92),H::Left);
             }
-            let (divider_y,date_y,btn_y)=if course{(100.0,126.0,114.0)}else{(84.0,110.0,98.0)};
-            nc.seg((16.0,divider_y),(344.0,divider_y),0.6,Color32::from_gray(36));
+            let (divider_y,date_y,btn_y)=if course{(104.0,132.0,120.0)}else{(84.0,110.0,98.0)};
+            nc.seg((18.0,divider_y),(342.0,divider_y),0.6,Color32::from_gray(42));
             let date=format!("{}{}",if start.date_naive()==now.date_naive(){"今天 · "}else{""},start.format("%-m月%-d日"));
-            nc.centered_text(16.0,date_y,&date,11.0,W::Regular,secondary,H::Left);
+            nc.centered_text(18.0,date_y,&date,11.0,W::Regular,secondary,H::Left);
             let (dismiss,dc)=crate::paint::capsule(&nc,188.0,btn_y,72.0,24.0,"meeting-dismiss",Color32::from_gray(32),Color32::from_gray(48));
             dc.centered_text(224.0,date_y,"关闭",10.5,W::Semibold,theme::WHITE,H::Center);
             if dismiss.on_hover_text("关闭本次提醒，日程仍保留").clicked(){
@@ -1532,7 +1532,7 @@ impl App {
     pub(crate) fn task_editor_inputs(&mut self,ui:&mut egui::Ui,origin:egui::Pos2,cmds:&mut Vec<Cmd>){
         let Some(d)=self.task_dialog.as_mut() else{return};
         if d.reminder_only || d.picker.open{return;}
-        let name=ui.put(Rect::from_min_size(origin+egui::vec2(97.0,35.0),egui::vec2(260.0,17.0)),egui::TextEdit::singleline(&mut d.text).vertical_align(egui::Align::Center).id(egui::Id::new("task-name-edit")).frame(false).font(theme::font(11.5,W::Regular)));
+        let name=ui.put(Rect::from_min_size(origin+egui::vec2(97.0,35.0),egui::vec2(260.0,17.0)),egui::TextEdit::singleline(&mut d.text).vertical_align(egui::Align::Center).id(egui::Id::new("task-name-edit")).frame(false).margin(egui::Margin::symmetric(2, 0)).font(theme::font(11.5,W::Regular)));
         let first_focus=!d.focused;
         if first_focus{name.request_focus();d.focused=true;cmds.push(Cmd::Focus);}
         // 新建内容与下一步共用这一帧，避免同一次回车又提交了空提醒。
@@ -4058,7 +4058,8 @@ fn draw_cirrus_settings_search(
         accent
     };
     let idle_edge = skin.border;
-    let border_col = crate::paint::mix(idle_edge, accent_hi, focus_t * 0.85);
+    let focus_edge = if dark { Color32::from_gray(102) } else { Color32::from_gray(162) };
+    let border_col = crate::paint::mix(idle_edge, focus_edge, focus_t * 0.65);
     ui.painter().rect_filled(pill_rect, egui::CornerRadius::same(r_box), bg);
     ui.painter().rect_stroke(
         pill_rect,
@@ -4066,19 +4067,11 @@ fn draw_cirrus_settings_search(
         egui::Stroke::new(1.0, border_col),
         egui::StrokeKind::Inside,
     );
-    // 复刻 Win11 Fluent TextBox 聚焦底部强调指示线
-    if focus_t > 0.02 {
-        let inset = 6.0 * (1.0 - focus_t) + 3.0;
-        let line_y = pill_rect.bottom() - 1.2;
-        ui.painter().line_segment(
-            [egui::pos2(pill_rect.left() + inset, line_y), egui::pos2(pill_rect.right() - inset, line_y)],
-            egui::Stroke::new(2.0 * focus_t.clamp(0.4, 1.0), accent_hi),
-        );
-    }
 
     // 左侧放大镜矢量图标
     let base_icon = if dark { Color32::from_gray(168) } else { Color32::from_gray(96) };
-    let icon_col = crate::paint::mix(base_icon, accent_hi, focus_t * 0.55);
+    let icon_hi = if dark { Color32::from_gray(224) } else { Color32::from_gray(46) };
+    let icon_col = crate::paint::mix(base_icon, icon_hi, focus_t * 0.65);
     let ic_x = pill_rect.left() + 14.0;
     let ic_y = pill_rect.center().y - 0.8;
     ui.painter().circle_stroke(egui::pos2(ic_x, ic_y), 4.4, egui::Stroke::new(1.35, icon_col));
@@ -4129,14 +4122,19 @@ fn draw_cirrus_settings_search(
             .max_rect(field_rect)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
+    field_ui.visuals_mut().text_cursor.blink = true;
+    field_ui.visuals_mut().text_cursor.stroke = egui::Stroke::new(1.6, ink_col);
     let te = egui::TextEdit::singleline(query)
         .id(input_id)
         .frame(false)
-        .margin(egui::Margin::ZERO)
+        .margin(egui::Margin::symmetric(2, 0))
         .text_color(ink_col)
         .font(egui::FontId::proportional(13.0))
         .desired_width(field_rect.width());
     let te_resp = field_ui.add(te);
+    if !cfg!(test) && te_resp.has_focus() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(180));
+    }
     if query.is_empty() && !te_resp.has_focus() {
         ui.painter().text(
             egui::pos2(field_rect.left() + 1.0, pill_rect.center().y),
@@ -4430,6 +4428,11 @@ impl App {
             style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, pop_fg);
             style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.2, pop_fg);
             style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.2, pop_fg);
+            style.visuals.text_cursor.blink = true;
+            style.visuals.text_cursor.stroke = egui::Stroke::new(1.6, pop_fg);
+            if !cfg!(test) && ctx.memory(|m| m.focused().is_some()) {
+                ctx.request_repaint_after(std::time::Duration::from_millis(180));
+            }
             // [修复图八突兀大白条滚动条 (需求 12)]：
             // 关闭 egui 默认使用纯白前景色绘制滚动条 (`foreground_color = false`)，全局统一为 Shadcn <ScrollArea /> 4px 悬浮半透明细胶囊滚动条
             style.spacing.scroll.floating = true;
@@ -4660,14 +4663,17 @@ impl App {
                     let cls_r = egui::Rect::from_min_size(egui::pos2(bar_rect.right() - btn_w, bar_rect.top()), egui::vec2(btn_w, 30.0));
                     let cls_resp = ui.interact(cls_r, egui::Id::new("tw-win-close"), egui::Sense::click());
                     if cls_resp.hovered() {
+                        // 与最小化/最大化按钮一致，贴齐窗口顶/右边缘填满直角矩形，
+                        // 外圆角统一交由 Win11 DWM 原生圆角 (DWMWCP_ROUND / 最大化 DWMWCP_DONOTROUND) 裁切，
+                        // 彻底消除硬编码 11px 圆角与 1px 内缩在右上角留出的深色月牙缝隙。
                         let cls_fill_r = egui::Rect::from_min_max(
-                            egui::pos2(cls_r.left(), cls_r.top() + 1.0),
-                            egui::pos2(cls_r.right() - 1.0, cls_r.bottom()),
+                            cls_r.min,
+                            egui::pos2(cls_r.right() + 1.0, cls_r.bottom()),
                         );
                         ui.painter().rect_filled(
                             cls_fill_r,
-                            egui::CornerRadius { nw: 0, ne: 11, sw: 0, se: 0 },
-                            Color32::from_rgba_unmultiplied(232, 17, 35, 230),
+                            egui::CornerRadius::ZERO,
+                            Color32::from_rgb(232, 17, 35),
                         );
                     }
                     let c_cls = if cls_resp.hovered() { Color32::WHITE } else { icon_idle };
@@ -8780,21 +8786,41 @@ impl App {
                 } else {
                     0.0
                 };
-                let base_border = if dark {
-                    Color32::from_rgb(0x30, 0x30, 0x30)
-                } else {
-                    Color32::from_rgb(0xd2, 0xd4, 0xda)
-                };
-                let acc = crate::auralsle_ai_status::plugins::active_accent_color();
-                let win_border = if resize_glow > 0.01 {
-                    crate::paint::mix(base_border, acc, resize_glow * 0.65)
-                } else {
-                    base_border
-                };
-                let border_r = if is_max_vp { 0.0 } else { 12.0 };
-                let border_w = 1.0 + resize_glow * 0.8;
-                ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("tw_win_border")))
-                    .rect_stroke(vp_rect, border_r, egui::Stroke::new(border_w, win_border), egui::StrokeKind::Inside);
+                let border_r = if is_max_vp { 0.0 } else { 8.0 };
+                #[cfg(windows)]
+                {
+                    // Win11 原生 DWMWA_BORDER_COLOR 已沿 DWMWCP_ROUND (8px) 外缘精准绘制 1px 边框；
+                    // 客户区不再叠加 12px 前景黑框，避免斜切右上角悬停红底关闭按钮；仅在缩放反馈瞬间绘制 8px 强调色微光。
+                    if resize_glow > 0.01 {
+                        let acc = crate::auralsle_ai_status::plugins::active_accent_color();
+                        let glow_col = Color32::from_rgba_unmultiplied(
+                            acc.r(),
+                            acc.g(),
+                            acc.b(),
+                            (resize_glow * 165.0).round().clamp(0.0, 255.0) as u8,
+                        );
+                        let border_w = 1.0 + resize_glow * 0.8;
+                        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("tw_win_border")))
+                            .rect_stroke(vp_rect, border_r, egui::Stroke::new(border_w, glow_col), egui::StrokeKind::Inside);
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    let base_border = if dark {
+                        Color32::from_rgb(0x30, 0x30, 0x30)
+                    } else {
+                        Color32::from_rgb(0xd2, 0xd4, 0xda)
+                    };
+                    let acc = crate::auralsle_ai_status::plugins::active_accent_color();
+                    let win_border = if resize_glow > 0.01 {
+                        crate::paint::mix(base_border, acc, resize_glow * 0.65)
+                    } else {
+                        base_border
+                    };
+                    let border_w = 1.0 + resize_glow * 0.8;
+                    ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("tw_win_border")))
+                        .rect_stroke(vp_rect, border_r, egui::Stroke::new(border_w, win_border), egui::StrokeKind::Inside);
+                }
             }
             // [设置页滚动修复] 记下子视口是否还需要下一帧，供下一帧的重绘闸门使用：
             // `requested_repaint_last_pass` 只认「立即重绘」请求（滚动惯性/悬停/切页动画），
@@ -9291,12 +9317,13 @@ fn round_settings_hwnd(ppp: f32, maximized: bool, dark: bool) -> bool {
                     4,
                 )
             };
-            let border_none: u32 = 0xFFFFFFFE; // DWMWA_COLOR_NONE
+            // 由 Win11 DWM 原生绘制 1px 圆角外框（COLORREF = 0x00BBGGRR），严格贴合 DWMWCP_ROUND (8px) 圆角且绝不压盖关闭按钮
+            let border_color: u32 = if probe.dark { 0x00303030 } else { 0x00DAD4D2 };
             let _ = unsafe {
                 DwmSetWindowAttribute(
                     hwnd,
                     DWMWINDOWATTRIBUTE(34), // DWMWA_BORDER_COLOR
-                    &border_none as *const u32 as *const _,
+                    &border_color as *const u32 as *const _,
                     4,
                 )
             };

@@ -1,6 +1,6 @@
 [package]
 name = "auralsle"
-version = "3.1.0"
+version = "3.5.0"
 edition = "2021"
 license = "MIT"
 description = "灵屿 AuraIsle：Windows 屏幕边缘的桌面伙伴与智能信息岛"

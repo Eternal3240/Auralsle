@@ -420,6 +420,22 @@ pub struct Config {
     pub fly_codex_sessions: bool,
     /// fly-island 会话检测源开关：DeepSeek Harness (`~/.dsh/sessions/**/*.jsonl`)
     pub fly_dsh_sessions: bool,
+    /// fly-island 会话检测源开关：豆包 / 豆包工作桌面端实时日志流 (`%LOCALAPPDATA%\Doubao`)
+    pub fly_doubao_sessions: bool,
+    /// fly-island 会话检测源开关：Gemini Antigravity (`~/.gemini/antigravity`)
+    pub fly_antigravity_sessions: bool,
+    /// fly-island 会话检测源开关：WorkBuddy / CodeBuddy (`~/.workbuddy/projects`)
+    pub fly_workbuddy_sessions: bool,
+    /// fly-island 会话检测源开关：Grok Bot (`%APPDATA%\Grok Bot` / `~/.grokbot`)
+    pub fly_grokbot_sessions: bool,
+    /// fly-island 会话检测源开关：Cursor (`~/.cursor/projects/**/agent-transcripts`)
+    pub fly_cursor_sessions: bool,
+    /// fly-island 会话检测源开关：Trae / Trae CN (`%APPDATA%\Trae` / `~/.trae`)
+    pub fly_trae_sessions: bool,
+    /// fly-island 会话检测源开关：Muse / MuseWork (`~/.muse` / `%APPDATA%\Muse`)
+    pub fly_muse_sessions: bool,
+    /// fly-island 会话检测源开关：Dot / Dots (`~/.dot` / `%APPDATA%\Dot`)
+    pub fly_dot_sessions: bool,
     /// 无本机实时会话时是否展示 fly-island 演示会话以供预览
     pub fly_demo_sessions: bool,
 }
@@ -638,6 +654,14 @@ impl Default for Config {
             fly_claude_sessions: true,
             fly_codex_sessions: true,
             fly_dsh_sessions: true,
+            fly_doubao_sessions: true,
+            fly_antigravity_sessions: true,
+            fly_workbuddy_sessions: true,
+            fly_grokbot_sessions: true,
+            fly_cursor_sessions: true,
+            fly_trae_sessions: true,
+            fly_muse_sessions: true,
+            fly_dot_sessions: true,
             fly_demo_sessions: false,
         }
     }
@@ -1109,6 +1133,14 @@ impl Config {
             fly_claude_sessions: bool_or(field(&v, "fly_claude_sessions"), d.fly_claude_sessions),
             fly_codex_sessions: bool_or(field(&v, "fly_codex_sessions"), d.fly_codex_sessions),
             fly_dsh_sessions: bool_or(field(&v, "fly_dsh_sessions"), d.fly_dsh_sessions),
+            fly_doubao_sessions: bool_or(field(&v, "fly_doubao_sessions"), d.fly_doubao_sessions),
+            fly_antigravity_sessions: bool_or(field(&v, "fly_antigravity_sessions"), d.fly_antigravity_sessions),
+            fly_workbuddy_sessions: bool_or(field(&v, "fly_workbuddy_sessions"), d.fly_workbuddy_sessions),
+            fly_grokbot_sessions: bool_or(field(&v, "fly_grokbot_sessions"), d.fly_grokbot_sessions),
+            fly_cursor_sessions: bool_or(field(&v, "fly_cursor_sessions"), d.fly_cursor_sessions),
+            fly_trae_sessions: bool_or(field(&v, "fly_trae_sessions"), d.fly_trae_sessions),
+            fly_muse_sessions: bool_or(field(&v, "fly_muse_sessions"), d.fly_muse_sessions),
+            fly_dot_sessions: bool_or(field(&v, "fly_dot_sessions"), d.fly_dot_sessions),
             fly_demo_sessions: false,
         }
     }
@@ -1286,6 +1318,14 @@ impl Config {
             head.insert("fly_claude_sessions".to_owned(), json!(self.fly_claude_sessions));
             head.insert("fly_codex_sessions".to_owned(), json!(self.fly_codex_sessions));
             head.insert("fly_dsh_sessions".to_owned(), json!(self.fly_dsh_sessions));
+            head.insert("fly_doubao_sessions".to_owned(), json!(self.fly_doubao_sessions));
+            head.insert("fly_antigravity_sessions".to_owned(), json!(self.fly_antigravity_sessions));
+            head.insert("fly_workbuddy_sessions".to_owned(), json!(self.fly_workbuddy_sessions));
+            head.insert("fly_grokbot_sessions".to_owned(), json!(self.fly_grokbot_sessions));
+            head.insert("fly_cursor_sessions".to_owned(), json!(self.fly_cursor_sessions));
+            head.insert("fly_trae_sessions".to_owned(), json!(self.fly_trae_sessions));
+            head.insert("fly_muse_sessions".to_owned(), json!(self.fly_muse_sessions));
+            head.insert("fly_dot_sessions".to_owned(), json!(self.fly_dot_sessions));
             head.insert("fly_demo_sessions".to_owned(), json!(self.fly_demo_sessions));
             head.insert("border_effect".to_owned(), json!(self.border_effect));
             head.insert("border_plays_on".to_owned(), json!(self.border_plays_on));

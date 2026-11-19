@@ -3302,13 +3302,15 @@ impl App {
                     .layer_id(c.painter.layer_id())
                     .style(c.ui.style().clone()),
             );
-            sui.set_clip_rect(srect.intersect(c.painter.clip_rect()));
+            sui.set_clip_rect(srect.expand2(egui::vec2(2.0, 2.0)).intersect(c.painter.clip_rect()));
             sui.set_opacity(c.painter.opacity());
+            sui.visuals_mut().text_cursor.blink = true;
+            sui.visuals_mut().text_cursor.stroke = egui::Stroke::new(1.6, theme::WHITE);
             let resp = sui.add(
                 egui::TextEdit::singleline(&mut q)
                     .id(egui::Id::new("bd-clip-search-in"))
                     .frame(false)
-                    .margin(egui::Margin::ZERO)
+                    .margin(egui::Margin::symmetric(2, 0))
                     .text_color(theme::WHITE)
                     .font(theme::font(9.5, W::Regular))
                     .desired_width(srect.width()),
@@ -3756,12 +3758,14 @@ impl App {
                     .layer_id(c.painter.layer_id())
                     .style(c.ui.style().clone()),
             );
-            search_ui.set_clip_rect(search_rect.intersect(c.painter.clip_rect()));
+            search_ui.set_clip_rect(search_rect.expand2(egui::vec2(2.0, 2.0)).intersect(c.painter.clip_rect()));
             search_ui.set_opacity(c.painter.opacity());
+            search_ui.visuals_mut().text_cursor.blink = true;
+            search_ui.visuals_mut().text_cursor.stroke = egui::Stroke::new(1.6, theme::WHITE);
             let te = egui::TextEdit::singleline(&mut q)
                 .id(egui::Id::new("fly-clip-search-input"))
                 .frame(false)
-                .margin(egui::Margin::ZERO)
+                .margin(egui::Margin::symmetric(2, 0))
                 .text_color(theme::WHITE)
                 .font(theme::font(10.5, W::Regular))
                 .desired_width(search_rect.width());
@@ -4069,13 +4073,15 @@ impl App {
                     .layer_id(c.painter.layer_id())
                     .style(c.ui.style().clone()),
             );
-            input_ui.set_clip_rect(input_rect.intersect(c.painter.clip_rect()));
+            input_ui.set_clip_rect(input_rect.expand2(egui::vec2(2.0, 2.0)).intersect(c.painter.clip_rect()));
             input_ui.set_opacity(c.painter.opacity());
+            input_ui.visuals_mut().text_cursor.blink = true;
+            input_ui.visuals_mut().text_cursor.stroke = egui::Stroke::new(1.6, theme::WHITE);
             let mut buf = std::mem::take(&mut self.buf);
             let te = egui::TextEdit::singleline(&mut buf)
                 .id(egui::Id::new("fly-todo-inline-input"))
                 .frame(false)
-                .margin(egui::Margin::ZERO)
+                .margin(egui::Margin::symmetric(2, 0))
                 .text_color(theme::WHITE)
                 .font(theme::font(11.0, W::Regular))
                 .desired_width(input_rect.width());

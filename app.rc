@@ -1,8 +1,8 @@
 #pragma code_page(65001)
 1 ICON "assets/auralsle.ico"
 1 VERSIONINFO
- FILEVERSION 3,1,0,0
- PRODUCTVERSION 3,1,0,0
+ FILEVERSION 3,5,0,0
+ PRODUCTVERSION 3,5,0,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -17,8 +17,8 @@ BEGIN
             VALUE "InternalName", "AuraIsle"
             VALUE "OriginalFilename", "AuraIsle.exe"
             VALUE "ProductName", "灵屿 AuraIsle"
-            VALUE "ProductVersion", "3.1.0"
-            VALUE "FileVersion", "3.1.0"
+            VALUE "ProductVersion", "3.5.0"
+            VALUE "FileVersion", "3.5.0"
         END
     END
     BLOCK "VarFileInfo"

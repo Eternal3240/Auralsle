@@ -1042,7 +1042,8 @@ impl App {
         ctx.set_visuals(egui::Visuals::dark());
         ctx.style_mut(|s| {
             s.interaction.selectable_labels = false;
-            s.visuals.text_cursor.stroke = egui::Stroke::new(1.5_f32, theme::BLUE);
+            s.visuals.text_cursor.blink = true;
+            s.visuals.text_cursor.stroke = egui::Stroke::new(1.6_f32, Color32::WHITE);
             s.visuals.selection.bg_fill = theme::alpha_blue(0.45);
         });
         let mut settings = model::Settings::load();
@@ -3007,13 +3008,18 @@ impl App {
         let flare = if minimal_pill || pill || !cfg!(test) { 0.0 } else { lerp(5.0, FLARE, pc) };
         let k = (w / PW).clamp(0.3, 1.1);
         let thickness = if side { crate::side_dock::SIDE_BAR_W } else { BAR_H };
+        let pill_closed_r = if self.notice.as_ref().is_some_and(|a| a.meeting.is_some()) || h > 56.0 {
+            24.0
+        } else {
+            h * 0.5
+        };
         let radius = if minimal_pill {
             if self.minimal_time_pill_mode() { w.min(h) * 0.5 } else { BAR_H_MIN / 2.0 }
         } else if pill || (self.minimal_time_pill_mode() && pc < 0.02) {
-            (w.min(h) * 0.5).min(lerp(h * 0.5, 26.0, pc))
+            (w.min(h) * 0.5).min(lerp(pill_closed_r, 26.0, pc))
         } else {
             lerp(12.5, 14.0, pc)
-        }; // [ai-status-mod] 圆角与课程岛一致(14)
+        }; // [ai-status-mod] 圆角与课程岛一致(14)，课程/会议弹窗采用 24px 卡片圆角避免两端弧度挤压内容
         let flare_h = if !cfg!(test) { 0.5 } else { lerp(8.0, FLARE_H, pc) };
         let thick = glass::thickness(PH);
         let glass_skin = self.settings.skin.is_glass();
@@ -3445,7 +3451,8 @@ impl App {
         let border_anim=crate::auralsle_ai_status::ui::border_effect_active(pc,self.t,false).is_some() || spark_anim;
         let ambient=border_anim || matches!(self.settings.skin,model::Skin::Fluid|model::Skin::LiquidGlass) && self.fluid.animating() || self.pomo.running && (self.open && self.page==1 || !self.open && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
             || self.media.playing && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.media.is_music())
-            || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some());
+            || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some())
+            || (!cfg!(test) && ctx.memory(|m| m.focused().is_some()));
         let animating=transitioning || ambient || pet_visible && self.pet.state!=PetState::Sleeping;
         // 交互形变保持 60 帧，媒体 30 帧；小表情 20 帧，睡眠 10 帧，静态界面每秒核对提醒。
         let fps_120 = crate::auralsle_ai_status::config::get().fps_120;
@@ -6856,7 +6863,7 @@ impl App {
         let te = egui::TextEdit::singleline(&mut buf)
             .id(egui::Id::new("todo-input"))
             .frame(false)
-            .margin(egui::Margin::ZERO)
+            .margin(egui::Margin::symmetric(2, 0))
             .text_color(theme::WHITE)
             .font(theme::font(size::BODY, W::Regular))
             .hint_text(egui::RichText::new("要做点什么？回车保存").color(theme::DIM).font(theme::font(size::BODY, W::Regular)))

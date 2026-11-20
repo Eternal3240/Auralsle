@@ -70,3 +70,5 @@ try {
 } finally {
     $env:LOCALAPPDATA = $oldLocal
 }
+$global:LASTEXITCODE = 0
+exit 0

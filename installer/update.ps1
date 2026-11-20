@@ -49,6 +49,14 @@ try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [IO.Compression.ZipFile]::OpenRead($archive)
     try {
+        # 拒绝路径穿越 / 绝对路径条目，避免解压写到目标目录之外。
+        $badEntries = @($zip.Entries | Where-Object {
+            $n = ($_.FullName -replace '\\', '/')
+            $n.StartsWith('/') -or $n -match '^[A-Za-z]:' -or $n -match '(^|/)\.\.(/|$)'
+        })
+        if ($badEntries.Count -gt 0) {
+            throw "更新包包含非法路径：$($badEntries[0].FullName)"
+        }
         $entries = @($zip.Entries | Where-Object {
             $leaf = [IO.Path]::GetFileName($_.FullName.Replace('\', '/'))
             $_.Length -gt 0 -and $_.Length -le 200MB -and (

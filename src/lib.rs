@@ -70,7 +70,11 @@ pub mod smtc;
 pub mod music_volume;
 pub mod theme;
 pub mod graphics;
+pub mod auralsle_music;
+pub mod auralsle_music_editor;
+pub mod auralsle_otp;
 pub mod auralsle_ai_status;  // [ai-status-mod] 独立模块
+pub mod oppo_bridge;
 pub mod settings_theme;
 mod updates;
 #[cfg(windows)]

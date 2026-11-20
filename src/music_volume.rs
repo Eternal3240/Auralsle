@@ -46,7 +46,7 @@ impl Reader {
     }
 }
 
-fn executable(source:&str)->Option<String> {
+pub(crate) fn executable(source:&str)->Option<String> {
     let source=source.to_lowercase();
     match source.as_str() {
         "kugou"=>Some("kugou.exe".into()),

@@ -655,6 +655,36 @@ fn draw_icon(c: &Card, key: &str, cx: f32, cy: f32, side: f32, color: Color32) {
 /// 与药丸时钟基线一致、字号小两号；左边是 AI 工具自己的图标。
 /// 「回到 AI」不画在这里 —— 鼠标移到岛上就会展开，岛内的按钮根本点不到。
 /// `left` 是整块的左端（`compact_x` 给出），`alpha` 与收起动画同步。
+/// 仅绘制主岛同款 AI 客户端矢量/品牌图标 + 右上角呼吸状态灯（用于收起态歌词岛，与主岛图标完全一致）。
+pub fn draw_compact_icon_only(c: &Card, cx: f32, cy: f32, alpha: f32) {
+    let cfg = config::get();
+    if !cfg.enabled {
+        return;
+    }
+    let Some(s) = auralsle_ai_status::shown() else {
+        return;
+    };
+    if alpha <= 0.004 {
+        return;
+    }
+    let c = c.faded(alpha.clamp(0.0, 1.0));
+    let color = phase_color(s.agent.phase);
+    let icon_side = 19.5_f32;
+    draw_icon(&c, &s.agent.key, cx, cy, icon_side, color);
+    if !cfg!(test) && cfg.agent_status_lamp {
+        let t_sec = c.ui.input(|i| i.time) as f32;
+        let pulse = match s.agent.phase {
+            state::Phase::Waiting => ((t_sec * 8.0).sin() * 0.5 + 0.5),
+            state::Phase::Working | state::Phase::Tool | state::Phase::Running => ((t_sec * 3.8).sin() * 0.5 + 0.5),
+            _ => 0.85,
+        };
+        let lamp_x = cx + ICON * 0.5 - 1.0;
+        let lamp_y = cy - 6.2;
+        c.circle(lamp_x, lamp_y, 3.8 + pulse * 1.4, color.gamma_multiply(0.32 * pulse));
+        c.circle(lamp_x, lamp_y, 2.3, color);
+    }
+}
+
 pub fn draw_compact(c: &Card, left: f32, alpha: f32) {
     let cfg = config::get();
     if !cfg.enabled || !cfg.compact {
@@ -1199,11 +1229,13 @@ fn draw_course_capsule(
     let title_sz = (l.title_size * 0.82).clamp(12.0, 18.0);
     marquee(c, rx, by + 33.0, rw, 24.0, by + 51.0, &a.title, title_sz, W::Bold, l.title, ls);
 
+    let r_course = cfg.course_corner_r.clamp(4.0, 22.0);
     let place_txt = if a.place.is_empty() { a.info.as_str() } else { a.place.as_str() };
     let place_sz = (l.place_size * 0.54).clamp(8.8, 12.5);
     let pw = (c.text_w(place_txt, place_sz, W::Semibold) + 14.0).min(rw * 0.65).max(46.0);
-    c.fill(rx, by + 62.0, pw, 18.5, 9.2, Color32::from_rgba_unmultiplied(l.place.r(), l.place.g(), l.place.b(), 36));
-    c.stroke(rx, by + 62.0, pw, 18.5, 9.2, 0.75, l.place.gamma_multiply(0.55));
+    let r_badge = r_course.min(9.2);
+    c.fill(rx, by + 62.0, pw, 18.5, r_badge, Color32::from_rgba_unmultiplied(l.place.r(), l.place.g(), l.place.b(), 36));
+    c.stroke(rx, by + 62.0, pw, 18.5, r_badge, 0.75, l.place.gamma_multiply(0.55));
     let p_fit = c.fit(place_txt, place_sz, W::Semibold, pw - 10.0);
     c.text(rx + pw * 0.5, by + 74.5, &p_fit, place_sz, W::Semibold, l.place, H::Center);
     if !a.teacher.is_empty() {
@@ -1214,7 +1246,7 @@ fn draw_course_capsule(
 
     // 底部通栏胶囊舱 (y = by + h - 34 .. by + h - 10)：左侧倒计时 + 右侧免打扰按钮
     let bot_y = by + h - 31.0;
-    c.fill(bx + 12.0, bot_y, w - 24.0, 22.0, 11.0, Color32::from_white_alpha(12));
+    c.fill(bx + 12.0, bot_y, w - 24.0, 22.0, r_course.min(11.0), Color32::from_white_alpha(12));
     c.circle(bx + 21.5, bot_y + 11.0, 2.5, l.accent);
     let cd_fit = c.fit(&a.countdown, (l.small * 0.95).clamp(8.5, 11.5), W::Semibold, w - 108.0);
     c.text(bx + 28.0, bot_y + 14.5, &cd_fit, (l.small * 0.95).clamp(8.5, 11.5), W::Semibold, l.accent, H::Left);
@@ -1222,8 +1254,8 @@ fn draw_course_capsule(
     let dnd_lbl = if cfg.course_dnd_label.trim().is_empty() { "上课专注" } else { cfg.course_dnd_label.trim() };
     let btn_w = 62.0_f32;
     let btn_x = bx + w - 15.0 - btn_w;
-    c.fill(btn_x, bot_y + 2.0, btn_w, 18.0, 9.0, l.accent.gamma_multiply(0.32));
-    c.stroke(btn_x, bot_y + 2.0, btn_w, 18.0, 9.0, 0.8, l.accent.gamma_multiply(0.75));
+    c.fill(btn_x, bot_y + 2.0, btn_w, 18.0, r_course.min(9.0), l.accent.gamma_multiply(0.32));
+    c.stroke(btn_x, bot_y + 2.0, btn_w, 18.0, r_course.min(9.0), 0.8, l.accent.gamma_multiply(0.75));
     c.text(btn_x + btn_w * 0.5, bot_y + 14.2, &c.fit(dnd_lbl, 8.6, W::Semibold, btn_w - 8.0), 8.6, W::Semibold, theme::WHITE, H::Center);
     if c.hit(btn_x, bot_y + 2.0, btn_w, 18.0, "course-cap-dnd").clicked() {
         course_dnd_click(a, cfg);
@@ -1243,20 +1275,23 @@ fn draw_course_dashboard(
 ) -> egui::Rect {
     let l = course_looks(cfg);
     let ls = cfg.course_letter_spacing;
-    // 顶部左：时间胶囊；顶部右：地点胶囊
+    let r_course = cfg.course_corner_r.clamp(4.0, 22.0);
+    let r_pill = r_course.min(9.0);
+    let r_card = r_course.min(18.0);
+    // 顶部左：时间胶囊；顶部右：地点胶囊（统一采用课程岛圆角）
     let time_pill_w = (c.text_w(&a.time_range, 9.5, W::Bold) + 16.0).min(114.0);
-    c.fill(bx + 12.0, by + 11.0, time_pill_w, 18.0, 6.0, Color32::from_rgba_unmultiplied(l.accent.r(), l.accent.g(), l.accent.b(), 38));
+    c.fill(bx + 12.0, by + 11.0, time_pill_w, 18.0, r_pill, Color32::from_rgba_unmultiplied(l.accent.r(), l.accent.g(), l.accent.b(), 38));
     c.text(bx + 12.0 + time_pill_w * 0.5, by + 23.0, &a.time_range, 9.5, W::Bold, l.accent, H::Center);
 
     let place_txt = if a.place.is_empty() { "智慧教室" } else { a.place.as_str() };
     let place_w = (c.text_w(place_txt, 9.5, W::Semibold) + 16.0).min(96.0);
     let px = bx + w - 12.0 - place_w;
-    c.fill(px, by + 11.0, place_w, 18.0, 6.0, Color32::from_rgba_unmultiplied(l.place.r(), l.place.g(), l.place.b(), 36));
+    c.fill(px, by + 11.0, place_w, 18.0, r_pill, Color32::from_rgba_unmultiplied(l.place.r(), l.place.g(), l.place.b(), 36));
     let p_fit = c.fit(place_txt, 9.2, W::Semibold, place_w - 10.0);
     c.text(px + place_w * 0.5, by + 23.0, &p_fit, 9.2, W::Semibold, l.place, H::Center);
 
     // 中部：课程名大字看板 + 教师/状态副标题
-    c.fill(bx + 12.0, by + 35.0, w - 24.0, 56.0, 9.0, Color32::from_white_alpha(12));
+    c.fill(bx + 12.0, by + 35.0, w - 24.0, 56.0, r_card, Color32::from_white_alpha(12));
     marquee(c, bx + 20.0, by + 40.0, w - 40.0, 24.0, by + 58.0, &a.title, (l.title_size * 0.88).clamp(13.0, 18.0), W::Bold, l.title, ls);
     let sub_line = if a.teacher.is_empty() {
         format!("{} · {}", a.date, a.countdown)
@@ -1275,7 +1310,7 @@ fn draw_course_dashboard(
 
     let btn_w = 64.0;
     let btn_x = bx + w - 12.0 - btn_w;
-    c.fill(btn_x, bar_y, btn_w, 20.0, 10.0, Color32::from_rgb(52, 68, 84));
+    c.fill(btn_x, bar_y, btn_w, 20.0, r_course.min(10.0), Color32::from_rgb(52, 68, 84));
     c.text(btn_x + btn_w * 0.5, bar_y + 13.0, a.status, 8.8, W::Semibold, l.accent, H::Center);
     if c.hit(btn_x, bar_y, btn_w, 20.0, "course-dash-dnd").clicked() {
         course_dnd_click(a, cfg);
@@ -1292,7 +1327,7 @@ pub fn draw_course_by_style(
     a: &auralsle_ai_status::course::Alert,
     cfg: &config::Config,
 ) -> egui::Rect {
-    paint_glare_hover(c, bx, by, w, h, 14.0, course_looks(cfg).accent);
+    paint_glare_hover(c, bx, by, w, h, cfg.course_corner_r.clamp(4.0, 22.0), course_looks(cfg).accent);
     match cfg.course_style {
         0 => draw_course_classic(c, bx, by, w, h, a, cfg),
         2 => draw_course_capsule(c, bx, by, w, h, a, cfg),
@@ -1954,17 +1989,18 @@ impl DevicePill {
         let val_x = x + w - 9.5;
         let subtle_ink = a(Color32::from_rgba_unmultiplied(t.ink.r(), t.ink.g(), t.ink.b(), if t.light { 160 } else { 180 }));
         match self.style % 4 {
-            // 0 极光玻璃（Aura Glass）：左侧磨砂玻璃图标徽章 + 清爽标题与百分比 + 贴底微光进度细轨
+            // 0 极光玻璃（Aura Glass）：左侧磨砂玻璃图标徽章 + 垂直居中标题与百分比 + 均衡进度细轨
             0 => {
                 c.circle(icon_cx, cy, 9.2, glass_fill);
                 c.ring(icon_cx, cy, 9.2, 0.7, glass_rim);
                 self.icon(c, d, icon_cx - 5.2, cy, 10.4, fade, ink);
 
                 let text_l = x + 28.0;
-                c.text(text_l, cy + 1.8, label, 9.2, W::Semibold, ink, H::Left);
-                c.text(val_x, cy + 2.0, &val, 9.4, W::Bold, val_col, H::Right);
+                let text_cy = cy - 2.6;
+                c.centered_text(text_l, text_cy, label, 9.2, W::Semibold, ink, H::Left);
+                c.centered_text(val_x, text_cy, &val, 9.4, W::Bold, val_col, H::Right);
 
-                let rail_y = y + h - 4.6;
+                let rail_y = y + h - 6.2;
                 let rail_w = (w - 37.5).max(24.0);
                 c.fill(text_l, rail_y, rail_w, 2.0, 1.0, track_col);
                 let fill_w = (rail_w * ratio.clamp(0.06, 1.0)).max(3.0);
@@ -2885,7 +2921,7 @@ pub fn draw_page(c: &Card, _cmds: &mut Vec<Cmd>) {
         }
     };
 
-    if !cfg!(test) && agents.len() >= 2 {
+    if !cfg!(test) && agents.len() >= 3 {
         let list_x = LEFT - 6.0;
         let list_y = 38.0;
         let list_w = (RIGHT - LEFT) + 16.0;

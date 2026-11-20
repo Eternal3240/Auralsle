@@ -49,7 +49,7 @@
 | **💬 消息聚合与通知历史** | 微信多开分账号未读角标、QQ 与办公软件（企业微信/飞书/钉钉）通知聚合；自动识别并遮罩验证码；通知历史按应用分组，支持免打扰与一键清理。 |
 | **📋 置物架与图文剪贴板** | 临时文件拖放中转站 + 最多 30 条图文剪贴板历史；播放音乐期间近期复制可一键直达剪贴板；支持「鼠标离开 / 点击空白处 / 延时收起」三种闭岛策略。 |
 | **🖥️ 统一设备与亮度调控** | 将 **DDC/CI / WMI 显示器亮度** 与 **蓝牙 / 2.4GHz 无线外设（鼠/键/耳/柄）** 收归统一「设备」管理；异步预热显示器列表，亮度岛按设备数量自适应短岛/长岛/滚动列表。 |
-| **⚡ 硬件遥测、天气与翻译** | 内置 Glance 风格系统曲线/圆环/分栏监控、街道级 24H 天气趋势卡（Open-Meteo）、交互式周课表（`.xlsx` 导入）、多邮箱 IMAP 验证码识别及多引擎 AI 翻译。 |
+| **⚡ 硬件遥测、天气与翻译** | 内置系统曲线/圆环/分栏硬件监控、街道级 24H 天气趋势卡（Open-Meteo）、交互式周课表（`.xlsx` 导入）、多邮箱 IMAP 验证码识别及多引擎 AI 翻译。 |
 | **🧩 现代 Twinkle 设置中心** | Win11 自绘无边框圆角窗口（支持原生标题栏拖动、八向拉伸缩放与最大化自适应居中排版，默认 `1024×720` 即最小尺寸）、全站 `Ctrl K` 实时搜索、所有输入框统一闪烁光标、四次缓出非线性平滑滚动，以及内嵌 `MiSans Latin` + 多语言零乱码字体链。 |
 
 ---
@@ -92,7 +92,7 @@
 
 ---
 
-### 4. Glance 硬件监控、街道级天气、交互周课表与快捷翻译
+### 4. 硬件监控、街道级天气、交互周课表与快捷翻译
 每个功能页均在设置中内置 **实时交互预览卡片**：
 - **插件（系统监控）**：支持「曲线读数卡 (`Curve`)」「极简圆环 (`Rings`)」「硬件分栏 (`Lanes`)」三形态实时遥测。
 - **天气**：支持自动定位或指定城市，内置现代卡片式街道实况、24H 逐时温度曲线、空气质量、风况与日出日落进度；设置页实时预览与主岛同源渲染（同步皮肤底色与 `278px` 展开高度），不再出现发白发灰。
@@ -100,7 +100,7 @@
 - **快捷翻译**：支持 DeepSeek / OpenAI / 硅基流动 / Gemini / Claude 多引擎与剪贴板自动检测。
 
 <p align="center">
-  <img src="docs/images/settings-plugins-monitor.png" width="48.5%" alt="Glance 硬件监控曲线卡片预览" />
+  <img src="docs/images/settings-plugins-monitor.png" width="48.5%" alt="硬件监控曲线卡片预览" />
   &nbsp;
   <img src="docs/images/settings-weather.png" width="48.5%" alt="现代卡片街道级天气实时预览" />
 </p>
@@ -211,7 +211,6 @@ cargo build --locked --target x86_64-pc-windows-msvc --release --bin AuraIsle
 **灵屿 · AuraIsle** 在演进过程中参考并致谢以下优秀开源项目与资源：
 
 - **xiaotang-daozai** ([Renly1994/xiaotang-daozai](https://github.com/Renly1994/xiaotang-daozai)) — 原生桌面灵动岛核心底座、物理弹簧动画与系统服务架构
-- **Glance** ([lulu-loopp/glance](https://github.com/lulu-loopp/glance)) — 磨砂玻璃上下曲线硬件监控与多形态音乐控件设计
 - **BrimDeck** ([MoFeng2223/BrimDeck](https://github.com/MoFeng2223/BrimDeck)) — 图文剪贴板与四合一无线外设低电设备胶囊交互参考
 - **fly-island** ([flyl1u/fly-island](https://github.com/flyl1u/fly-island)) — 剪贴板历史、消息聚合、快捷翻译与 Agent 审批钩子思路
 - **React Bits** ([DavidHDev/react-bits](https://github.com/DavidHDev/react-bits)) — `AnimatedContent`、`MagnetSpring`、`ClickSpark` 等动效灵感

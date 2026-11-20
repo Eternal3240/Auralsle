@@ -439,10 +439,26 @@ fn launch_installer(work: &std::path::Path) -> Result<(), String> {
     let target = std::env::current_exe().map_err(|_| "无法找到当前程序")?;
     let shell = std::env::var_os("SystemRoot").map(PathBuf::from).ok_or("无法找到 Windows 目录")?
         .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let mut child = crate::child_process::spawn(std::process::Command::new(shell).args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
-        .arg(work.join("apply.ps1")).arg("-WorkPath").arg(work).arg("-TargetExe").arg(target)
-        .arg("-ParentProcessId").arg(std::process::id().to_string()))
-        .map_err(|_| "无法启动更新程序，请通过浏览器下载安装")?;
+    let stderr_path = work.join("stderr.log");
+    let mut cmd = std::process::Command::new(shell);
+    cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(work.join("apply.ps1"))
+        .arg("-WorkPath").arg(work)
+        .arg("-TargetExe").arg(target)
+        .arg("-ParentProcessId").arg(std::process::id().to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null());
+    if let Ok(err_f) = std::fs::File::create(&stderr_path) {
+        cmd.stderr(std::process::Stdio::from(err_f));
+    } else {
+        cmd.stderr(std::process::Stdio::null());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let mut child = cmd.spawn().map_err(|_| "无法启动更新程序，请通过浏览器下载安装")?;
     // 脚本先确认缓存和安装目录可用（含解压与安全扫描，最多等待 30 秒），再允许主程序退出。
     let mut exited = false;
     for _ in 0..600 {
@@ -460,6 +476,12 @@ fn launch_installer(work: &std::path::Path) -> Result<(), String> {
         let trimmed = msg.trim();
         if !trimmed.is_empty() {
             return Err(trimmed.to_owned());
+        }
+    }
+    if let Ok(err_log) = std::fs::read_to_string(&stderr_path) {
+        let first_line = err_log.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+        if !first_line.is_empty() {
+            return Err(format!("无法准备安装：{first_line}"));
         }
     }
     Err(if exited {

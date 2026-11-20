@@ -13,7 +13,7 @@ use std::{
 
 pub const CONFIG_FILE: &str = "ai-status-mod.json";
 /// 配置结构版本：旧文件缺 `v` 时做一次性迁移。
-const CONFIG_VERSION: i64 = 2;
+const CONFIG_VERSION: i64 = 3;
 
 /// 课程卡「文字卡片」样式的默认行模板。
 pub const DEFAULT_COURSE_LAYOUT: &str = "{title}{time}\n{place}\n---\n{countdown} | {dnd}";
@@ -144,6 +144,11 @@ pub struct Config {
     pub liquid_glass_mode: u8,
     /// 音乐播放器样式切换：0 = 经典默认，1 = 灵动音律（封面流光 + 动态频谱 + 歌词同行）。
     pub music_ui_style: u8,
+    pub music_show_ai_status: bool,
+    /// 收起态歌词岛左侧是否独立显示时间胶囊（默认 true）。
+    pub lyric_island_time_capsule: bool,
+    /// 是否隐藏展开岛左右切页 `<` / `>` 按钮（默认 false）。
+    pub hide_nav_arrows: bool,
     /// 音乐岛无媒体播放时自动隐藏（识别到有媒体播放即显示该岛，无媒体播放即隐藏不常驻）。
     pub music_auto_hide_when_idle: bool,
     /// 0 = 跟随基础皮肤，1..=18 = 18 套精选主题预设。
@@ -409,6 +414,7 @@ pub struct Config {
     pub mod_translate_enabled: bool,
     pub mod_display_brightness_enabled: bool,
     pub mod_bt_devices_enabled: bool,
+    pub mod_oppo_connect_enabled: bool,
     /// 是否开启后台定时自动检查更新，以及检查周期（小时）。
     pub auto_check_updates: bool,
     pub update_check_interval_hours: u32,
@@ -438,6 +444,40 @@ pub struct Config {
     pub fly_dot_sessions: bool,
     /// 无本机实时会话时是否展示 fly-island 演示会话以供预览
     pub fly_demo_sessions: bool,
+    // ---- Auralsle 灵屿音乐岛与验证码胶囊配置 ----
+    pub auralsle_music_layout: String,
+    pub auralsle_auto_compact_width: bool,
+    pub auralsle_compact_width: f32,
+    pub auralsle_compact_max_width: f32,
+    pub auralsle_lyric_font_size: f32,
+    pub auralsle_word_highlight: bool,
+    pub auralsle_compact_translation: bool,
+    pub auralsle_chinese_two_line: bool,
+    pub auralsle_show_translation: bool,
+    pub auralsle_translation_button: bool,
+    pub auralsle_color_source: String,
+    pub auralsle_dynamic_seed: String,
+    pub auralsle_capsule_dynamic_color: bool,
+    pub auralsle_expanded_dynamic_color: bool,
+    pub auralsle_lyric_cover_color: bool,
+    pub auralsle_cover_overlay: bool,
+    pub auralsle_text_color: String,
+    pub auralsle_component_color: String,
+    pub auralsle_lyric_progress_color: String,
+    pub auralsle_card_material: String,
+    pub auralsle_acrylic_frost: f32,
+    pub auralsle_acrylic_opacity: f32,
+    pub auralsle_bar_style: String,
+    pub auralsle_thumb_style: String,
+    pub auralsle_thumb_enabled: bool,
+    pub auralsle_thumb_spin: bool,
+    pub auralsle_transport_theme: String,
+    pub auralsle_music_glow: bool,
+    pub auralsle_music_glow_mode: String,
+    pub auralsle_click_open_player: bool,
+    pub auralsle_hover_tooltip: bool,
+    pub auralsle_custom_layout_json: String,
+    pub auralsle_otp_capsule: bool,
 }
 
 impl Default for Config {
@@ -491,7 +531,10 @@ impl Default for Config {
             border_plays_on: 0,
             border_interval: 0,
             liquid_glass_mode: 0,
-            music_ui_style: 5,
+            music_ui_style: 6,
+            music_show_ai_status: false,
+            lyric_island_time_capsule: true,
+            hide_nav_arrows: false,
             music_auto_hide_when_idle: false,
             win_theme: 0,
             custom_accent: "#0A84FF".to_owned(),
@@ -648,6 +691,7 @@ impl Default for Config {
             mod_translate_enabled: true,
             mod_display_brightness_enabled: true,
             mod_bt_devices_enabled: true,
+            mod_oppo_connect_enabled: true,
             auto_check_updates: true,
             update_check_interval_hours: 24,
             ai_island_scheme: 2,
@@ -663,6 +707,39 @@ impl Default for Config {
             fly_muse_sessions: true,
             fly_dot_sessions: true,
             fly_demo_sessions: false,
+            auralsle_music_layout: "SideBySide".to_owned(),
+            auralsle_auto_compact_width: true,
+            auralsle_compact_width: 260.0,
+            auralsle_compact_max_width: 420.0,
+            auralsle_lyric_font_size: 14.0,
+            auralsle_word_highlight: true,
+            auralsle_compact_translation: true,
+            auralsle_chinese_two_line: true,
+            auralsle_show_translation: true,
+            auralsle_translation_button: true,
+            auralsle_color_source: "Content".to_owned(),
+            auralsle_dynamic_seed: "#A9E6CD".to_owned(),
+            auralsle_capsule_dynamic_color: false,
+            auralsle_expanded_dynamic_color: true,
+            auralsle_lyric_cover_color: true,
+            auralsle_cover_overlay: true,
+            auralsle_text_color: "#F4F6F8".to_owned(),
+            auralsle_component_color: "#B1E8D1".to_owned(),
+            auralsle_lyric_progress_color: "#A9E6CD".to_owned(),
+            auralsle_card_material: "Acrylic".to_owned(),
+            auralsle_acrylic_frost: 40.0,
+            auralsle_acrylic_opacity: 60.0,
+            auralsle_bar_style: "Rounded".to_owned(),
+            auralsle_thumb_style: "Pill".to_owned(),
+            auralsle_thumb_enabled: false,
+            auralsle_thumb_spin: false,
+            auralsle_transport_theme: "Reef".to_owned(),
+            auralsle_music_glow: false,
+            auralsle_music_glow_mode: "Breath".to_owned(),
+            auralsle_click_open_player: false,
+            auralsle_hover_tooltip: true,
+            auralsle_custom_layout_json: String::new(),
+            auralsle_otp_capsule: true,
         }
     }
 }
@@ -834,8 +911,13 @@ impl Config {
             border_interval: i64_or(field(&v, "border_interval"), d.border_interval as i64).clamp(0, 3) as u8,
             liquid_glass_mode: i64_or(field(&v, "liquid_glass_mode"), d.liquid_glass_mode as i64).clamp(0, 1) as u8,
             music_ui_style: {
-                let raw = i64_or(field(&v, "music_ui_style"), d.music_ui_style as i64).clamp(0, 5) as u8;
-                if raw == 4 { 1 } else { raw }
+                if i64_or(field(&v, "v"), 1) < 3 {
+                    6
+                } else {
+                    let raw_val = i64_or(field(&v, "music_ui_style"), d.music_ui_style as i64).clamp(0, 6) as u8;
+                    let raw = if matches!(raw_val, 2 | 3) { 6 } else { raw_val };
+                    if raw == 4 { 1 } else { raw }
+                }
             },
             music_auto_hide_when_idle: bool_or(field(&v, "music_auto_hide_when_idle"), d.music_auto_hide_when_idle),
             win_theme: i64_or(field(&v, "win_theme"), d.win_theme as i64).clamp(0, 18) as u8,
@@ -996,6 +1078,9 @@ impl Config {
             custom_font_path: str_or(field(&v, "custom_font_path"), &d.custom_font_path),
             minimal_pill_msg_badge: bool_or(field(&v, "minimal_pill_msg_badge"), d.minimal_pill_msg_badge),
             pill_show_music: bool_or(field(&v, "pill_show_music"), d.pill_show_music),
+            music_show_ai_status: bool_or(field(&v, "music_show_ai_status"), d.music_show_ai_status),
+            lyric_island_time_capsule: bool_or(field(&v, "lyric_island_time_capsule"), d.lyric_island_time_capsule),
+            hide_nav_arrows: bool_or(field(&v, "hide_nav_arrows"), d.hide_nav_arrows),
             pill_show_focus: bool_or(field(&v, "pill_show_focus"), d.pill_show_focus),
             pill_show_quota: bool_or(field(&v, "pill_show_quota"), d.pill_show_quota),
             copy_auto_open_clipboard: bool_or(field(&v, "copy_auto_open_clipboard"), d.copy_auto_open_clipboard),
@@ -1127,6 +1212,7 @@ impl Config {
             mod_translate_enabled: bool_or(field(&v, "mod_translate_enabled"), bool_or(field(&v, "mod_weather_translate_enabled"), true)),
             mod_display_brightness_enabled: bool_or(field(&v, "mod_display_brightness_enabled"), bool_or(field(&v, "mod_display_bt_enabled"), true)),
             mod_bt_devices_enabled: bool_or(field(&v, "mod_bt_devices_enabled"), bool_or(field(&v, "mod_display_bt_enabled"), true)),
+            mod_oppo_connect_enabled: bool_or(field(&v, "mod_oppo_connect_enabled"), true),
             auto_check_updates: bool_or(field(&v, "auto_check_updates"), d.auto_check_updates),
             update_check_interval_hours: i64_or(field(&v, "update_check_interval_hours"), d.update_check_interval_hours as i64).clamp(1, 720) as u32,
             ai_island_scheme: i64_or(field(&v, "ai_island_scheme"), d.ai_island_scheme as i64).clamp(1, 2) as u8,
@@ -1142,6 +1228,39 @@ impl Config {
             fly_muse_sessions: bool_or(field(&v, "fly_muse_sessions"), d.fly_muse_sessions),
             fly_dot_sessions: bool_or(field(&v, "fly_dot_sessions"), d.fly_dot_sessions),
             fly_demo_sessions: false,
+            auralsle_music_layout: str_or(field(&v, "auralsle_music_layout"), &d.auralsle_music_layout),
+            auralsle_auto_compact_width: bool_or(field(&v, "auralsle_auto_compact_width"), d.auralsle_auto_compact_width),
+            auralsle_compact_width: f64_or(field(&v, "auralsle_compact_width"), d.auralsle_compact_width as f64).clamp(140.0, 480.0) as f32,
+            auralsle_compact_max_width: f64_or(field(&v, "auralsle_compact_max_width"), d.auralsle_compact_max_width as f64).clamp(140.0, 480.0) as f32,
+            auralsle_lyric_font_size: f64_or(field(&v, "auralsle_lyric_font_size"), d.auralsle_lyric_font_size as f64).clamp(11.0, 20.0) as f32,
+            auralsle_word_highlight: bool_or(field(&v, "auralsle_word_highlight"), d.auralsle_word_highlight),
+            auralsle_compact_translation: bool_or(field(&v, "auralsle_compact_translation"), d.auralsle_compact_translation),
+            auralsle_chinese_two_line: bool_or(field(&v, "auralsle_chinese_two_line"), d.auralsle_chinese_two_line),
+            auralsle_show_translation: bool_or(field(&v, "auralsle_show_translation"), d.auralsle_show_translation),
+            auralsle_translation_button: bool_or(field(&v, "auralsle_translation_button"), d.auralsle_translation_button),
+            auralsle_color_source: str_or(field(&v, "auralsle_color_source"), &d.auralsle_color_source),
+            auralsle_dynamic_seed: str_or(field(&v, "auralsle_dynamic_seed"), &d.auralsle_dynamic_seed),
+            auralsle_capsule_dynamic_color: bool_or(field(&v, "auralsle_capsule_dynamic_color"), d.auralsle_capsule_dynamic_color),
+            auralsle_expanded_dynamic_color: bool_or(field(&v, "auralsle_expanded_dynamic_color"), d.auralsle_expanded_dynamic_color),
+            auralsle_lyric_cover_color: bool_or(field(&v, "auralsle_lyric_cover_color"), d.auralsle_lyric_cover_color),
+            auralsle_cover_overlay: bool_or(field(&v, "auralsle_cover_overlay"), d.auralsle_cover_overlay),
+            auralsle_text_color: str_or(field(&v, "auralsle_text_color"), &d.auralsle_text_color),
+            auralsle_component_color: str_or(field(&v, "auralsle_component_color"), &d.auralsle_component_color),
+            auralsle_lyric_progress_color: str_or(field(&v, "auralsle_lyric_progress_color"), &d.auralsle_lyric_progress_color),
+            auralsle_card_material: str_or(field(&v, "auralsle_card_material"), &d.auralsle_card_material),
+            auralsle_acrylic_frost: f64_or(field(&v, "auralsle_acrylic_frost"), d.auralsle_acrylic_frost as f64).clamp(0.0, 100.0) as f32,
+            auralsle_acrylic_opacity: f64_or(field(&v, "auralsle_acrylic_opacity"), d.auralsle_acrylic_opacity as f64).clamp(0.0, 100.0) as f32,
+            auralsle_bar_style: str_or(field(&v, "auralsle_bar_style"), &d.auralsle_bar_style),
+            auralsle_thumb_style: str_or(field(&v, "auralsle_thumb_style"), &d.auralsle_thumb_style),
+            auralsle_thumb_enabled: bool_or(field(&v, "auralsle_thumb_enabled"), d.auralsle_thumb_enabled),
+            auralsle_thumb_spin: bool_or(field(&v, "auralsle_thumb_spin"), d.auralsle_thumb_spin),
+            auralsle_transport_theme: str_or(field(&v, "auralsle_transport_theme"), &d.auralsle_transport_theme),
+            auralsle_music_glow: bool_or(field(&v, "auralsle_music_glow"), d.auralsle_music_glow),
+            auralsle_music_glow_mode: str_or(field(&v, "auralsle_music_glow_mode"), &d.auralsle_music_glow_mode),
+            auralsle_click_open_player: bool_or(field(&v, "auralsle_click_open_player"), d.auralsle_click_open_player),
+            auralsle_hover_tooltip: bool_or(field(&v, "auralsle_hover_tooltip"), d.auralsle_hover_tooltip),
+            auralsle_custom_layout_json: str_or(field(&v, "auralsle_custom_layout_json"), &d.auralsle_custom_layout_json),
+            auralsle_otp_capsule: bool_or(field(&v, "auralsle_otp_capsule"), d.auralsle_otp_capsule),
         }
     }
 
@@ -1229,6 +1348,9 @@ impl Config {
             head.insert("custom_font_path".to_owned(), json!(self.custom_font_path));
             head.insert("minimal_pill_msg_badge".to_owned(), json!(self.minimal_pill_msg_badge));
             head.insert("pill_show_music".to_owned(), json!(self.pill_show_music));
+            head.insert("music_show_ai_status".to_owned(), json!(self.music_show_ai_status));
+            head.insert("lyric_island_time_capsule".to_owned(), json!(self.lyric_island_time_capsule));
+            head.insert("hide_nav_arrows".to_owned(), json!(self.hide_nav_arrows));
             head.insert("pill_show_focus".to_owned(), json!(self.pill_show_focus));
             head.insert("pill_show_quota".to_owned(), json!(self.pill_show_quota));
             head.insert("copy_auto_open_clipboard".to_owned(), json!(self.copy_auto_open_clipboard));
@@ -1312,6 +1434,7 @@ impl Config {
             head.insert("mod_translate_enabled".to_owned(), json!(self.mod_translate_enabled));
             head.insert("mod_display_brightness_enabled".to_owned(), json!(self.mod_display_brightness_enabled));
             head.insert("mod_bt_devices_enabled".to_owned(), json!(self.mod_bt_devices_enabled));
+            head.insert("mod_oppo_connect_enabled".to_owned(), json!(self.mod_oppo_connect_enabled));
             head.insert("auto_check_updates".to_owned(), json!(self.auto_check_updates));
             head.insert("update_check_interval_hours".to_owned(), json!(self.update_check_interval_hours));
             head.insert("ai_island_scheme".to_owned(), json!(self.ai_island_scheme));
@@ -1409,6 +1532,39 @@ impl Config {
             head.insert("weather_ui_mode".to_owned(), json!(self.weather_ui_mode));
             head.insert("messenger_mode".to_owned(), json!(self.messenger_mode));
             head.insert("quota_ui_mode".to_owned(), json!(self.quota_ui_mode));
+            head.insert("auralsle_music_layout".to_owned(), json!(self.auralsle_music_layout));
+            head.insert("auralsle_auto_compact_width".to_owned(), json!(self.auralsle_auto_compact_width));
+            head.insert("auralsle_compact_width".to_owned(), json!(self.auralsle_compact_width));
+            head.insert("auralsle_compact_max_width".to_owned(), json!(self.auralsle_compact_max_width));
+            head.insert("auralsle_lyric_font_size".to_owned(), json!(self.auralsle_lyric_font_size));
+            head.insert("auralsle_word_highlight".to_owned(), json!(self.auralsle_word_highlight));
+            head.insert("auralsle_compact_translation".to_owned(), json!(self.auralsle_compact_translation));
+            head.insert("auralsle_chinese_two_line".to_owned(), json!(self.auralsle_chinese_two_line));
+            head.insert("auralsle_show_translation".to_owned(), json!(self.auralsle_show_translation));
+            head.insert("auralsle_translation_button".to_owned(), json!(self.auralsle_translation_button));
+            head.insert("auralsle_color_source".to_owned(), json!(self.auralsle_color_source));
+            head.insert("auralsle_dynamic_seed".to_owned(), json!(self.auralsle_dynamic_seed));
+            head.insert("auralsle_capsule_dynamic_color".to_owned(), json!(self.auralsle_capsule_dynamic_color));
+            head.insert("auralsle_expanded_dynamic_color".to_owned(), json!(self.auralsle_expanded_dynamic_color));
+            head.insert("auralsle_lyric_cover_color".to_owned(), json!(self.auralsle_lyric_cover_color));
+            head.insert("auralsle_cover_overlay".to_owned(), json!(self.auralsle_cover_overlay));
+            head.insert("auralsle_text_color".to_owned(), json!(self.auralsle_text_color));
+            head.insert("auralsle_component_color".to_owned(), json!(self.auralsle_component_color));
+            head.insert("auralsle_lyric_progress_color".to_owned(), json!(self.auralsle_lyric_progress_color));
+            head.insert("auralsle_card_material".to_owned(), json!(self.auralsle_card_material));
+            head.insert("auralsle_acrylic_frost".to_owned(), json!(self.auralsle_acrylic_frost));
+            head.insert("auralsle_acrylic_opacity".to_owned(), json!(self.auralsle_acrylic_opacity));
+            head.insert("auralsle_bar_style".to_owned(), json!(self.auralsle_bar_style));
+            head.insert("auralsle_thumb_style".to_owned(), json!(self.auralsle_thumb_style));
+            head.insert("auralsle_thumb_enabled".to_owned(), json!(self.auralsle_thumb_enabled));
+            head.insert("auralsle_thumb_spin".to_owned(), json!(self.auralsle_thumb_spin));
+            head.insert("auralsle_transport_theme".to_owned(), json!(self.auralsle_transport_theme));
+            head.insert("auralsle_music_glow".to_owned(), json!(self.auralsle_music_glow));
+            head.insert("auralsle_music_glow_mode".to_owned(), json!(self.auralsle_music_glow_mode));
+            head.insert("auralsle_click_open_player".to_owned(), json!(self.auralsle_click_open_player));
+            head.insert("auralsle_hover_tooltip".to_owned(), json!(self.auralsle_hover_tooltip));
+            head.insert("auralsle_custom_layout_json".to_owned(), json!(self.auralsle_custom_layout_json));
+            head.insert("auralsle_otp_capsule".to_owned(), json!(self.auralsle_otp_capsule));
         }
         let path = config_path();
         if let Some(parent) = path.parent() {

@@ -13,7 +13,7 @@ use std::{
 
 pub const CONFIG_FILE: &str = "ai-status-mod.json";
 /// 配置结构版本：旧文件缺 `v` 时做一次性迁移。
-const CONFIG_VERSION: i64 = 2;
+const CONFIG_VERSION: i64 = 3;
 
 /// 课程卡「文字卡片」样式的默认行模板。
 pub const DEFAULT_COURSE_LAYOUT: &str = "{title}{time}\n{place}\n---\n{countdown} | {dnd}";
@@ -144,6 +144,11 @@ pub struct Config {
     pub liquid_glass_mode: u8,
     /// 音乐播放器样式切换：0 = 经典默认，1 = 灵动音律（封面流光 + 动态频谱 + 歌词同行）。
     pub music_ui_style: u8,
+    pub music_show_ai_status: bool,
+    /// 收起态歌词岛左侧是否独立显示时间胶囊（默认 true）。
+    pub lyric_island_time_capsule: bool,
+    /// 是否隐藏展开岛左右切页 `<` / `>` 按钮（默认 false）。
+    pub hide_nav_arrows: bool,
     /// 音乐岛无媒体播放时自动隐藏（识别到有媒体播放即显示该岛，无媒体播放即隐藏不常驻）。
     pub music_auto_hide_when_idle: bool,
     /// 0 = 跟随基础皮肤，1..=18 = 18 套精选主题预设。
@@ -265,6 +270,10 @@ pub struct Config {
     pub wechat_reveal_hotkey: String,
     /// 自动识别「OPPO 互联」通知并与电脑端微信去重（电脑登录微信时屏蔽 OPPO 互联重复微信通知）。
     pub oppo_wechat_dedup: bool,
+    /// 开启「OPPO 互联」手机通知日志镜像（读取 `ovmsocketlog.log` 提取来源 App 原始图标与富文本上岛）。
+    pub oppo_notify_mirror_enabled: bool,
+    /// 通过系统应用通知开关关闭 `com.oplus.devicespace` 自身弹窗，避免与灵屿镜像重复弹出。
+    pub oppo_suppress_native: bool,
     /// AI 翻译服务商（参考 NEKOparapa/AiNiee）：0=DeepSeek, 1=OpenAI, 2=硅基流动 SiliconFlow, 3=Gemini, 4=Claude, 5=本地 Ollama, 6=自定义接口。
     pub translate_ai_provider: u8,
     /// AI 翻译接口地址（OpenAI 兼容 /v1/chat/completions）。
@@ -295,6 +304,10 @@ pub struct Config {
     pub expanded_h_scale: u8,
     /// Wisland 特性：AgentAI 状态灯（通过生命周期钩子显示运行、完成或需审批状态灯）。
     pub agent_status_lamp: bool,
+    /// 主岛收起态同时展示的 AI 工作状态数量（1..=5）。
+    pub compact_max_count: u8,
+    /// 开机自启动方式：0 = 正常，1 = 优先自启动，2 = 滞后自启动。
+    pub autostart_mode: u8,
     /// Wisland 特性：Agent 想要执行命令或改文件时，在岛上直接允许、拒绝或交回终端（支持全局快捷键）。
     pub agent_hook_approval: bool,
     /// 天气界面方案选择：0=Breezy 街道级微风天气(v13开发版), 1=0.6.64 原版天气(七日预报+日照弧线)。
@@ -409,6 +422,7 @@ pub struct Config {
     pub mod_translate_enabled: bool,
     pub mod_display_brightness_enabled: bool,
     pub mod_bt_devices_enabled: bool,
+    pub mod_oppo_connect_enabled: bool,
     /// 是否开启后台定时自动检查更新，以及检查周期（小时）。
     pub auto_check_updates: bool,
     pub update_check_interval_hours: u32,
@@ -438,6 +452,45 @@ pub struct Config {
     pub fly_dot_sessions: bool,
     /// 无本机实时会话时是否展示 fly-island 演示会话以供预览
     pub fly_demo_sessions: bool,
+    // ---- Auralsle 灵屿音乐岛与验证码胶囊配置 ----
+    pub auralsle_music_layout: String,
+    pub auralsle_auto_compact_width: bool,
+    /// 收起态歌词岛自定义宽度（200..=440 px，全部样式生效）。
+    pub lyric_island_width: u16,
+    /// OPPO 互联拖拽传文件悬浮球独立开关（总开关在「功能模块 -> OPPO 互联适配」）。
+    pub oppo_drag_transfer_enabled: bool,
+    pub auralsle_compact_width: f32,
+    pub auralsle_compact_max_width: f32,
+    pub auralsle_lyric_font_size: f32,
+    pub auralsle_word_highlight: bool,
+    pub auralsle_compact_translation: bool,
+    pub auralsle_chinese_two_line: bool,
+    pub auralsle_show_translation: bool,
+    pub auralsle_translation_button: bool,
+    pub auralsle_color_source: String,
+    pub auralsle_dynamic_seed: String,
+    pub auralsle_capsule_dynamic_color: bool,
+    pub auralsle_expanded_dynamic_color: bool,
+    pub auralsle_lyric_cover_color: bool,
+    pub auralsle_cover_overlay: bool,
+    pub salt_flow_bg: bool,
+    pub auralsle_text_color: String,
+    pub auralsle_component_color: String,
+    pub auralsle_lyric_progress_color: String,
+    pub auralsle_card_material: String,
+    pub auralsle_acrylic_frost: f32,
+    pub auralsle_acrylic_opacity: f32,
+    pub auralsle_bar_style: String,
+    pub auralsle_thumb_style: String,
+    pub auralsle_thumb_enabled: bool,
+    pub auralsle_thumb_spin: bool,
+    pub auralsle_transport_theme: String,
+    pub auralsle_music_glow: bool,
+    pub auralsle_music_glow_mode: String,
+    pub auralsle_click_open_player: bool,
+    pub auralsle_hover_tooltip: bool,
+    pub auralsle_custom_layout_json: String,
+    pub auralsle_otp_capsule: bool,
 }
 
 impl Default for Config {
@@ -491,7 +544,10 @@ impl Default for Config {
             border_plays_on: 0,
             border_interval: 0,
             liquid_glass_mode: 0,
-            music_ui_style: 5,
+            music_ui_style: 6,
+            music_show_ai_status: false,
+            lyric_island_time_capsule: true,
+            hide_nav_arrows: false,
             music_auto_hide_when_idle: false,
             win_theme: 0,
             custom_accent: "#0A84FF".to_owned(),
@@ -560,6 +616,8 @@ impl Default for Config {
             wechat_fingerprint_lock: false,
             wechat_reveal_hotkey: "Alt+W".to_owned(),
             oppo_wechat_dedup: true,
+            oppo_notify_mirror_enabled: true,
+            oppo_suppress_native: true,
             translate_ai_provider: 0,
             translate_ai_base_url: "https://api.deepseek.com/v1/chat/completions".to_owned(),
             translate_ai_api_key: String::new(),
@@ -575,6 +633,8 @@ impl Default for Config {
             expanded_w_scale: 100,
             expanded_h_scale: 100,
             agent_status_lamp: true,
+            compact_max_count: 1,
+            autostart_mode: 0,
             agent_hook_approval: true,
             weather_ui_mode: 2,
             messenger_mode: 0,
@@ -648,6 +708,7 @@ impl Default for Config {
             mod_translate_enabled: true,
             mod_display_brightness_enabled: true,
             mod_bt_devices_enabled: true,
+            mod_oppo_connect_enabled: true,
             auto_check_updates: true,
             update_check_interval_hours: 24,
             ai_island_scheme: 2,
@@ -663,6 +724,42 @@ impl Default for Config {
             fly_muse_sessions: true,
             fly_dot_sessions: true,
             fly_demo_sessions: false,
+            auralsle_music_layout: "SideBySide".to_owned(),
+            auralsle_auto_compact_width: true,
+            lyric_island_width: 300,
+            oppo_drag_transfer_enabled: true,
+            auralsle_compact_width: 260.0,
+            auralsle_compact_max_width: 420.0,
+            auralsle_lyric_font_size: 14.0,
+            auralsle_word_highlight: true,
+            auralsle_compact_translation: true,
+            auralsle_chinese_two_line: true,
+            auralsle_show_translation: true,
+            auralsle_translation_button: true,
+            auralsle_color_source: "Content".to_owned(),
+            auralsle_dynamic_seed: "#A9E6CD".to_owned(),
+            auralsle_capsule_dynamic_color: false,
+            auralsle_expanded_dynamic_color: true,
+            auralsle_lyric_cover_color: true,
+            auralsle_cover_overlay: true,
+            salt_flow_bg: true,
+            auralsle_text_color: "#F4F6F8".to_owned(),
+            auralsle_component_color: "#B1E8D1".to_owned(),
+            auralsle_lyric_progress_color: "#A9E6CD".to_owned(),
+            auralsle_card_material: "Acrylic".to_owned(),
+            auralsle_acrylic_frost: 40.0,
+            auralsle_acrylic_opacity: 60.0,
+            auralsle_bar_style: "Rounded".to_owned(),
+            auralsle_thumb_style: "Pill".to_owned(),
+            auralsle_thumb_enabled: false,
+            auralsle_thumb_spin: false,
+            auralsle_transport_theme: "Reef".to_owned(),
+            auralsle_music_glow: false,
+            auralsle_music_glow_mode: "Breath".to_owned(),
+            auralsle_click_open_player: false,
+            auralsle_hover_tooltip: true,
+            auralsle_custom_layout_json: String::new(),
+            auralsle_otp_capsule: true,
         }
     }
 }
@@ -834,8 +931,13 @@ impl Config {
             border_interval: i64_or(field(&v, "border_interval"), d.border_interval as i64).clamp(0, 3) as u8,
             liquid_glass_mode: i64_or(field(&v, "liquid_glass_mode"), d.liquid_glass_mode as i64).clamp(0, 1) as u8,
             music_ui_style: {
-                let raw = i64_or(field(&v, "music_ui_style"), d.music_ui_style as i64).clamp(0, 5) as u8;
-                if raw == 4 { 1 } else { raw }
+                if i64_or(field(&v, "v"), 1) < 3 {
+                    6
+                } else {
+                    let raw_val = i64_or(field(&v, "music_ui_style"), d.music_ui_style as i64).clamp(0, 6) as u8;
+                    let raw = if matches!(raw_val, 2 | 3) { 6 } else { raw_val };
+                    if raw == 4 { 1 } else { raw }
+                }
             },
             music_auto_hide_when_idle: bool_or(field(&v, "music_auto_hide_when_idle"), d.music_auto_hide_when_idle),
             win_theme: i64_or(field(&v, "win_theme"), d.win_theme as i64).clamp(0, 18) as u8,
@@ -925,6 +1027,8 @@ impl Config {
             wechat_fingerprint_lock: bool_or(field(&v, "wechat_fingerprint_lock"), d.wechat_fingerprint_lock),
             wechat_reveal_hotkey: str_or(field(&v, "wechat_reveal_hotkey"), &d.wechat_reveal_hotkey),
             oppo_wechat_dedup: bool_or(field(&v, "oppo_wechat_dedup"), d.oppo_wechat_dedup),
+            oppo_notify_mirror_enabled: bool_or(field(&v, "oppo_notify_mirror_enabled"), d.oppo_notify_mirror_enabled),
+            oppo_suppress_native: bool_or(field(&v, "oppo_suppress_native"), d.oppo_suppress_native),
             translate_ai_provider: i64_or(field(&v, "translate_ai_provider"), d.translate_ai_provider as i64).clamp(0, 6) as u8,
             translate_ai_base_url: str_or(field(&v, "translate_ai_base_url"), &d.translate_ai_base_url),
             translate_ai_api_key: str_or(field(&v, "translate_ai_api_key"), &d.translate_ai_api_key),
@@ -963,6 +1067,8 @@ impl Config {
             expanded_w_scale: i64_or(field(&v, "expanded_w_scale"), d.expanded_w_scale as i64).clamp(80, 130) as u8,
             expanded_h_scale: i64_or(field(&v, "expanded_h_scale"), d.expanded_h_scale as i64).clamp(80, 135) as u8,
             agent_status_lamp: bool_or(field(&v, "agent_status_lamp"), d.agent_status_lamp),
+            compact_max_count: i64_or(field(&v, "compact_max_count"), d.compact_max_count as i64).clamp(1, 5) as u8,
+            autostart_mode: i64_or(field(&v, "autostart_mode"), d.autostart_mode as i64).clamp(0, 2) as u8,
             agent_hook_approval: bool_or(field(&v, "agent_hook_approval"), d.agent_hook_approval),
             weather_ui_mode: i64_or(field(&v, "weather_ui_mode"), d.weather_ui_mode as i64).clamp(0, 2) as u8,
             messenger_mode: i64_or(field(&v, "messenger_mode"), d.messenger_mode as i64).clamp(0, 1) as u8,
@@ -996,6 +1102,9 @@ impl Config {
             custom_font_path: str_or(field(&v, "custom_font_path"), &d.custom_font_path),
             minimal_pill_msg_badge: bool_or(field(&v, "minimal_pill_msg_badge"), d.minimal_pill_msg_badge),
             pill_show_music: bool_or(field(&v, "pill_show_music"), d.pill_show_music),
+            music_show_ai_status: bool_or(field(&v, "music_show_ai_status"), d.music_show_ai_status),
+            lyric_island_time_capsule: bool_or(field(&v, "lyric_island_time_capsule"), d.lyric_island_time_capsule),
+            hide_nav_arrows: bool_or(field(&v, "hide_nav_arrows"), d.hide_nav_arrows),
             pill_show_focus: bool_or(field(&v, "pill_show_focus"), d.pill_show_focus),
             pill_show_quota: bool_or(field(&v, "pill_show_quota"), d.pill_show_quota),
             copy_auto_open_clipboard: bool_or(field(&v, "copy_auto_open_clipboard"), d.copy_auto_open_clipboard),
@@ -1127,6 +1236,7 @@ impl Config {
             mod_translate_enabled: bool_or(field(&v, "mod_translate_enabled"), bool_or(field(&v, "mod_weather_translate_enabled"), true)),
             mod_display_brightness_enabled: bool_or(field(&v, "mod_display_brightness_enabled"), bool_or(field(&v, "mod_display_bt_enabled"), true)),
             mod_bt_devices_enabled: bool_or(field(&v, "mod_bt_devices_enabled"), bool_or(field(&v, "mod_display_bt_enabled"), true)),
+            mod_oppo_connect_enabled: bool_or(field(&v, "mod_oppo_connect_enabled"), true),
             auto_check_updates: bool_or(field(&v, "auto_check_updates"), d.auto_check_updates),
             update_check_interval_hours: i64_or(field(&v, "update_check_interval_hours"), d.update_check_interval_hours as i64).clamp(1, 720) as u32,
             ai_island_scheme: i64_or(field(&v, "ai_island_scheme"), d.ai_island_scheme as i64).clamp(1, 2) as u8,
@@ -1142,6 +1252,42 @@ impl Config {
             fly_muse_sessions: bool_or(field(&v, "fly_muse_sessions"), d.fly_muse_sessions),
             fly_dot_sessions: bool_or(field(&v, "fly_dot_sessions"), d.fly_dot_sessions),
             fly_demo_sessions: false,
+            auralsle_music_layout: str_or(field(&v, "auralsle_music_layout"), &d.auralsle_music_layout),
+            auralsle_auto_compact_width: bool_or(field(&v, "auralsle_auto_compact_width"), d.auralsle_auto_compact_width),
+            lyric_island_width: i64_or(field(&v, "lyric_island_width"), d.lyric_island_width as i64).clamp(200, 440) as u16,
+            oppo_drag_transfer_enabled: bool_or(field(&v, "oppo_drag_transfer_enabled"), d.oppo_drag_transfer_enabled),
+            auralsle_compact_width: f64_or(field(&v, "auralsle_compact_width"), d.auralsle_compact_width as f64).clamp(140.0, 480.0) as f32,
+            auralsle_compact_max_width: f64_or(field(&v, "auralsle_compact_max_width"), d.auralsle_compact_max_width as f64).clamp(140.0, 480.0) as f32,
+            auralsle_lyric_font_size: f64_or(field(&v, "auralsle_lyric_font_size"), d.auralsle_lyric_font_size as f64).clamp(11.0, 20.0) as f32,
+            auralsle_word_highlight: bool_or(field(&v, "auralsle_word_highlight"), d.auralsle_word_highlight),
+            auralsle_compact_translation: bool_or(field(&v, "auralsle_compact_translation"), d.auralsle_compact_translation),
+            auralsle_chinese_two_line: bool_or(field(&v, "auralsle_chinese_two_line"), d.auralsle_chinese_two_line),
+            auralsle_show_translation: bool_or(field(&v, "auralsle_show_translation"), d.auralsle_show_translation),
+            auralsle_translation_button: bool_or(field(&v, "auralsle_translation_button"), d.auralsle_translation_button),
+            auralsle_color_source: str_or(field(&v, "auralsle_color_source"), &d.auralsle_color_source),
+            auralsle_dynamic_seed: str_or(field(&v, "auralsle_dynamic_seed"), &d.auralsle_dynamic_seed),
+            auralsle_capsule_dynamic_color: bool_or(field(&v, "auralsle_capsule_dynamic_color"), d.auralsle_capsule_dynamic_color),
+            auralsle_expanded_dynamic_color: bool_or(field(&v, "auralsle_expanded_dynamic_color"), d.auralsle_expanded_dynamic_color),
+            auralsle_lyric_cover_color: bool_or(field(&v, "auralsle_lyric_cover_color"), d.auralsle_lyric_cover_color),
+            auralsle_cover_overlay: bool_or(field(&v, "auralsle_cover_overlay"), d.auralsle_cover_overlay),
+            salt_flow_bg: bool_or(field(&v, "salt_flow_bg"), d.salt_flow_bg),
+            auralsle_text_color: str_or(field(&v, "auralsle_text_color"), &d.auralsle_text_color),
+            auralsle_component_color: str_or(field(&v, "auralsle_component_color"), &d.auralsle_component_color),
+            auralsle_lyric_progress_color: str_or(field(&v, "auralsle_lyric_progress_color"), &d.auralsle_lyric_progress_color),
+            auralsle_card_material: str_or(field(&v, "auralsle_card_material"), &d.auralsle_card_material),
+            auralsle_acrylic_frost: f64_or(field(&v, "auralsle_acrylic_frost"), d.auralsle_acrylic_frost as f64).clamp(0.0, 100.0) as f32,
+            auralsle_acrylic_opacity: f64_or(field(&v, "auralsle_acrylic_opacity"), d.auralsle_acrylic_opacity as f64).clamp(0.0, 100.0) as f32,
+            auralsle_bar_style: str_or(field(&v, "auralsle_bar_style"), &d.auralsle_bar_style),
+            auralsle_thumb_style: str_or(field(&v, "auralsle_thumb_style"), &d.auralsle_thumb_style),
+            auralsle_thumb_enabled: bool_or(field(&v, "auralsle_thumb_enabled"), d.auralsle_thumb_enabled),
+            auralsle_thumb_spin: bool_or(field(&v, "auralsle_thumb_spin"), d.auralsle_thumb_spin),
+            auralsle_transport_theme: str_or(field(&v, "auralsle_transport_theme"), &d.auralsle_transport_theme),
+            auralsle_music_glow: bool_or(field(&v, "auralsle_music_glow"), d.auralsle_music_glow),
+            auralsle_music_glow_mode: str_or(field(&v, "auralsle_music_glow_mode"), &d.auralsle_music_glow_mode),
+            auralsle_click_open_player: bool_or(field(&v, "auralsle_click_open_player"), d.auralsle_click_open_player),
+            auralsle_hover_tooltip: bool_or(field(&v, "auralsle_hover_tooltip"), d.auralsle_hover_tooltip),
+            auralsle_custom_layout_json: str_or(field(&v, "auralsle_custom_layout_json"), &d.auralsle_custom_layout_json),
+            auralsle_otp_capsule: bool_or(field(&v, "auralsle_otp_capsule"), d.auralsle_otp_capsule),
         }
     }
 
@@ -1229,6 +1375,9 @@ impl Config {
             head.insert("custom_font_path".to_owned(), json!(self.custom_font_path));
             head.insert("minimal_pill_msg_badge".to_owned(), json!(self.minimal_pill_msg_badge));
             head.insert("pill_show_music".to_owned(), json!(self.pill_show_music));
+            head.insert("music_show_ai_status".to_owned(), json!(self.music_show_ai_status));
+            head.insert("lyric_island_time_capsule".to_owned(), json!(self.lyric_island_time_capsule));
+            head.insert("hide_nav_arrows".to_owned(), json!(self.hide_nav_arrows));
             head.insert("pill_show_focus".to_owned(), json!(self.pill_show_focus));
             head.insert("pill_show_quota".to_owned(), json!(self.pill_show_quota));
             head.insert("copy_auto_open_clipboard".to_owned(), json!(self.copy_auto_open_clipboard));
@@ -1312,6 +1461,7 @@ impl Config {
             head.insert("mod_translate_enabled".to_owned(), json!(self.mod_translate_enabled));
             head.insert("mod_display_brightness_enabled".to_owned(), json!(self.mod_display_brightness_enabled));
             head.insert("mod_bt_devices_enabled".to_owned(), json!(self.mod_bt_devices_enabled));
+            head.insert("mod_oppo_connect_enabled".to_owned(), json!(self.mod_oppo_connect_enabled));
             head.insert("auto_check_updates".to_owned(), json!(self.auto_check_updates));
             head.insert("update_check_interval_hours".to_owned(), json!(self.update_check_interval_hours));
             head.insert("ai_island_scheme".to_owned(), json!(self.ai_island_scheme));
@@ -1390,6 +1540,8 @@ impl Config {
             head.insert("wechat_fingerprint_lock".to_owned(), json!(self.wechat_fingerprint_lock));
             head.insert("wechat_reveal_hotkey".to_owned(), json!(self.wechat_reveal_hotkey));
             head.insert("oppo_wechat_dedup".to_owned(), json!(self.oppo_wechat_dedup));
+            head.insert("oppo_notify_mirror_enabled".to_owned(), json!(self.oppo_notify_mirror_enabled));
+            head.insert("oppo_suppress_native".to_owned(), json!(self.oppo_suppress_native));
             head.insert("translate_ai_provider".to_owned(), json!(self.translate_ai_provider));
             head.insert("translate_ai_base_url".to_owned(), json!(self.translate_ai_base_url));
             head.insert("translate_ai_api_key".to_owned(), json!(self.translate_ai_api_key));
@@ -1405,10 +1557,48 @@ impl Config {
             head.insert("expanded_w_scale".to_owned(), json!(self.expanded_w_scale));
             head.insert("expanded_h_scale".to_owned(), json!(self.expanded_h_scale));
             head.insert("agent_status_lamp".to_owned(), json!(self.agent_status_lamp));
+            head.insert("compact_max_count".to_owned(), json!(self.compact_max_count.clamp(1, 5)));
+            head.insert("autostart_mode".to_owned(), json!(self.autostart_mode.min(2)));
             head.insert("agent_hook_approval".to_owned(), json!(self.agent_hook_approval));
             head.insert("weather_ui_mode".to_owned(), json!(self.weather_ui_mode));
             head.insert("messenger_mode".to_owned(), json!(self.messenger_mode));
             head.insert("quota_ui_mode".to_owned(), json!(self.quota_ui_mode));
+            head.insert("auralsle_music_layout".to_owned(), json!(self.auralsle_music_layout));
+            head.insert("auralsle_auto_compact_width".to_owned(), json!(self.auralsle_auto_compact_width));
+            head.insert("lyric_island_width".to_owned(), json!(self.lyric_island_width.clamp(200, 440)));
+            head.insert("oppo_drag_transfer_enabled".to_owned(), json!(self.oppo_drag_transfer_enabled));
+            head.insert("auralsle_compact_width".to_owned(), json!(self.auralsle_compact_width));
+            head.insert("auralsle_compact_max_width".to_owned(), json!(self.auralsle_compact_max_width));
+            head.insert("auralsle_lyric_font_size".to_owned(), json!(self.auralsle_lyric_font_size));
+            head.insert("auralsle_word_highlight".to_owned(), json!(self.auralsle_word_highlight));
+            head.insert("auralsle_compact_translation".to_owned(), json!(self.auralsle_compact_translation));
+            head.insert("auralsle_chinese_two_line".to_owned(), json!(self.auralsle_chinese_two_line));
+            head.insert("auralsle_show_translation".to_owned(), json!(self.auralsle_show_translation));
+            head.insert("auralsle_translation_button".to_owned(), json!(self.auralsle_translation_button));
+            head.insert("auralsle_color_source".to_owned(), json!(self.auralsle_color_source));
+            head.insert("auralsle_dynamic_seed".to_owned(), json!(self.auralsle_dynamic_seed));
+            head.insert("auralsle_capsule_dynamic_color".to_owned(), json!(self.auralsle_capsule_dynamic_color));
+            head.insert("auralsle_expanded_dynamic_color".to_owned(), json!(self.auralsle_expanded_dynamic_color));
+            head.insert("auralsle_lyric_cover_color".to_owned(), json!(self.auralsle_lyric_cover_color));
+            head.insert("auralsle_cover_overlay".to_owned(), json!(self.auralsle_cover_overlay));
+            head.insert("salt_flow_bg".to_owned(), json!(self.salt_flow_bg));
+            head.insert("auralsle_text_color".to_owned(), json!(self.auralsle_text_color));
+            head.insert("auralsle_component_color".to_owned(), json!(self.auralsle_component_color));
+            head.insert("auralsle_lyric_progress_color".to_owned(), json!(self.auralsle_lyric_progress_color));
+            head.insert("auralsle_card_material".to_owned(), json!(self.auralsle_card_material));
+            head.insert("auralsle_acrylic_frost".to_owned(), json!(self.auralsle_acrylic_frost));
+            head.insert("auralsle_acrylic_opacity".to_owned(), json!(self.auralsle_acrylic_opacity));
+            head.insert("auralsle_bar_style".to_owned(), json!(self.auralsle_bar_style));
+            head.insert("auralsle_thumb_style".to_owned(), json!(self.auralsle_thumb_style));
+            head.insert("auralsle_thumb_enabled".to_owned(), json!(self.auralsle_thumb_enabled));
+            head.insert("auralsle_thumb_spin".to_owned(), json!(self.auralsle_thumb_spin));
+            head.insert("auralsle_transport_theme".to_owned(), json!(self.auralsle_transport_theme));
+            head.insert("auralsle_music_glow".to_owned(), json!(self.auralsle_music_glow));
+            head.insert("auralsle_music_glow_mode".to_owned(), json!(self.auralsle_music_glow_mode));
+            head.insert("auralsle_click_open_player".to_owned(), json!(self.auralsle_click_open_player));
+            head.insert("auralsle_hover_tooltip".to_owned(), json!(self.auralsle_hover_tooltip));
+            head.insert("auralsle_custom_layout_json".to_owned(), json!(self.auralsle_custom_layout_json));
+            head.insert("auralsle_otp_capsule".to_owned(), json!(self.auralsle_otp_capsule));
         }
         let path = config_path();
         if let Some(parent) = path.parent() {

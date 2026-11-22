@@ -35,7 +35,7 @@ fn cover_colors(title: &str) -> (Color32, Color32) {
     palette[(h % palette.len() as u64) as usize]
 }
 
-/// 绘制音乐岛高质感统一圆角胶囊播放/暂停按钮（修复悬浮云/毛玻璃主题下 hgrad 对角线分色伪影，双竖条采用圆润胶囊造型）。
+/// 绘制音乐岛播放/暂停按钮：统一应用全局「播放按钮主题」（礁石/涟漪/细砂/晨雾/琉璃/墨屿/双潮/留白/光环等 10 套主题）。
 fn paint_music_play_button(
     c: &Card,
     cx: f32,
@@ -50,25 +50,81 @@ fn paint_music_play_button(
 ) {
     let scale = 1.0 - 0.08 * press + 0.03 * hover;
     let p_card = c.scaled(cx, cy, scale);
-    let r = h * 0.5;
     let x = cx - w * 0.5;
     let y = cy - h * 0.5;
     let from = crate::skin_paint::shape_count(p_card.ui.ctx(), p_card.painter.layer_id());
-    p_card.fill(x, y, w, h, r, paint::alpha(accent, 0.28 + 0.14 * hover));
-    p_card.fill(x, y, w, h, r, Color32::from_white_alpha((30.0 + 18.0 * hover) as u8));
-    p_card.stroke(x, y, w, h, r, 0.9, Color32::from_white_alpha((58.0 + 26.0 * hover) as u8));
+    let cfg = crate::auralsle_ai_status::config::get();
+    let theme_tt = crate::auralsle_music::TransportTheme::from_setting(&cfg.auralsle_transport_theme);
+    let lum = 0.299 * (accent.r() as f32) + 0.587 * (accent.g() as f32) + 0.114 * (accent.b() as f32);
+    let on_accent = if lum > 148.0 { Color32::from_rgb(20, 26, 30) } else { Color32::WHITE };
+    let tonal = paint::mix(accent, Color32::from_rgb(32, 36, 44), 0.62);
+    let p_ink = crate::auralsle_music::draw_transport_button_surface(
+        &p_card,
+        4,
+        crate::auralsle_music::DRect::new(x, y, w, h),
+        theme_tt,
+        accent,
+        on_accent,
+        Color32::WHITE,
+        tonal,
+        paint::mix(accent, Color32::WHITE, 0.22),
+        1.0_f32.min(playing_t.max(0.0)),
+        hover,
+    );
     if playing_t >= 0.88 {
         let bar_w = (icon_sz * 0.25).clamp(2.6, 3.4);
         let bar_h = icon_sz.clamp(9.5, 13.0);
         let gap = (icon_sz * 0.26).clamp(2.8, 3.6);
         let br = bar_w * 0.48;
-        p_card.fill(cx - gap * 0.5 - bar_w, cy - bar_h * 0.5, bar_w, bar_h, br, Color32::WHITE);
-        p_card.fill(cx + gap * 0.5, cy - bar_h * 0.5, bar_w, bar_h, br, Color32::WHITE);
+        p_card.fill(cx - gap * 0.5 - bar_w, cy - bar_h * 0.5, bar_w, bar_h, br, p_ink);
+        p_card.fill(cx + gap * 0.5, cy - bar_h * 0.5, bar_w, bar_h, br, p_ink);
     } else {
-        paint::play_pause(&p_card, cx, cy, icon_sz, playing_t, Color32::WHITE);
+        paint::play_pause(&p_card, cx, cy, icon_sz, playing_t, p_ink);
     }
     if !cfg!(test) {
         crate::skin_paint::tone_since(p_card.ui.ctx(), p_card.painter.layer_id(), from, |col, _| col);
+    }
+}
+
+/// 统一绘制应用全局「进度条风格与游标」设置的音乐进度条（适用于所有音乐岛 UI 样式）。
+fn paint_themed_music_progress_bar(
+    c: &Card,
+    bx: f32,
+    by: f32,
+    bw: f32,
+    frac: f32,
+    fg: Color32,
+    playing: bool,
+    time_secs: f64,
+) {
+    let cfg = crate::auralsle_ai_status::config::get();
+    let bar_style = crate::auralsle_music::BarStyle::from_setting(&cfg.auralsle_bar_style);
+    let thumb_style = if cfg.auralsle_thumb_enabled {
+        crate::auralsle_music::ThumbStyle::from_setting(&cfg.auralsle_thumb_style)
+    } else {
+        crate::auralsle_music::ThumbStyle::None
+    };
+    let phase = if playing { ((time_secs * 0.85) % 1.0) as f32 } else { 0.0 };
+    let wave = if playing { 1.0 } else { 0.0 };
+    let spin = if playing && cfg.auralsle_thumb_spin { ((time_secs * 0.25) % 1.0) as f32 } else { 0.0 };
+    let from = crate::skin_paint::shape_count(c.ui.ctx(), c.painter.layer_id());
+    crate::auralsle_music::draw_progress_bar(
+        c,
+        crate::auralsle_music::DRect::new(bx, by - 6.0, bw, 12.0),
+        frac,
+        phase,
+        0.52,
+        9.0,
+        wave,
+        spin,
+        fg,
+        Color32::from_white_alpha(32),
+        paint::alpha(fg, 0.72),
+        bar_style,
+        thumb_style,
+    );
+    if !cfg!(test) {
+        crate::skin_paint::tone_since(c.ui.ctx(), c.painter.layer_id(), from, |col, _| col);
     }
 }
 
@@ -267,7 +323,7 @@ impl App {
         let cur_local = self.cursor_local;
 
         let (accent_a, accent_b) = if has {
-            cover_colors(&np.title)
+            self.extract_artwork_colors()
         } else {
             (Color32::from_rgb(56, 189, 248), Color32::from_rgb(139, 92, 246))
         };
@@ -281,11 +337,7 @@ impl App {
         // 2) 左舱（优化图四 `image_aa0223.jpg` 专辑图与左下布局）：
         // 80×80 高清圆角专辑封面 + 右侧微露黑胶唱盘边缘 + 下方配套「♪ 岛词」状态胶囊，使左舱与右舱底部 (y=127) 严格齐平！
         let (art_x, art_y, art_s) = (38.0, 20.0, 78.0);
-        // 专辑图右侧微露 6px 动态黑胶纹理边，增强音乐层次感
-        let vinyl_cx = art_x + art_s - 22.0 + 4.0 * playing_t;
-        let vinyl_cy = art_y + art_s * 0.5;
-        c.circle(vinyl_cx, vinyl_cy, 31.0, Color32::from_rgb(16, 18, 24));
-        c.ring(vinyl_cx, vinyl_cy, 27.5, 0.7, paint::alpha(accent_a, 0.35));
+        // 已移除右侧微露黑胶边，避免与右侧信息舱左缘及歌名重叠
         if let Some((image, texture)) = &self.music_artwork {
             let [w, h] = image.size;
             let (uw, vh) = if w > h { (h as f32 / w as f32, 1.0) } else { (1.0, w as f32 / h as f32) };
@@ -298,6 +350,9 @@ impl App {
             let cc = c.clipped(art_x, art_y, art_s, art_s);
             cc.vgrad(art_x, art_y, art_s, art_s, 14.0, accent_a, accent_b);
             paint::note(&cc, art_x + art_s * 0.5, art_y + art_s * 0.5, art_s * 0.38, Color32::from_white_alpha(240));
+        }
+        if has && !cfg!(test) && c.hit(art_x, art_y, art_s, art_s, "eisland-art-open").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("点击跳转到音乐软件").clicked() {
+            crate::auralsle_music::focus_player_source(&np.source);
         }
         // 封面左下配套「♪ 岛词」微胶囊 (x=38, y=104, w=78, h=22)，与右侧播控坞等高对齐
         let il_on = self.settings.island_lyrics;
@@ -389,12 +444,8 @@ impl App {
         let frac = if np.duration > 0.0 { (position / np.duration).clamp(0.0, 1.0) as f32 } else { 0.0 };
         let (bh, bpress) = c.hover_t(&bar);
         let th = lerp(4.2, 6.2, if has { bh.max(bpress) } else { 0.0 });
-        c.fill(bx, by - th * 0.5, bw, th, th * 0.5, Color32::from_white_alpha(26));
-        if frac > 0.0 {
-            let prog_w = (bw * frac).max(th);
-            c.fill(bx, by - th * 0.5, prog_w, th, th * 0.5, mix(accent_a, accent_b, 0.35));
-            c.circle(bx + prog_w, by, lerp(4.0, 5.6, bh.max(bpress)), Color32::WHITE);
-        }
+        let _ = (bh, bpress, th);
+        paint_themed_music_progress_bar(c, bx, by, bw, frac, mix(accent_a, accent_b, 0.35), np.playing, self.t);
         if bar.clicked() || bar.drag_stopped() {
             if let Some(pos) = seek_position {
                 cmds.push(Cmd::Media(Transport::Seek(pos)));
@@ -415,7 +466,7 @@ impl App {
         let lyr_r = c.hit(126.0, y - 11.0, 32.0, 22.0, "m-lyr-ei");
         let (lh, _) = c.hover_t(&lyr_r);
         if lh > 0.01 {
-            c.fill(128.0, y - 8.5, 28.0, 17.0, 8.5, Color32::from_white_alpha(20));
+            c.fill(128.0, y - 8.5, 28.0, 17.0, 8.5, crate::auralsle_music::music_pause_pill_fill(accent_a, lh, false));
         }
         c.text(142.0, y + 3.6, "歌词", 8.2, W::Semibold, if self.ly.lyrics.is_some() { mix(accent_a, Color32::WHITE, 0.5) } else { theme::GRAY }, H::Center);
         if lyr_r.on_hover_text("点击重新匹配同步当前歌曲歌词").clicked() && has {
@@ -427,7 +478,7 @@ impl App {
         let prev_r = c.hit(176.0, y - 11.5, 36.0, 23.0, "m-prev-ei");
         let (ph, pp) = c.hover_t(&prev_r);
         let pmag = crate::auralsle_ai_status::ui::magnet_offset(cur_local, Pos2::new(194.0, y), 24.0, 2.8);
-        if ph > 0.01 { c.faded(ph).circle(194.0 + pmag.x, y + pmag.y, 10.0, Color32::from_white_alpha(22)); }
+        if ph > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(ph), 194.0 + pmag.x, y + pmag.y, 10.0, accent_a, ph, false); }
         paint::skip(&c.scaled(194.0 + pmag.x, y + pmag.y, 1.0 - 0.1 * pp), 194.0 + pmag.x, y + pmag.y, -1.0, ic);
 
         let play_resp = c.hit(216.0, y - 11.5, 52.0, 23.0, "m-play-ei");
@@ -438,7 +489,7 @@ impl App {
         let next_r = c.hit(272.0, y - 11.5, 36.0, 23.0, "m-next-ei");
         let (nh, np_p) = c.hover_t(&next_r);
         let nmag = crate::auralsle_ai_status::ui::magnet_offset(cur_local, Pos2::new(290.0, y), 24.0, 2.8);
-        if nh > 0.01 { c.faded(nh).circle(290.0 + nmag.x, y + nmag.y, 10.0, Color32::from_white_alpha(22)); }
+        if nh > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(nh), 290.0 + nmag.x, y + nmag.y, 10.0, accent_a, nh, false); }
         paint::skip(&c.scaled(290.0 + nmag.x, y + nmag.y, 1.0 - 0.1 * np_p), 290.0 + nmag.x, y + nmag.y, 1.0, ic);
 
         if has {
@@ -450,7 +501,7 @@ impl App {
         // 播控坞右端：内嵌音量喇叭与百分比 (x = 334..376)
         let vol_r = c.hit(332.0, y - 11.5, 44.0, 23.0, "m-vol-ei");
         let (vh, vp) = c.hover_t(&vol_r);
-        if vh > 0.01 { c.fill(334.0, y - 8.5, 40.0, 17.0, 8.5, Color32::from_white_alpha(20)); }
+        if vh > 0.01 { c.fill(334.0, y - 8.5, 40.0, 17.0, 8.5, crate::auralsle_music::music_pause_pill_fill(accent_a, vh, false)); }
         let (volume, muted) = self.music_volume_ui.unwrap_or((100, false));
         paint::speaker(&c.scaled(346.0, y, 1.0 - 0.08 * vp), 346.0, y, muted, ic);
         c.text(364.0, y + 3.4, &format!("{volume}%"), 7.6, W::Semibold, Color32::from_gray(205), H::Center);
@@ -467,6 +518,7 @@ impl App {
 
     /// 音乐岛样式 2：黑胶唱片机 (Vinyl Studio Deck) — 修复图四：
     /// 取消外部方框遮罩与粗白圈，直接绘制与原白色圆同等大小（直径 52px，半径 26px）的大圆形专辑图 + 唱臂 + 旋律电平表 + 精简底部播控
+    #[allow(dead_code)]
     fn page_music_vinyl(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
         let np = self.media.clone();
         let has = !np.title.is_empty();
@@ -566,20 +618,18 @@ impl App {
         let prev_r = c.hit(134.0, y - 12.0, 36.0, 24.0, "m-prev-vn");
         let (ph, pp) = c.hover_t(&prev_r);
         let pmag = crate::auralsle_ai_status::ui::magnet_offset(cur_local, Pos2::new(152.0, y), 24.0, 3.0);
-        if ph > 0.01 { c.faded(ph).circle(152.0 + pmag.x, y + pmag.y, 10.5, Color32::from_white_alpha(22)); }
+        if ph > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(ph), 152.0 + pmag.x, y + pmag.y, 10.5, accent_a, ph, false); }
         paint::skip(&c.scaled(152.0 + pmag.x, y + pmag.y, 1.0 - 0.1 * pp), 152.0 + pmag.x, y + pmag.y, -1.0, ic);
 
         let play_r = c.hit(180.0, y - 12.0, 58.0, 24.0, "m-play-vn");
         let (play_hov, play_press) = c.hover_t(&play_r);
         let c_mag = crate::auralsle_ai_status::ui::magnet_offset(cur_local, Pos2::new(209.0, y), 26.0, 2.8);
-        let play_card = c.scaled(209.0 + c_mag.x, y + c_mag.y, 1.0 - 0.08 * play_press);
-        play_card.fill(183.0 + c_mag.x, y - 10.0 + c_mag.y, 52.0, 20.0, 10.0, mix(accent_a, accent_b, 0.35 + 0.25 * play_hov));
-        paint::play_pause(&play_card, 209.5 + c_mag.x, y + c_mag.y, 12.5, playing_t, Color32::WHITE);
+        paint_music_play_button(c, 209.0 + c_mag.x, y + c_mag.y, 52.0, 20.0, play_hov, play_press, playing_t, accent_a, 12.5);
 
         let next_r = c.hit(248.0, y - 12.0, 36.0, 24.0, "m-next-vn");
         let (nh, np_p) = c.hover_t(&next_r);
         let nmag = crate::auralsle_ai_status::ui::magnet_offset(cur_local, Pos2::new(266.0, y), 24.0, 3.0);
-        if nh > 0.01 { c.faded(nh).circle(266.0 + nmag.x, y + nmag.y, 10.5, Color32::from_white_alpha(22)); }
+        if nh > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(nh), 266.0 + nmag.x, y + nmag.y, 10.5, accent_a, nh, false); }
         paint::skip(&c.scaled(266.0 + nmag.x, y + nmag.y, 1.0 - 0.1 * np_p), 266.0 + nmag.x, y + nmag.y, 1.0, ic);
 
         if has {
@@ -590,7 +640,7 @@ impl App {
 
         let vol_r = c.hit(355.0, y - 11.0, 24.0, 22.0, "m-vol-vn");
         let (vh, vp) = c.hover_t(&vol_r);
-        if vh > 0.01 { c.faded(vh).circle(367.0, y, 10.5, Color32::from_white_alpha(22)); }
+        if vh > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(vh), 367.0, y, 10.5, accent_a, vh, false); }
         let (_volume, muted) = self.music_volume_ui.unwrap_or((100, false));
         paint::speaker(&c.scaled(367.0, y, 1.0 - 0.08 * vp), 367.0, y, muted, ic);
         if vol_r.clicked() && self.music_volume_ui.is_some() {
@@ -599,6 +649,7 @@ impl App {
     }
 
     /// 音乐岛样式 3：全宽旋律声波画布 (Studio Waveform) — 居中大歌词 + 贯穿式 28 柱跟随音乐旋律动态声波进度条
+    #[allow(dead_code)]
     fn page_music_waveform(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
         let np = self.media.clone();
         let has = !np.title.is_empty();
@@ -623,6 +674,9 @@ impl App {
         } else {
             c.fill(art_x, art_y, art_s, art_s, 7.0, accent_a);
             paint::note(c, art_x + 14.0, art_y + 14.0, 12.0, Color32::WHITE);
+        }
+        if has && !cfg!(test) && c.hit(art_x, art_y, art_s, art_s, "waveform-art-open").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("点击跳转到音乐软件").clicked() {
+            crate::auralsle_music::focus_player_source(&np.source);
         }
         let header_title = if has {
             if np.artist.is_empty() {
@@ -679,22 +733,28 @@ impl App {
         let rem = if has && np.duration <= 0.0 { "--:--".into() } else { format!("-{}", mmss((np.duration - position).max(0.0))) };
         c.text(375.0, y + 4.0, &rem, 9.2, W::Semibold, theme::GRAY, H::Right);
 
-        if c.hit(148.0, y - 12.0, 28.0, 24.0, "m-prev-wf").clicked() && has {
+        let prev_r = c.hit(148.0, y - 12.0, 28.0, 24.0, "m-prev-wf");
+        let (ph, pp) = c.hover_t(&prev_r);
+        if ph > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(ph), 162.0, y, 10.5, accent_a, ph, false); }
+        if prev_r.clicked() && has {
             cmds.push(Cmd::Media(Transport::Prev));
         }
-        paint::skip(c, 162.0, y, -1.0, ic);
+        paint::skip(&c.scaled(162.0, y, 1.0 - 0.08 * pp), 162.0, y, -1.0, ic);
 
         let play_r = c.hit(190.0, y - 13.0, 40.0, 26.0, "m-play-wf");
-        c.fill(191.0, y - 11.0, 38.0, 22.0, 11.0, mix(accent_a, accent_b, 0.4));
-        paint::play_pause(c, 210.0, y, 13.0, playing_t, Color32::WHITE);
+        let (p_hov, p_press) = c.hover_t(&play_r);
+        paint_music_play_button(c, 210.0, y, 38.0, 22.0, p_hov, p_press, playing_t, accent_a, 12.5);
         if play_r.clicked() && has {
             cmds.push(Cmd::Media(Transport::Toggle));
         }
 
-        if c.hit(244.0, y - 12.0, 28.0, 24.0, "m-next-wf").clicked() && has {
+        let next_r = c.hit(244.0, y - 12.0, 28.0, 24.0, "m-next-wf");
+        let (nh, np_p) = c.hover_t(&next_r);
+        if nh > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(nh), 258.0, y, 10.5, accent_a, nh, false); }
+        if next_r.clicked() && has {
             cmds.push(Cmd::Media(Transport::Next));
         }
-        paint::skip(c, 258.0, y, 1.0, ic);
+        paint::skip(&c.scaled(258.0, y, 1.0 - 0.08 * np_p), 258.0, y, 1.0, ic);
     }
 
     /// 音乐岛样式 4：Fly流光卡（移植自 flyl1u/fly-island 流光极光媒体卡片，全新流光渲染架构）：
@@ -710,21 +770,11 @@ impl App {
         if np.playing {
             ctx.request_repaint();
         }
-        let (mut accent_a, mut accent_b) = if has {
-            cover_colors(&np.title)
+        let (accent_a, accent_b) = if has {
+            self.extract_artwork_colors()
         } else {
             (Color32::from_rgb(56, 189, 248), Color32::from_rgb(168, 85, 247))
         };
-        // 若有真实专辑封面像素，采样封面左上与右下代表色增强流光氛围
-        if let Some((img, _)) = &self.music_artwork {
-            let [w, h] = img.size;
-            if w > 4 && h > 4 {
-                let p1 = img.pixels[(h / 4) * w + (w / 4)];
-                let p2 = img.pixels[(h * 3 / 4) * w + (w * 3 / 4)];
-                accent_a = mix(accent_a, Color32::from_rgb(p1.r(), p1.g(), p1.b()), 0.55);
-                accent_b = mix(accent_b, Color32::from_rgb(p2.r(), p2.g(), p2.b()), 0.55);
-            }
-        }
 
         let phase = (self.t as f32) * if np.playing { 1.65 } else { 0.35 };
         let (cx_card, cy_card, cw_card, ch_card, r_card) = (36.0_f32, 8.0_f32, 348.0_f32, 126.0_f32, 15.0_f32);
@@ -829,6 +879,9 @@ impl App {
             cc.vgrad(art_x, art_y, art_s, art_s, 11.0, accent_a, accent_b);
             paint::note(&cc, art_x + art_s * 0.5, art_y + art_s * 0.5, 21.0, Color32::WHITE);
         }
+        if has && !cfg!(test) && c.hit(art_x, art_y, art_s, art_s, "fly-art-open").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("点击跳转到音乐软件").clicked() {
+            crate::auralsle_music::focus_player_source(&np.source);
+        }
 
         // 4) 中上：歌名、歌手流光徽章 + 右上 16 柱旋律流光频谱矩阵
         let info_x = 112.0_f32;
@@ -910,10 +963,13 @@ impl App {
 
         c.fill(152.0, cy_ctrl - 12.5, 116.0, 25.0, 12.5, Color32::from_white_alpha(16));
         c.stroke(152.0, cy_ctrl - 12.5, 116.0, 25.0, 12.5, 0.8, Color32::from_white_alpha(28));
-        if c.hit(156.0, cy_ctrl - 12.0, 30.0, 24.0, "m-prev-fly").clicked() && has {
+        let prev_fly = c.hit(156.0, cy_ctrl - 12.0, 30.0, 24.0, "m-prev-fly");
+        let (pf_h, pf_p) = c.hover_t(&prev_fly);
+        if pf_h > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(pf_h), 171.0, cy_ctrl, 10.5, accent_a, pf_h, false); }
+        if prev_fly.clicked() && has {
             cmds.push(Cmd::Media(Transport::Prev));
         }
-        paint::skip(c, 171.0, cy_ctrl, -0.92, ic);
+        paint::skip(&c.scaled(171.0, cy_ctrl, 1.0 - 0.08 * pf_p), 171.0, cy_ctrl, -0.92, ic);
 
         let play_r = c.hit(192.0, cy_ctrl - 12.5, 36.0, 25.0, "m-play-fly");
         let (p_hov, p_press) = c.hover_t(&play_r);
@@ -922,10 +978,13 @@ impl App {
             cmds.push(Cmd::Media(Transport::Toggle));
         }
 
-        if c.hit(234.0, cy_ctrl - 12.0, 30.0, 24.0, "m-next-fly").clicked() && has {
+        let next_fly = c.hit(234.0, cy_ctrl - 12.0, 30.0, 24.0, "m-next-fly");
+        let (nf_h, nf_p) = c.hover_t(&next_fly);
+        if nf_h > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(nf_h), 249.0, cy_ctrl, 10.5, accent_a, nf_h, false); }
+        if next_fly.clicked() && has {
             cmds.push(Cmd::Media(Transport::Next));
         }
-        paint::skip(c, 249.0, cy_ctrl, 0.92, ic);
+        paint::skip(&c.scaled(249.0, cy_ctrl, 1.0 - 0.08 * nf_p), 249.0, cy_ctrl, 0.92, ic);
     }
 
     /// 音乐岛样式 5：Glance 灵动自适应音乐控件 (移植自 https://github.com/lulu-loopp/glance ，需求 7)：
@@ -1132,6 +1191,9 @@ impl App {
                 cc.vgrad(art_x, art_y, art_s, art_s, 10.5, accent_a, accent_b);
                 paint::note(&cc, art_x + art_s * 0.5, art_y + art_s * 0.5, 19.0, Color32::WHITE);
             }
+            if has && !cfg!(test) && c.hit(art_x, art_y, art_s, art_s, "glance-m0-art-open").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("点击跳转到音乐软件").clicked() {
+                crate::auralsle_music::focus_player_source(&np.source);
+            }
 
             let info_x = art_x + art_s + 10.0;
             let ctrl_w = 82.0_f32;
@@ -1154,17 +1216,23 @@ impl App {
             let ic = if has { theme::WHITE } else { Color32::from_gray(115) };
             c.fill(cx_ctrl - 37.0, cy_ctrl - 11.5, 76.0, 23.0, 11.5, Color32::from_rgba_unmultiplied(18, 20, 28, 210));
             c.stroke(cx_ctrl - 37.0, cy_ctrl - 11.5, 76.0, 23.0, 11.5, 0.8, Color32::from_white_alpha(24));
-            if c.hit(cx_ctrl - 35.0, cy_ctrl - 11.0, 22.0, 22.0, "gl-m0-prev").clicked() && has {
+            let prev_gl0 = c.hit(cx_ctrl - 35.0, cy_ctrl - 11.0, 22.0, 22.0, "gl-m0-prev");
+            let (p0h, p0p) = c.hover_t(&prev_gl0);
+            if p0h > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(p0h), cx_ctrl - 24.0, cy_ctrl, 9.5, accent_a, p0h, false); }
+            if prev_gl0.clicked() && has {
                 cmds.push(Cmd::Media(Transport::Prev));
             }
-            paint::skip(c, cx_ctrl - 24.0, cy_ctrl, -0.82, ic);
+            paint::skip(&c.scaled(cx_ctrl - 24.0, cy_ctrl, 1.0 - 0.08 * p0p), cx_ctrl - 24.0, cy_ctrl, -0.82, ic);
             let play_r = c.hit(cx_ctrl - 12.0, cy_ctrl - 11.0, 26.0, 22.0, "gl-m0-play");
             let (p_hov, p_press) = c.hover_t(&play_r);
             paint_music_play_button(c, cx_ctrl + 1.0, cy_ctrl, 24.0, 19.0, p_hov, p_press, playing_t, play_col_a, 10.2);
             if play_r.clicked() && has {
                 cmds.push(Cmd::Media(Transport::Toggle));
             }
-            if c.hit(cx_ctrl + 15.0, cy_ctrl - 11.0, 22.0, 22.0, "gl-m0-next").clicked() && has {
+            let next_gl0 = c.hit(cx_ctrl + 15.0, cy_ctrl - 11.0, 22.0, 22.0, "gl-m0-next");
+            let (n0h, n0p) = c.hover_t(&next_gl0);
+            if n0h > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(n0h), cx_ctrl + 26.0, cy_ctrl, 9.5, accent_a, n0h, false); }
+            if next_gl0.clicked() && has {
                 cmds.push(Cmd::Media(Transport::Next));
             }
             paint::skip(c, cx_ctrl + 26.0, cy_ctrl, 0.82, ic);
@@ -1211,6 +1279,9 @@ impl App {
                 paint::note(&cc, art_x + art_s * 0.5, art_y + art_s * 0.5, 28.0, Color32::WHITE);
             }
             c.stroke(art_x, art_y, art_s, art_s, 13.5, 0.8, Color32::from_white_alpha(26));
+            if has && !cfg!(test) && c.hit(art_x, art_y, art_s, art_s, "glance-m1-art-open").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("点击跳转到音乐软件").clicked() {
+                crate::auralsle_music::focus_player_source(&np.source);
+            }
 
             // 右栏 (rx = pad_l + 98.0 .. pad_r，总高 y = 20..108 = 88px，与左侧 88×88 专辑图上下边缘严格齐平！)
             let rx = art_x + art_s + 10.0;
@@ -1260,12 +1331,7 @@ impl App {
             c.text(pad_l, by + 3.4, &mmss(pos), 8.6, W::Semibold, Color32::from_gray(200), H::Left);
             let rem = if has && np.duration <= 0.0 { "--:--".into() } else { format!("-{}", mmss((np.duration - pos).max(0.0))) };
             c.text(pad_r, by + 3.4, &rem, 8.6, W::Semibold, Color32::from_gray(200), H::Right);
-            c.fill(bx, by - 2.0, bw, 4.0, 2.0, Color32::from_white_alpha(26));
-            if frac > 0.0 {
-                let pw = (bw * frac).max(4.0);
-                c.hgrad(bx, by - 2.0, pw, 4.0, 2.0, accent_a, accent_b);
-                c.circle(bx + pw, by, 4.0, Color32::WHITE);
-            }
+            paint_themed_music_progress_bar(c, bx, by, bw, frac, accent_a, np.playing, self.t);
             if (bar.clicked() || bar.drag_stopped()) && seek_pos.is_some() {
                 cmds.push(Cmd::Media(Transport::Seek(seek_pos.unwrap())));
             }
@@ -1276,20 +1342,26 @@ impl App {
             let ic = if has { theme::WHITE } else { Color32::from_gray(110) };
             c.fill(mid_x - 66.0, y_ctrl - 12.0, 132.0, 24.0, 12.0, Color32::from_rgba_unmultiplied(18, 20, 28, 205));
             c.stroke(mid_x - 66.0, y_ctrl - 12.0, 132.0, 24.0, 12.0, 0.8, Color32::from_white_alpha(24));
-            if c.hit(mid_x - 56.0, y_ctrl - 11.0, 28.0, 22.0, "gl-m1-prev").clicked() && has {
+            let prev_gl1 = c.hit(mid_x - 56.0, y_ctrl - 11.0, 28.0, 22.0, "gl-m1-prev");
+            let (p1h, p1p) = c.hover_t(&prev_gl1);
+            if p1h > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(p1h), mid_x - 42.0, y_ctrl, 10.0, accent_a, p1h, false); }
+            if prev_gl1.clicked() && has {
                 cmds.push(Cmd::Media(Transport::Prev));
             }
-            paint::skip(c, mid_x - 42.0, y_ctrl, -0.95, ic);
+            paint::skip(&c.scaled(mid_x - 42.0, y_ctrl, 1.0 - 0.08 * p1p), mid_x - 42.0, y_ctrl, -0.95, ic);
             let play_r = c.hit(mid_x - 21.0, y_ctrl - 12.0, 42.0, 24.0, "gl-m1-play");
             let (p_hov, p_press) = c.hover_t(&play_r);
             paint_music_play_button(c, mid_x, y_ctrl, 40.0, 19.6, p_hov, p_press, playing_t, play_col_a, 11.0);
             if play_r.clicked() && has {
                 cmds.push(Cmd::Media(Transport::Toggle));
             }
-            if c.hit(mid_x + 28.0, y_ctrl - 11.0, 28.0, 22.0, "gl-m1-next").clicked() && has {
+            let next_gl1 = c.hit(mid_x + 28.0, y_ctrl - 11.0, 28.0, 22.0, "gl-m1-next");
+            let (n1h, n1p) = c.hover_t(&next_gl1);
+            if n1h > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(n1h), mid_x + 42.0, y_ctrl, 10.0, accent_a, n1h, false); }
+            if next_gl1.clicked() && has {
                 cmds.push(Cmd::Media(Transport::Next));
             }
-            paint::skip(c, mid_x + 42.0, y_ctrl, 0.95, ic);
+            paint::skip(&c.scaled(mid_x + 42.0, y_ctrl, 1.0 - 0.08 * n1p), mid_x + 42.0, y_ctrl, 0.95, ic);
         } else {
             // ── 形态 2：Glance 黑胶频谱舞台（修复图8 `image_3d007d.jpg`：左侧黑胶与右栏歌名/歌手/歌词/22柱频谱全部严格对齐，进度条与内容区左右边界严丝合缝对齐！）──
             let outer_r = 42.0_f32;
@@ -1351,12 +1423,7 @@ impl App {
             c.text(pad_l, by + 3.4, &mmss(pos), 8.6, W::Semibold, Color32::from_gray(200), H::Left);
             let rem = if has && np.duration <= 0.0 { "--:--".into() } else { format!("-{}", mmss((np.duration - pos).max(0.0))) };
             c.text(pad_r, by + 3.4, &rem, 8.6, W::Semibold, Color32::from_gray(200), H::Right);
-            c.fill(bx, by - 2.0, bw, 4.0, 2.0, Color32::from_white_alpha(26));
-            if frac > 0.0 {
-                let pw = (bw * frac).max(4.0);
-                c.hgrad(bx, by - 2.0, pw, 4.0, 2.0, accent_a, accent_b);
-                c.circle(bx + pw, by, 4.0, Color32::WHITE);
-            }
+            paint_themed_music_progress_bar(c, bx, by, bw, frac, accent_a, np.playing, self.t);
             if (bar.clicked() || bar.drag_stopped()) && seek_pos.is_some() {
                 cmds.push(Cmd::Media(Transport::Seek(seek_pos.unwrap())));
             }
@@ -1367,20 +1434,26 @@ impl App {
             let ic = if has { theme::WHITE } else { Color32::from_gray(110) };
             c.fill(mid_x - 68.0, y_ctrl - 12.0, 136.0, 24.0, 12.0, Color32::from_rgba_unmultiplied(18, 20, 28, 210));
             c.stroke(mid_x - 68.0, y_ctrl - 12.0, 136.0, 24.0, 12.0, 0.85, Color32::from_white_alpha(26));
-            if c.hit(mid_x - 60.0, y_ctrl - 11.0, 28.0, 22.0, "gl-m2-prev").clicked() && has {
+            let prev_gl2 = c.hit(mid_x - 60.0, y_ctrl - 11.0, 28.0, 22.0, "gl-m2-prev");
+            let (p2h, p2p) = c.hover_t(&prev_gl2);
+            if p2h > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(p2h), mid_x - 46.0, y_ctrl, 10.0, accent_a, p2h, false); }
+            if prev_gl2.clicked() && has {
                 cmds.push(Cmd::Media(Transport::Prev));
             }
-            paint::skip(c, mid_x - 46.0, y_ctrl, -1.0, ic);
+            paint::skip(&c.scaled(mid_x - 46.0, y_ctrl, 1.0 - 0.08 * p2p), mid_x - 46.0, y_ctrl, -1.0, ic);
             let play_r = c.hit(mid_x - 22.0, y_ctrl - 12.0, 44.0, 24.0, "gl-m2-play");
             let (p_hov, p_press) = c.hover_t(&play_r);
             paint_music_play_button(c, mid_x, y_ctrl, 42.0, 19.6, p_hov, p_press, playing_t, play_col_a, 11.2);
             if play_r.clicked() && has {
                 cmds.push(Cmd::Media(Transport::Toggle));
             }
-            if c.hit(mid_x + 32.0, y_ctrl - 11.0, 28.0, 22.0, "gl-m2-next").clicked() && has {
+            let next_gl2 = c.hit(mid_x + 32.0, y_ctrl - 11.0, 28.0, 22.0, "gl-m2-next");
+            let (n2h, n2p) = c.hover_t(&next_gl2);
+            if n2h > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(n2h), mid_x + 46.0, y_ctrl, 10.0, accent_a, n2h, false); }
+            if next_gl2.clicked() && has {
                 cmds.push(Cmd::Media(Transport::Next));
             }
-            paint::skip(c, mid_x + 46.0, y_ctrl, 1.0, ic);
+            paint::skip(&c.scaled(mid_x + 46.0, y_ctrl, 1.0 - 0.08 * n2p), mid_x + 46.0, y_ctrl, 1.0, ic);
         }
     }
 
@@ -1402,6 +1475,14 @@ impl App {
         };
         if rotate_enabled && self.media.playing {
             c.ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+        }
+        if !self.media.title.trim().is_empty() && !cfg!(test)
+            && c.hit(cx - r, cy - r, r * 2.0, r * 2.0, "glance-m2-art-open")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("点击跳转到音乐软件")
+                .clicked()
+        {
+            crate::auralsle_music::focus_player_source(&self.media.source);
         }
         if let Some((image, texture)) = &self.music_artwork {
             let [w, h] = image.size;
@@ -1448,6 +1529,44 @@ impl App {
         }
     }
 
+    fn paint_music_ai_status_pill(&mut self, c: &Card) {
+        if cfg!(test) || !crate::auralsle_ai_status::config::get().music_show_ai_status {
+            return;
+        }
+        let Some(shown) = crate::auralsle_ai_status::shown() else {
+            return;
+        };
+        let phase_col = match shown.agent.phase {
+            crate::auralsle_ai_status::state::Phase::Waiting => Color32::from_rgb(251, 191, 36),
+            crate::auralsle_ai_status::state::Phase::Error => Color32::from_rgb(248, 113, 113),
+            crate::auralsle_ai_status::state::Phase::Done => Color32::from_rgb(52, 211, 153),
+            _ => Color32::from_rgb(56, 189, 248),
+        };
+        let phase_txt = match shown.agent.phase {
+            crate::auralsle_ai_status::state::Phase::Waiting => "等待确认",
+            crate::auralsle_ai_status::state::Phase::Error => "异常",
+            crate::auralsle_ai_status::state::Phase::Done => "已完成",
+            _ => "运行中",
+        };
+        let label = format!("{} · {}", shown.agent.name, phase_txt);
+        let txt = c.fit(&label, 8.6, W::Semibold, 118.0);
+        let tw = c.text_w(&txt, 8.6, W::Semibold);
+        let pw = tw + 22.0;
+        let px = if self.auralsle_music_island_active() { crate::app::PW - pw - 16.0 } else { 366.0 - pw };
+        let py = if self.auralsle_music_island_active() { 14.0 } else { 4.0 };
+        let hit = c.hit(px, py, pw, 18.0, "music-ai-status-pill").on_hover_cursor(egui::CursorIcon::PointingHand);
+        let from = crate::skin_paint::shape_count(c.ui.ctx(), c.painter.layer_id());
+        c.fill(px, py, pw, 18.0, 9.0, Color32::from_rgba_unmultiplied(18, 22, 30, 188));
+        c.stroke(px, py, pw, 18.0, 9.0, 0.8, paint::alpha(phase_col, 0.65));
+        c.circle(px + 9.0, py + 9.0, 2.8, phase_col);
+        c.text(px + 15.0, py + 12.2, &txt, 8.6, W::Semibold, theme::WHITE, H::Left);
+        crate::skin_paint::tone_since(c.ui.ctx(), c.painter.layer_id(), from, |col, _| col);
+        if hit.clicked() {
+            let target = if crate::auralsle_ai_status::config::get().ai_island_scheme == 2 { 6 } else { 8 };
+            self.show_page(target);
+        }
+    }
+
     pub(crate) fn page_music(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
         if !cfg!(test) {
             match crate::auralsle_ai_status::config::get().music_ui_style {
@@ -1455,16 +1574,12 @@ impl App {
                     self.page_music_eisland(c, _env, cmds);
                     return;
                 }
-                2 => {
-                    self.page_music_vinyl(c, _env, cmds);
-                    return;
-                }
-                3 => {
-                    self.page_music_waveform(c, _env, cmds);
-                    return;
-                }
                 5 => {
                     self.page_music_glance(c, _env, cmds);
+                    return;
+                }
+                2 | 3 | 6 => {
+                    self.page_music_auralsle(c, _env, cmds);
                     return;
                 }
                 _ => {}
@@ -1476,7 +1591,7 @@ impl App {
         let ctx=c.ui.ctx().clone();
         let playing_t=ctx.animate_bool_with_time(egui::Id::new("np-playing"),np.playing,0.22);
         let classic_tint_on = !cfg!(test) && crate::auralsle_ai_status::config::get().classic_music_cover_tint;
-        let (classic_acc_a, classic_acc_b) = if classic_tint_on && has {
+        let (classic_acc_a, classic_acc_b) = if has {
             self.extract_artwork_colors()
         } else {
             (theme::WHITE, theme::WHITE)
@@ -1501,6 +1616,9 @@ impl App {
         } else {
             c.fill(44.0,13.0,62.0,62.0,13.0,Color32::from_rgb(25,25,27));
             paint::note(c,75.0,44.0,26.0,Color32::from_rgb(110,110,114));
+        }
+        if has && !cfg!(test) && c.hit(44.0, art_y, art_size, art_size, "classic-art-open").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("点击跳转到音乐软件").clicked() {
+            crate::auralsle_music::focus_player_source(&np.source);
         }
 
         if !has {
@@ -1547,16 +1665,11 @@ impl App {
                 let pos=c.pos(head,by)-self.fluid_origin;
                 self.fluid.set_seek((has && frac>0.0).then_some((pos.x,pos.y)),hot);
             }
-        } else if classic_tint_on && has {
-            if frac > 0.0 {
-                let pw = (bw * frac).max(th);
-                c.hgrad(bx, by - th / 2.0, pw, th, th / 2.0, classic_acc_a, classic_acc_b);
-                c.glow(bx + pw, by, 7.5, paint::alpha(classic_acc_b, 0.55));
-                c.circle(bx + pw, by, lerp(3.6, 5.0, bh), Color32::WHITE);
-            }
+        } else if !cfg!(test) {
+            paint_themed_music_progress_bar(c, bx, by, bw, frac, classic_acc_a, np.playing, self.t);
         } else {
-        if frac>0.0 {c.fill(bx,by-th/2.0,(bw*frac).max(th),th,th/2.0,theme::WHITE);}
-        if bh>0.01 {c.faded(bh).circle(bx+bw*frac,by,4.5,theme::WHITE);}
+            if frac>0.0 {c.fill(bx,by-th/2.0,(bw*frac).max(th),th,th/2.0,theme::WHITE);}
+            if bh>0.01 {c.faded(bh).circle(bx+bw*frac,by,4.5,theme::WHITE);}
         }
         if bar.clicked() || bar.drag_stopped() {
             if let Some(position)=seek_position {
@@ -1576,7 +1689,7 @@ impl App {
             let response=c.hit(x-w/2.0,y-12.0,w,24.0,id);
             let (hover,pressed)=c.hover_t(&response);
             let mag = if cfg!(test) { egui::Vec2::ZERO } else { crate::auralsle_ai_status::ui::magnet_offset(cur_local, Pos2::new(x, y), 24.0, 3.2) };
-            if has && hover>0.01 {c.faded(hover).circle(x + mag.x, y + mag.y, 12.5, Color32::from_white_alpha(24));}
+            if has && hover>0.01 {crate::auralsle_music::paint_music_trigger_circle(&c.faded(hover), x + mag.x, y + mag.y, 12.5, classic_acc_a, hover, false);}
             (response,c.shifted(mag.x, mag.y).scaled(x,y,1.0-0.1*pressed))
         };
         let (lyrics_button,lyrics_card)=btn(74.0,26.0,"m-lyr");
@@ -1584,7 +1697,12 @@ impl App {
         let (previous,previous_card)=btn(162.0,30.0,"m-prev");
         paint::skip(&previous_card,162.0,y,-1.0,ic);
         let (play,play_card)=btn(210.5,30.0,"m-play");
-        paint::play_pause(&play_card,211.0,y,15.0,playing_t,ic);
+        if cfg!(test) {
+            paint::play_pause(&play_card,211.0,y,15.0,playing_t,ic);
+        } else {
+            let (p_hov, p_press) = c.hover_t(&play);
+            paint_music_play_button(c, 211.0, y, 30.0, 24.0, p_hov, p_press, playing_t, classic_acc_a, 13.0);
+        }
         let (next,next_card)=btn(258.0,30.0,"m-next");
         paint::skip(&next_card,258.0,y,1.0,ic);
         let (volume_button,volume_card)=btn(367.0,26.0,"m-volume");
@@ -1616,7 +1734,13 @@ impl App {
         }
         // 岛上歌词是横向的，只在顶部停靠时提供。
         if has && !self.side() {
-            let (button,button_card)=capsule(c,279.0,108.0,68.0,20.0,"m-island-lyrics",if self.settings.island_lyrics {Color32::from_gray(39)}else{Color32::from_gray(22)},Color32::from_gray(47));
+            let pill_rest = if self.settings.island_lyrics {
+                crate::auralsle_music::music_pause_pill_fill(classic_acc_a, 0.35, true)
+            } else {
+                crate::auralsle_music::music_pause_pill_fill(classic_acc_a, 0.0, true)
+            };
+            let pill_hov = crate::auralsle_music::music_pause_pill_fill(classic_acc_a, 1.0, true);
+            let (button,button_card)=capsule(c,279.0,108.0,68.0,20.0,"m-island-lyrics",pill_rest,pill_hov);
             button_card.text(313.0,122.0,"岛上歌词",10.0,W::Semibold,if self.settings.island_lyrics {theme::WHITE}else{theme::GRAY},H::Center);
             if button.on_hover_text(if self.settings.island_lyrics {"关闭收起时的歌词"}else{"收起时显示当前歌词"}).clicked() {
                 self.settings.island_lyrics=!self.settings.island_lyrics;
@@ -1632,6 +1756,308 @@ impl App {
         self.music_volume_ui=Some(next);
         self.music_volume_quiet_until=self.t+0.9;
         cmds.push(Cmd::MusicVolume(command,self.media.source.clone()));
+    }
+
+    /// Auralsle 灵屿音乐岛（完整复刻排版插值、自定义布局、封面磨砂取色、发光歌词、8 款进度条与 10 套播控主题）。
+    fn page_music_auralsle(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
+        use crate::auralsle_music::{self, BarStyle, CardInput, ThumbStyle, TransportTheme};
+
+        let ctx = c.ui.ctx().clone();
+        let cfg = crate::auralsle_ai_status::config::get();
+        let np = self.media.clone();
+        let has = !np.title.trim().is_empty();
+        let w = crate::app::PW;
+
+        let (geometry, custom_opt) = auralsle_music::active_geometry(&cfg, w, self.auralsle_music_mix);
+        let bar_style = custom_opt
+            .as_ref()
+            .map(|l| BarStyle::from_setting(&l.bar_style))
+            .unwrap_or_else(|| BarStyle::from_setting(&cfg.auralsle_bar_style));
+        let thumb_en = custom_opt
+            .as_ref()
+            .map(|l| l.thumb_enabled)
+            .unwrap_or(cfg.auralsle_thumb_enabled);
+        let thumb_style = if thumb_en {
+            custom_opt
+                .as_ref()
+                .map(|l| ThumbStyle::from_setting(&l.thumb_style))
+                .unwrap_or_else(|| ThumbStyle::from_setting(&cfg.auralsle_thumb_style))
+        } else {
+            ThumbStyle::None
+        };
+        let thumb_spin = custom_opt
+            .as_ref()
+            .map(|l| l.thumb_spin)
+            .unwrap_or(cfg.auralsle_thumb_spin);
+        let transport_theme = custom_opt
+            .as_ref()
+            .map(|l| TransportTheme::from_setting(&l.transport_theme))
+            .unwrap_or_else(|| TransportTheme::from_setting(&cfg.auralsle_transport_theme));
+
+        // 提取当前歌词、译文/下一句、逐字进度与换句平滑上浮 phase
+        let (cur_line, sec_line, highlight, line_idx) = if has && self.show_lyrics {
+            if let Some(lyrics) = &self.ly.lyrics {
+                if !lyrics.lines.is_empty() {
+                    let pos = self.lyric_position();
+                    let idx = if lyrics.synced {
+                        lyrics.index_at(pos).unwrap_or(0)
+                    } else {
+                        ((pos.max(0.0) / 4.0) as usize) % lyrics.lines.len()
+                    };
+                    let cur_s = lyrics
+                        .lines
+                        .get(idx)
+                        .map(|l| l.text.trim().to_owned())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "···".to_owned());
+                    let trans_s = if cfg.auralsle_show_translation {
+                        lyrics
+                            .lines
+                            .get(idx)
+                            .and_then(|l| l.translation.as_ref())
+                            .map(|s| s.trim().to_owned())
+                            .filter(|s| !s.is_empty())
+                    } else {
+                        None
+                    };
+                    let next_s = if cfg.auralsle_chinese_two_line {
+                        lyrics
+                            .lines
+                            .iter()
+                            .skip(idx + 1)
+                            .find(|l| !l.text.trim().is_empty())
+                            .map(|l| l.text.trim().to_owned())
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    let secondary = trans_s.unwrap_or(next_s);
+                    let cur_t0 = lyrics.lines.get(idx).map(|l| l.t).unwrap_or(0.0);
+                    let cur_t1 = lyrics
+                        .lines
+                        .get(idx + 1)
+                        .map(|l| l.t)
+                        .unwrap_or((cur_t0 + 3.5).max(np.duration as f32));
+                    let prog = if lyrics.synced {
+                        ((pos - cur_t0) / (cur_t1 - cur_t0).max(0.4)).clamp(0.0, 1.0)
+                    } else {
+                        0.88
+                    };
+                    (cur_s, secondary, prog, idx)
+                } else {
+                    ("等待歌词同步".to_owned(), String::new(), 1.0, 0)
+                }
+            } else {
+                ("正在匹配同步歌词…".to_owned(), String::new(), 1.0, 0)
+            }
+        } else if has {
+            ("歌词已关闭".to_owned(), "点击右下角设置或切换开启".to_owned(), 1.0, 0)
+        } else {
+            (String::new(), String::new(), 1.0, 0)
+        };
+
+        let age_id = egui::Id::new("auralsle-lyric-age-idx");
+        let age_t0_id = egui::Id::new("auralsle-lyric-age-t0");
+        let prev_idx = ctx.data(|d| d.get_temp::<usize>(age_id));
+        if prev_idx != Some(line_idx) {
+            ctx.data_mut(|d| {
+                d.insert_temp(age_id, line_idx);
+                d.insert_temp(age_t0_id, self.t);
+            });
+        }
+        let changed_at = ctx.data(|d| d.get_temp::<f64>(age_t0_id)).unwrap_or(self.t - 1.0);
+        let age_phase = ((self.t - changed_at).max(0.0) / 0.18).clamp(0.0, 1.0) as f32;
+
+        let pending_position = self
+            .music_seek_ui
+            .as_ref()
+            .filter(|(_, title)| *title == np.title)
+            .map(|(target, _)| *target);
+        let restart = self
+            .music_restart_at
+            .filter(|at| self.t < at + 1.5)
+            .map(|at| (self.t - at).max(0.0));
+        let position = pending_position.unwrap_or_else(|| match restart {
+            Some(fresh) if np.position > fresh + 1.0 => fresh,
+            _ => np.position,
+        });
+
+        let fallback_tint = if has {
+            Some(cover_colors(&np.title).0)
+        } else {
+            None
+        };
+
+        let live_h = self.h.pos.max(24.0);
+        let live_w = self.w.pos.max(w);
+        let base_r = if self.settings.island_shape == crate::model::IslandShape::Pill { 26.0 } else { 14.0 };
+        let card_radius = (live_w.min(live_h) * 0.5).min(base_r);
+        let events = auralsle_music::paint_auralsle_music_card(
+            c,
+            &cfg,
+            &mut self.auralsle_blur_cache,
+            &CardInput {
+                width: w,
+                surface_height: live_h,
+                card_radius,
+                time_secs: self.t,
+                title: &np.title,
+                artist: &np.artist,
+                has_track: has,
+                playing: np.playing,
+                position,
+                duration: np.duration,
+                lyric: &cur_line,
+                secondary: &sec_line,
+                highlight,
+                lyric_age_phase: age_phase,
+                artwork: self.music_artwork.as_ref(),
+                artwork_tint: fallback_tint,
+                volume_level: self.music_volume_ui,
+                liked: self.auralsle_music_liked,
+                shuffle_mode: self.auralsle_music_shuffle,
+                geometry,
+                bar_style,
+                thumb_style,
+                thumb_spin,
+                transport_theme,
+                allow_seek_and_buttons: true,
+                skip_surface: !cfg!(test),
+                id_salt: "auralsle-live-card",
+            },
+        );
+
+        if let Some(pos_seek) = events.seek_to {
+            if has && np.duration > 0.0 {
+                self.music_seek_ui = Some((pos_seek, np.title.clone()));
+                self.music_seek_quiet_until = self.t + 2.5;
+                cmds.push(Cmd::Media(Transport::Seek(pos_seek)));
+            }
+        }
+        if let Some(delta) = events.volume_wheel_delta {
+            if let Some((vol, _)) = self.music_volume_ui {
+                self.change_music_volume(
+                    Transport::SetVolume((vol as f32 + delta / 120.0 * 4.0).round().clamp(0.0, 100.0) as u32),
+                    cmds,
+                );
+            }
+        }
+        if events.header_clicked && has {
+            auralsle_music::focus_player_source(&np.source);
+        }
+        if let Some(bid) = events.clicked_button {
+            match bid {
+                2 => {
+                    self.auralsle_music_shuffle = self.auralsle_music_shuffle.wrapping_add(1) % 2;
+                    self.say(if self.auralsle_music_shuffle == 0 {
+                        "已切换：随机播放模式"
+                    } else {
+                        "已切换：顺序循环模式"
+                    });
+                }
+                9 => {
+                    self.auralsle_music_liked = !self.auralsle_music_liked;
+                    self.say(if self.auralsle_music_liked {
+                        "已标记喜欢"
+                    } else {
+                        "已取消喜欢"
+                    });
+                }
+                16 => {
+                    if self.music_volume_ui.is_some() {
+                        self.music_volume_open = !self.music_volume_open;
+                    } else {
+                        self.say("暂无可调节的音乐音频会话");
+                    }
+                }
+                3 if has => {
+                    self.music_restart_at = Some(self.t);
+                    self.music_seek_ui = None;
+                    cmds.push(Cmd::Media(Transport::Prev));
+                }
+                4 if has => {
+                    cmds.push(Cmd::Media(Transport::Toggle));
+                }
+                5 if has => {
+                    self.music_restart_at = Some(self.t);
+                    self.music_seek_ui = None;
+                    cmds.push(Cmd::Media(Transport::Next));
+                }
+                6 => {
+                    let next_tr = !cfg.auralsle_show_translation;
+                    crate::auralsle_ai_status::config::update(|c| c.auralsle_show_translation = next_tr);
+                }
+                7 => {
+                    self.settings_tab = 1;
+                    self.open_settings();
+                }
+                _ => {}
+            }
+        }
+
+        // 在 Auralsle 音量按钮上方弹出紧凑纵向音量条
+        if let Some((_, vol_r)) = geometry.buttons.iter().find(|(id, _)| *id == 16) {
+            if vol_r.w > 1.0 && self.music_volume_ui.is_some() {
+                let a = ctx.animate_bool_with_time(
+                    egui::Id::new("auralsle-music-vol-open"),
+                    self.music_volume_open,
+                    0.12,
+                );
+                let trigger = c.rect(vol_r.x, vol_r.y, vol_r.w, vol_r.h);
+                let pw = 42.0;
+                let ph = 98.0;
+                let px = (vol_r.x + vol_r.w * 0.5 - pw * 0.5).clamp(10.0, w - pw - 10.0);
+                let py = (vol_r.y - ph - 6.0).max(8.0);
+                let panel_rect = c.rect(px, py, pw, ph);
+                if self.music_volume_open
+                    && ctx.input(|i| {
+                        i.pointer.any_pressed()
+                            && i.pointer
+                                .interact_pos()
+                                .is_some_and(|p| !panel_rect.contains(p) && !trigger.contains(p))
+                    })
+                {
+                    self.music_volume_open = false;
+                }
+                if a > 0.01 {
+                    let (volume, muted) = self.music_volume_ui.unwrap_or((50, false));
+                    let popup = c.faded(a);
+                    let popup = if self.music_volume_open { popup } else { popup.ghost() };
+                    popup.hit(px, py, pw, ph, "auralsle-vol-surface");
+                    popup.fill(px, py, pw, ph, 12.0, Color32::from_rgba_unmultiplied(30, 35, 42, 242));
+                    popup.stroke(px, py, pw, ph, 12.0, 1.0, Color32::from_white_alpha(38));
+                    let tr_top = py + 24.0;
+                    let tr_h = 42.0;
+                    let track = popup.hit_drag(px + 6.0, tr_top - 4.0, pw - 12.0, tr_h + 8.0, "auralsle-vol-track");
+                    let mut cmd = None;
+                    if popup.live && (track.clicked() || track.dragged() || track.is_pointer_button_down_on()) {
+                        if let Some(pt) = track.interact_pointer_pos() {
+                            let ly = popup.to_local(pt).y;
+                            let pct = ((tr_top + tr_h - ly) / tr_h * 100.0).round().clamp(0.0, 100.0) as u32;
+                            cmd = Some(Transport::SetVolume(pct));
+                        }
+                    }
+                    let mute_btn = popup.hit(px + 6.0, py + ph - 24.0, pw - 12.0, 18.0, "auralsle-vol-mute");
+                    if popup.live && mute_btn.clicked() {
+                        cmd = Some(Transport::SetMute(!muted));
+                    }
+                    if let Some(command) = cmd {
+                        self.change_music_volume(command, cmds);
+                    }
+                    let (v_now, m_now) = self.music_volume_ui.unwrap_or((volume, muted));
+                    let ink = if m_now { theme::GRAY } else { Color32::from_rgb(152, 229, 194) };
+                    popup.centered_text(px + pw * 0.5, py + 12.0, &format!("{v_now}%"), 10.0, W::Semibold, theme::WHITE, H::Center);
+                    popup.fill(px + pw * 0.5 - 2.5, tr_top, 5.0, tr_h, 2.5, Color32::from_gray(68));
+                    let head_y = tr_top + tr_h * (1.0 - v_now as f32 / 100.0);
+                    if v_now > 0 {
+                        popup.fill(px + pw * 0.5 - 2.5, head_y, 5.0, (tr_top + tr_h - head_y).max(3.0), 2.5, ink);
+                    }
+                    popup.circle(px + pw * 0.5, head_y, if track.dragged() { 5.0 } else { 4.2 }, theme::WHITE);
+                    popup.fill(px + 6.0, py + ph - 24.0, pw - 12.0, 18.0, 6.0, Color32::from_white_alpha(20));
+                    popup.centered_text(px + pw * 0.5, py + ph - 15.0, if m_now { "恢复" } else { "静音" }, 9.0, W::Semibold, theme::WHITE, H::Center);
+                }
+            }
+        }
     }
 
     pub(crate) fn draw_music_volume(&mut self,c:&Card,cmds:&mut Vec<Cmd>){
@@ -2592,20 +3018,11 @@ impl App {
         Rect::from_min_max(Pos2::new(left,54.0),Pos2::new(380.0,bot))
     }
     pub(crate) fn page_mail(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
+        if !cfg!(test) {
+            self.draw_fly_message_island(c, cmds);
+            return;
+        }
         if self.mail.accounts.is_empty() {
-            if !cfg!(test) {
-                let msg_mode = crate::auralsle_ai_status::config::get().msg_island_filter;
-                if msg_mode < 10 {
-                    self.draw_fly_message_island(c, cmds);
-                    return;
-                }
-                let (sw_r, sw_b) = capsule(c, 316.0, 33.0, 64.0, 19.0, "fly-msg-hub-switch", theme::BTN, theme::BTN_HOVER);
-                sw_b.text(348.0, 46.2, "返回消息岛", 8.2, W::Semibold, Color32::from_rgb(110, 231, 183), H::Center);
-                if sw_r.clicked() {
-                    crate::auralsle_ai_status::config::update(|cfg| cfg.msg_island_filter = 0);
-                    return;
-                }
-            }
             c.text(42.0, 60.0, "还没有邮箱", 13.0, W::Bold, theme::WHITE, H::Left);
             let hint = c.fit("在设置 → 邮箱里添加；授权码只存进系统凭据管理器", 10.5, W::Regular, 344.0);
             c.text(42.0, 77.0, &hint, 10.5, W::Regular, theme::GRAY, H::Left);
@@ -2934,9 +3351,7 @@ impl App {
                 if selected { theme::WHITE } else { theme::GRAY },
                 H::Left,
             );
-            if src_id == 1 && cnt == 0 {
-                c.circle(tab_x + pill_w - 9.5, pill_y + 12.0, 2.5, Color32::from_rgb(74, 222, 128));
-            } else if cnt > 0 {
+            if cnt > 0 {
                 c.text(tab_x + pill_w - 7.5, pill_y + 16.0, &cnt.min(99).to_string(), 9.0, W::Semibold, theme::GRAY, H::Right);
             }
             if c.hit(tab_x, pill_y, pill_w, pill_h, ("fly-msg-tab", src_id)).clicked() {
@@ -2945,9 +3360,9 @@ impl App {
             tab_x += pill_w + 7.0;
         }
 
-        // 胶囊栏右侧：同行排列 `[排序]` + `[收件箱]` + `[🗑 清空]`，彻底消除图一右上角悬浮孤岛按钮！
-        let (ord_r, ord_b) = capsule(c, 256.0, 15.0, 34.0, 18.0, "fly-msg-order-btn", Color32::from_white_alpha(14), Color32::from_white_alpha(26));
-        ord_b.text(273.0, 27.5, "排序", 8.0, W::Semibold, theme::GRAY, H::Center);
+        // 胶囊栏右侧：同行排列 `[排序]` + `[🗑 清空]`（已移除旧版邮箱岛入口，全面统一使用消息岛）
+        let (ord_r, ord_b) = capsule(c, 292.0, 15.0, 36.0, 18.0, "fly-msg-order-btn", Color32::from_white_alpha(14), Color32::from_white_alpha(26));
+        ord_b.text(310.0, 27.5, "排序", 8.0, W::Semibold, theme::GRAY, H::Center);
         if ord_r.on_hover_text("切换 邮箱 / 微信 / QQ 选项卡顺序").clicked() {
             let next_order = match order {
                 [0, 1, 2] => [1, 2, 0],
@@ -2960,12 +3375,6 @@ impl App {
                 cfg.msg_hub_order = next_order;
                 cfg.msg_island_filter = next_order[0];
             });
-        }
-
-        let (ib_r, ib_b) = capsule(c, 293.0, 15.0, 36.0, 18.0, "fly-msg-classic-btn", Color32::from_white_alpha(14), Color32::from_white_alpha(26));
-        ib_b.text(311.0, 27.5, "收件箱", 8.0, W::Semibold, Color32::from_rgb(125, 211, 252), H::Center);
-        if ib_r.on_hover_text("切换至经典多账号邮件管理视图").clicked() {
-            crate::auralsle_ai_status::config::update(|cfg| cfg.msg_island_filter = 10);
         }
 
         let (clr_r, clr_b) = capsule(
@@ -3002,48 +3411,124 @@ impl App {
             }
         }
 
-        // 收集当前分栏的消息列表（带帧间缓存：仅当通知数/邮件数/当前分栏变化时重建，滑动列表时零正则/零字符串分配！）
-        type MsgRowTuple = (String, String, String, Option<crate::app::Unread>, Option<(String, u32)>);
-        static MSG_ROWS_CACHE: std::sync::OnceLock<std::sync::Mutex<((usize, usize, i64, usize, u32), Vec<MsgRowTuple>)>> = std::sync::OnceLock::new();
+        let slot_filter_id = egui::Id::new(("fly-msg-slot-filter", cur_src));
+        let mut slot_filter = if cur_src == 1 || cur_src == 2 {
+            ctx_msg.data(|d| d.get_temp::<u8>(slot_filter_id)).unwrap_or(0).min(2)
+        } else {
+            0
+        };
+        let mut list_top = 43.0_f32;
+        if cur_src == 1 || cur_src == 2 {
+            let mut main_cnt = 0usize;
+            let mut clone_cnt = 0usize;
+            for r in &self.notification_log.items {
+                let matched = if cur_src == 1 {
+                    r.app_name.contains("微信") || r.app_id.contains("wechat") || r.app_id.contains("weixin") || r.body.contains("微信")
+                } else {
+                    is_strict_qq_chat_record(r)
+                };
+                if matched {
+                    if is_clone_notification_record(r) {
+                        clone_cnt += 1;
+                    } else {
+                        main_cnt += 1;
+                    }
+                }
+            }
+            let total_cnt = main_cnt + clone_cnt;
+            let chips = [
+                (0u8, format!("全部({total_cnt})")),
+                (1u8, format!("主应用({main_cnt})")),
+                (2u8, format!("分身({clone_cnt})")),
+            ];
+            let mut sx = 40.0_f32;
+            for (fid, label) in chips {
+                let cw = (c.text_w(&label, 8.6, W::Semibold) + 14.0).clamp(44.0, 96.0);
+                let active = slot_filter == fid;
+                let hit = c.hit(sx, 41.5, cw, 16.0, ("fly-msg-slot-chip", cur_src, fid));
+                let bg = if active {
+                    if fid == 2 {
+                        Color32::from_rgba_unmultiplied(16, 185, 129, 64)
+                    } else {
+                        Color32::from_white_alpha(30)
+                    }
+                } else if hit.hovered() {
+                    Color32::from_white_alpha(18)
+                } else {
+                    Color32::from_white_alpha(9)
+                };
+                c.fill(sx, 41.5, cw, 16.0, 6.0, bg);
+                if active {
+                    let bcol = if fid == 2 {
+                        Color32::from_rgb(52, 211, 153)
+                    } else {
+                        crate::auralsle_ai_status::plugins::active_accent_color()
+                    };
+                    c.stroke(sx, 41.5, cw, 16.0, 6.0, 0.8, bcol.gamma_multiply(0.85));
+                }
+                let tcol = if active { theme::WHITE } else { theme::GRAY };
+                c.text(sx + cw * 0.5, 52.3, &label, 8.4, if active { W::Bold } else { W::Semibold }, tcol, H::Center);
+                if hit.clicked() && slot_filter != fid {
+                    slot_filter = fid;
+                    ctx_msg.data_mut(|d| d.insert_temp(slot_filter_id, fid));
+                }
+                sx += cw + 6.0;
+            }
+            list_top = 62.0;
+        }
+
+        // 收集当前分栏的消息列表（带帧间缓存：仅当通知数/邮件数/分栏/主分身筛选变化时重建，滑动列表时零分配！）
+        // Row: (title, body, time_str, unread_opt, mail_opt, slot_tag: Option<(&'static str, bool)>)
+        type MsgRowTuple = (String, String, String, Option<crate::app::Unread>, Option<(String, u32)>, Option<(&'static str, bool)>);
+        static MSG_ROWS_CACHE: std::sync::OnceLock<std::sync::Mutex<((usize, u8, usize, i64, usize, u32), Vec<MsgRowTuple>)>> = std::sync::OnceLock::new();
         let notif_len = self.notification_log.items.len();
         let last_notif_ts = self.notification_log.items.first().map(|r| r.at).unwrap_or(0);
         let mail_len = self.mail.recent.len();
         let last_mail_uid = self.mail.recent.first().map(|m| m.uid).unwrap_or(0);
-        let cache_key = (cur_src, notif_len, last_notif_ts, mail_len, last_mail_uid);
+        let cache_key = (cur_src, slot_filter, notif_len, last_notif_ts, mail_len, last_mail_uid);
         let rows: Vec<MsgRowTuple> = {
-            let mtx = MSG_ROWS_CACHE.get_or_init(|| std::sync::Mutex::new(((99, 0, 0, 0, 0), Vec::new())));
+            let mtx = MSG_ROWS_CACHE.get_or_init(|| std::sync::Mutex::new(((99, 0, 0, 0, 0, 0), Vec::new())));
             let mut guard = mtx.lock().unwrap();
             if guard.0 != cache_key {
                 let mut built: Vec<MsgRowTuple> = Vec::new();
                 if cur_src == 1 {
                     for r in &self.notification_log.items {
                         if r.app_name.contains("微信") || r.app_id.contains("wechat") || r.app_id.contains("weixin") || r.body.contains("微信") {
+                            let is_clone = is_clone_notification_record(r);
+                            if (slot_filter == 1 && is_clone) || (slot_filter == 2 && !is_clone) {
+                                continue;
+                            }
                             let t_str = chrono::DateTime::from_timestamp(r.at, 0)
                                 .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
                                 .unwrap_or_else(|| "刚刚".into());
-                            let title = if r.title.is_empty() || r.title == "微信" {
-                                r.body.split_once(':').or_else(|| r.body.split_once('：')).map(|(a, _)| a.trim().to_owned()).unwrap_or_else(|| "微信消息".into())
+                            let title = if r.title.is_empty() || r.title == "微信" || r.title == "微信分身" {
+                                r.body.split_once(':').or_else(|| r.body.split_once('：')).map(|(a, _)| a.trim().to_owned()).unwrap_or_else(|| if is_clone { "微信分身".into() } else { "微信消息".into() })
                             } else {
-                                r.title.clone()
+                                r.title.strip_prefix("微信 · ").map(str::to_owned).unwrap_or_else(|| r.title.clone())
                             };
                             let body = r.body.split_once(':').or_else(|| r.body.split_once('：')).map(|(_, b)| b.trim().to_owned()).unwrap_or_else(|| r.body.clone());
-                            built.push((title, body, t_str, Some(self.latest_unread(crate::app::Messenger::Wechat)), None));
+                            built.push((title, body, t_str, Some(self.latest_unread(crate::app::Messenger::Wechat)), None, notification_record_slot_tag(r)));
                         }
                     }
                 } else if cur_src == 2 {
                     for r in &self.notification_log.items {
                         if is_strict_qq_chat_record(r) {
+                            let is_clone = is_clone_notification_record(r);
+                            if (slot_filter == 1 && is_clone) || (slot_filter == 2 && !is_clone) {
+                                continue;
+                            }
                             let t_str = chrono::DateTime::from_timestamp(r.at, 0)
                                 .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
                                 .unwrap_or_else(|| "刚刚".into());
-                            built.push((r.title.clone(), r.body.clone(), t_str, Some(self.latest_unread(crate::app::Messenger::Qq)), None));
+                            let title = r.title.strip_prefix("QQ · ").map(str::to_owned).unwrap_or_else(|| r.title.clone());
+                            built.push((title, r.body.clone(), t_str, Some(self.latest_unread(crate::app::Messenger::Qq)), None, notification_record_slot_tag(r)));
                         }
                     }
                 } else {
                     for m in self.mail_rows().into_iter().take(24) {
                         let disp = self.display_mail(&m);
                         let t_short = disp.time.rsplit(' ').next().unwrap_or(&disp.time).to_string();
-                        built.push((disp.from, disp.subject, t_short, None, Some((m.account.clone(), m.uid))));
+                        built.push((disp.from, disp.subject, t_short, None, Some((m.account.clone(), m.uid)), None));
                     }
                 }
                 guard.0 = cache_key;
@@ -3053,23 +3538,29 @@ impl App {
         };
 
         if rows.is_empty() {
-            c.seg((40.0, 41.0), (376.0, 41.0), 0.7, Color32::from_white_alpha(18));
-            let empty_title = match cur_src {
-                1 => "暂无微信历史消息",
-                2 => "暂无 QQ 历史消息",
+            let line_y = if cur_src == 1 || cur_src == 2 { 60.0 } else { 41.0 };
+            c.seg((40.0, line_y), (376.0, line_y), 0.7, Color32::from_white_alpha(18));
+            let empty_title = match (cur_src, slot_filter) {
+                (1, 2) => "暂无微信分身历史消息",
+                (1, 1) => "暂无微信主应用历史消息",
+                (1, _) => "暂无微信历史消息",
+                (2, 2) => "暂无 QQ 分身历史消息",
+                (2, 1) => "暂无 QQ 主应用历史消息",
+                (2, _) => "暂无 QQ 历史消息",
                 _ => "暂无邮箱消息",
             };
-            c.text(209.0, 118.0, empty_title, 12.0, W::Bold, Color32::from_rgb(161, 161, 170), H::Center);
-            c.text(209.0, 138.0, "收到新消息后将在此处实时聚合展示", 9.5, W::Regular, theme::DIM, H::Center);
+            c.text(209.0, 122.0, empty_title, 12.0, W::Bold, Color32::from_rgb(161, 161, 170), H::Center);
+            c.text(209.0, 142.0, "收到新消息后将在此处实时聚合展示", 9.5, W::Regular, theme::DIM, H::Center);
             return;
         }
 
         // 顶部分割线
-        c.seg((40.0, 41.0), (376.0, 41.0), 0.7, Color32::from_white_alpha(18));
+        let line_y = if cur_src == 1 || cur_src == 2 { 60.0 } else { 41.0 };
+        c.seg((40.0, line_y), (376.0, line_y), 0.7, Color32::from_white_alpha(18));
 
-        // 列表渲染区（充分利用加长后的岛体高度 y=43..223，高度 180px 完整容纳 4 行消息！）
+        // 列表渲染区（充分利用加长后的岛体高度，完整容纳消息与分身区分标记！）
         let msg_bottom = ((self.h.pos / c.s) - 22.0 - 25.0).max(168.0);
-        let list_rect = Rect::from_min_max(Pos2::new(40.0, 43.0), Pos2::new(378.0, msg_bottom));
+        let list_rect = Rect::from_min_max(Pos2::new(40.0, list_top), Pos2::new(378.0, msg_bottom));
         let row_h = 44.0_f32;
         let mut content = egui::Ui::new(
             c.ui.ctx().clone(),
@@ -3093,7 +3584,7 @@ impl App {
             .auto_shrink([false, false])
             .show_rows(&mut content, row_h * c.s, rows.len(), |ui, range| {
                 for idx in range {
-                    let (ref title, ref body, ref time_str, unread_opt, ref mail_opt) = rows[idx];
+                    let (ref title, ref body, ref time_str, unread_opt, ref mail_opt, slot_tag) = rows[idx];
                     let r_w = list_rect.width() - 10.0;
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(r_w * c.s, row_h * c.s), egui::Sense::hover());
                     let stagger = ((idx.min(5) as f32) * 0.06).min(0.30);
@@ -3107,8 +3598,25 @@ impl App {
                     if hit.hovered() {
                         rc.fill(0.0, 1.0, r_w, row_h - 2.0, 7.0, Color32::from_white_alpha(14));
                     }
-                    let t_fit = rc.fit(title, 11.2, W::Bold, r_w - 52.0);
+                    let badge_reserve = if let Some((tag_label, _)) = slot_tag {
+                        rc.text_w(tag_label, 7.8, W::Semibold) + 16.0
+                    } else {
+                        0.0
+                    };
+                    let t_fit = rc.fit(title, 11.2, W::Bold, (r_w - 52.0 - badge_reserve).max(60.0));
                     rc.text(4.0, 16.5, &t_fit, 11.2, W::Bold, theme::WHITE, H::Left);
+                    if let Some((tag_label, is_clone)) = slot_tag {
+                        let tw = rc.text_w(&t_fit, 11.2, W::Bold);
+                        let bw = rc.text_w(tag_label, 7.8, W::Semibold) + 10.0;
+                        let bx = (4.0 + tw + 6.0).min(r_w - 46.0 - bw);
+                        let (bg_col, fg_col) = if is_clone {
+                            (Color32::from_rgba_unmultiplied(16, 185, 129, 52), Color32::from_rgb(110, 231, 183))
+                        } else {
+                            (Color32::from_rgba_unmultiplied(56, 189, 248, 42), Color32::from_rgb(125, 211, 252))
+                        };
+                        rc.fill(bx, 6.5, bw, 13.5, 4.0, bg_col);
+                        rc.centered_text(bx + bw * 0.5, 13.2, tag_label, 7.8, W::Semibold, fg_col, H::Center);
+                    }
                     rc.text(r_w - 4.0, 16.0, time_str, 9.2, W::Regular, theme::GRAY, H::Right);
                     let b_fit = rc.fit(body, 10.0, W::Regular, r_w - 12.0);
                     rc.text(4.0, 34.0, &b_fit, 10.0, W::Regular, Color32::from_gray(178), H::Left);
@@ -3363,9 +3871,11 @@ impl App {
             })
             .collect();
 
+        let box_bottom = ((self.h.pos / c.s) - 30.0 - 18.0).max(182.0);
+        let box_h = (box_bottom - 54.0).max(128.0);
         if filtered.is_empty() {
-            c.fill(36.0, 54.0, 344.0, 142.0, 11.0, Color32::from_white_alpha(9));
-            c.stroke(36.0, 54.0, 344.0, 142.0, 11.0, 0.8, Color32::from_white_alpha(18));
+            c.fill(36.0, 54.0, 344.0, box_h, 11.0, Color32::from_white_alpha(9));
+            c.stroke(36.0, 54.0, 344.0, box_h, 11.0, 0.8, Color32::from_white_alpha(18));
             let empty_msg = match filter_tab {
                 2 => "暂无复制的图片记录 · 可复制任意截图或点击上方「＋ 演示图片」",
                 3 => "暂无复制的网页链接",
@@ -3373,8 +3883,9 @@ impl App {
                 1 => "暂无星标收藏的剪贴板记录",
                 _ => "暂无匹配的剪贴板历史",
             };
-            c.text(209.0, 118.0, empty_msg, 10.5, W::Semibold, Color32::from_gray(175), H::Center);
-            c.text(209.0, 138.0, "复制文字或图片后自动保存至此，点击任意卡片即可一键再次粘贴", 9.0, W::Regular, Color32::from_gray(130), H::Center);
+            let mid_y = 54.0 + box_h * 0.5;
+            c.centered_text(208.0, mid_y - 10.0, empty_msg, 10.5, W::Semibold, Color32::from_gray(175), H::Center);
+            c.centered_text(208.0, mid_y + 10.0, "复制文字或图片后自动保存至此，点击任意卡片即可一键再次粘贴", 9.0, W::Regular, Color32::from_gray(130), H::Center);
             return;
         }
 
@@ -3401,7 +3912,7 @@ impl App {
         };
 
         // 4) BrimDeck 双列 Bento 图文混合卡片流（左右严格对齐上方筛选轨与搜索框 x = 36..380，底边紧贴指示点上方安全区）
-        let list_bottom = ((self.h.pos / c.s) - 30.0 - 22.0).max(164.0);
+        let list_bottom = box_bottom;
         let list_rect = Rect::from_min_max(Pos2::new(36.0, 54.0), Pos2::new(380.0, list_bottom));
         let row_h = 47.0_f32;
         let row_count = (filtered.len() + 1) / 2;
@@ -4052,6 +4563,11 @@ impl App {
         c.stroke(38.0, 58.0, 340.0, 27.0, 6.5, 0.9, Color32::from_white_alpha(22));
         c.seg((46.5, 71.5), (54.5, 71.5), 1.3, Color32::from_gray(165));
         c.seg((50.5, 67.5), (50.5, 75.5), 1.3, Color32::from_gray(165));
+        let plus_hit = if c.live {
+            Some(c.hit(38.0, 58.0, 20.0, 27.0, "fly-todo-plus-btn"))
+        } else {
+            None
+        };
 
         // 右侧 `📅 今天` 标签按钮
         c.stroke(334.0, 66.8, 9.2, 9.0, 1.5, 1.05, Color32::from_gray(172));
@@ -4063,7 +4579,9 @@ impl App {
         }
 
         if c.live {
-            let input_rect = c.rect(60.0, 62.5, 264.0, 18.0);
+            let has_text_before = !self.buf.trim().is_empty();
+            let input_w = if has_text_before { 222.0 } else { 264.0 };
+            let input_rect = c.rect(60.0, 62.5, input_w, 18.0);
             let mut input_ui = egui::Ui::new(
                 c.ui.ctx().clone(),
                 egui::Id::new(("fly-todo-input-ui", c.live)),
@@ -4087,16 +4605,48 @@ impl App {
                 .desired_width(input_rect.width());
             let resp = input_ui.add(te);
             let is_empty = buf.is_empty();
+            let has_text = !buf.trim().is_empty();
             self.buf = buf;
+
+            let mut add_btn_clicked = false;
+            if has_text {
+                let add_hit = c.hit(286.0, 61.5, 40.0, 20.0, "fly-todo-add-btn");
+                let fill_col = if add_hit.hovered() {
+                    Color32::from_rgb(36, 148, 242)
+                } else {
+                    Color32::from_rgb(14, 118, 224)
+                };
+                c.fill(286.0, 61.5, 40.0, 20.0, 5.0, fill_col);
+                c.centered_text(306.0, 71.5, "添加", 10.0, W::Bold, theme::WHITE, H::Center);
+                if add_hit.clicked() {
+                    add_btn_clicked = true;
+                }
+            }
+
             if is_empty && !resp.has_focus() {
                 // 使用局部坐标直接绘制占位提示，确保紧挨左侧 `+` 号 (50.5) 右侧，绝不向右偏出输入框（修复图三）
                 c.text(60.0, 75.2, &format!("添加 {} 的待办", env.today), 11.0, W::Regular, Color32::from_gray(145), H::Left);
             }
-            if resp.clicked() {
-                self.adding = true;
+            // 不再把 `self.adding = true` 绑死到内联输入框，防止输入文字后 `is_editing()` 锁定岛体导致鼠标移出无法收起
+            if resp.clicked() || resp.gained_focus() {
                 cmds.push(Cmd::Focus);
             }
-            if resp.has_focus() && c.ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let plus_clicked = plus_hit.as_ref().is_some_and(|h| h.clicked());
+            if plus_clicked && !has_text {
+                resp.request_focus();
+                cmds.push(Cmd::Focus);
+            }
+            let enter_submit = (resp.lost_focus() || resp.has_focus())
+                && !self.todo_ime_frame
+                && c.ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let esc_pressed = (resp.lost_focus() || resp.has_focus())
+                && !self.todo_ime_frame
+                && c.ui.input(|i| i.key_pressed(egui::Key::Escape));
+            let lost_window = c.ui.input(|i| {
+                i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(false)))
+            });
+
+            if enter_submit || add_btn_clicked || (plus_clicked && has_text) {
                 let text = self.buf.trim().to_string();
                 if !text.is_empty() {
                     self.todo_first = 0;
@@ -4105,7 +4655,15 @@ impl App {
                     self.todo_pop.vel += 6.0;
                     self.buf.clear();
                 }
+                resp.surrender_focus();
                 self.adding = false;
+                self.todo_input_focused = false;
+                self.todo_ime_active = false;
+            } else if esc_pressed || (!self.todo_ime_frame && (resp.clicked_elsewhere() || lost_window)) || !self.open {
+                resp.surrender_focus();
+                self.adding = false;
+                self.todo_input_focused = false;
+                self.todo_ime_active = false;
             }
         } else {
             c.text(60.0, 75.2, &format!("添加 {} 的待办", env.today), 11.0, W::Regular, Color32::from_gray(145), H::Left);
@@ -4257,6 +4815,22 @@ impl App {
 }
 
 
+pub(crate) fn is_clone_notification_record(r: &crate::model::NotificationRecord) -> bool {
+    r.app_name.contains("分身")
+        || r.app_id.contains("#u")
+        || r.app_id.contains("#clone")
+}
+
+pub(crate) fn notification_record_slot_tag(r: &crate::model::NotificationRecord) -> Option<(&'static str, bool)> {
+    if is_clone_notification_record(r) {
+        Some(("分身", true))
+    } else if r.app_id.starts_with("oppo-mirror:") {
+        Some(("主应用", false))
+    } else {
+        None
+    }
+}
+
 /// [修复需求 15 图8 `image_39d1c6.jpg`]：严格判定是否为真实腾讯 QQ / TIM 聊天消息，
 /// 彻底剔除 QQ音乐 (`qqmusic`)、QQ浏览器 (`qqbrowser`)、QQ输入法 (`qqpinyin`)、QQ影音、腾讯视频、QQ游戏与播放器歌单加载状态通知！
 pub(crate) fn is_strict_qq_chat_record(r: &crate::model::NotificationRecord) -> bool {
@@ -4291,12 +4865,15 @@ pub(crate) fn is_strict_qq_chat_record(r: &crate::model::NotificationRecord) -> 
         }
     }
     app_l == "qq"
+        || app_l == "qq分身"
+        || app_l.starts_with("qq ")
         || app_l == "tim"
         || app_l == "腾讯qq"
         || app_l == "手机qq"
         || id_l == "qq"
         || id_l.ends_with(".qq")
         || id_l.contains("tencent.qq")
+        || id_l.contains("tencent.mobileqq")
         || id_l.contains("tencent.tim")
         || title_l.starts_with("qq ·")
 }

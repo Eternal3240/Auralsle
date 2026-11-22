@@ -1,5 +1,17 @@
 //! 媒体后台任务的进程级上限，以及有容量限制的本机资源记录。
-use std::{path::{Path,PathBuf},sync::{atomic::{AtomicUsize,Ordering},Mutex},time::{Duration,Instant}};
+use std::{path::{Path,PathBuf},sync::{atomic::{AtomicBool,AtomicUsize,Ordering},Mutex},time::{Duration,Instant}};
+
+static ROOT_EXIT_ALLOWED: AtomicBool = AtomicBool::new(false);
+
+/// 允许主岛窗口或进程按预期退出（如托盘退出、更新安装、重启动作、系统注销）。
+pub fn allow_root_exit() {
+    ROOT_EXIT_ALLOWED.store(true, Ordering::Release);
+}
+
+/// 当前是否已显式授权退出；为 false 时拦截意外的 `WM_CLOSE` / `CloseRequested`。
+pub fn is_root_exit_allowed() -> bool {
+    ROOT_EXIT_ALLOWED.load(Ordering::Acquire)
+}
 
 pub struct Lane { pub name:&'static str, limit:usize, active:AtomicUsize, started:AtomicUsize, denied:AtomicUsize }
 impl Lane {

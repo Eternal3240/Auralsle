@@ -21,6 +21,7 @@ pub fn run(data_dir:&Path)->Result<(),String> {
     let work=std::env::temp_dir().join(format!("auralsle-diagnostics-tool-{}",std::process::id()));
     std::fs::create_dir_all(&work).map_err(|e|format!("无法创建临时目录：{e}"))?;
     let script=work.join("collect-diagnostics.ps1");
+    let done_file=work.join("collect.done");
     let result=(||{
         // 脚本自带 UTF-8 BOM，Windows PowerShell 5.1 才能正确读中文。
         std::fs::write(&script,SCRIPT).map_err(|e|format!("无法写入诊断脚本：{e}"))?;
@@ -28,11 +29,12 @@ pub fn run(data_dir:&Path)->Result<(),String> {
         let status=std::process::Command::new("powershell.exe")
             .args(["-NoProfile","-ExecutionPolicy","Bypass","-File"]).arg(&script)
             .arg("-DataDirectory").arg(data_dir).arg("-OutputDirectory").arg(output).arg("-RevealArchive")
+            .arg("-DoneFile").arg(&done_file)
             .creation_flags(CREATE_NEW_CONSOLE).status().map_err(|e|format!("无法启动 PowerShell：{e}"))?;
-        if !status.success(){return Err("诊断收集未完成".into());}
+        if !status.success() && !done_file.is_file() {return Err("诊断收集未完成".into());}
         Ok(())
     })();
-    let _=std::fs::remove_file(&script);let _=std::fs::remove_dir(&work);
+    let _=std::fs::remove_file(&done_file);let _=std::fs::remove_file(&script);let _=std::fs::remove_dir(&work);
     result
 }
 

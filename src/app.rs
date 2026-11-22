@@ -812,6 +812,15 @@ const CENTER_SWEEP: f64 = 0.55;
 /// 已居中的提示色（绿）：岛体描边、外发光和扫光统一用它，颜色本身就是「对准了」。
 const CENTER_TINT: (f32, f32, f32) = (88.0, 222.0, 140.0);
 
+#[derive(Clone, Debug)]
+pub(crate) struct PendingOppoOrb {
+    pub pkg: String,
+    pub app_name: String,
+    pub title: String,
+    pub icon_png: Option<std::sync::Arc<Vec<u8>>>,
+    pub count: usize,
+}
+
 pub struct App {
     pub opts: Options,
     pub settings: model::Settings,
@@ -865,6 +874,27 @@ pub struct App {
     pub(crate) drag_a: f32,
     drag_saved: Option<usize>,
 
+    // OPPO 互联拖拽悬浮球
+    oppo_drag_hot: bool,
+    oppo_orb_pin_pos: bool,
+    oppo_orb_a: f32,
+    oppo_orb_hover_a: f32,
+    oppo_orb_rect: Option<Rect>,
+    oppo_orb_hold_until: f64,
+    oppo_sending: bool,
+    oppo_progress: f32,
+    oppo_progress_vis: f32,
+    oppo_done_ok: Option<bool>,
+    oppo_link: crate::oppo_bridge::LinkStatus,
+    oppo_link_at: f64,
+    oppo_link_rx: Option<std::sync::mpsc::Receiver<crate::oppo_bridge::LinkStatus>>,
+    oppo_orb_x: Spring,
+    oppo_orb_y: Spring,
+    oppo_orb_d: Spring,
+    oppo_orb_initialized: bool,
+    oppo_transfer_rx: Option<std::sync::mpsc::Receiver<crate::oppo_bridge::TransferEvent>>,
+    oppo_icon: Option<egui::TextureHandle>,
+
     // 置物架
     pub(crate) shelf_scroll: Spring,
     pub(crate) shelf_first: usize,
@@ -917,8 +947,8 @@ pub struct App {
     pub(crate) editing: Option<usize>,
     pub(crate) buf: String,
     pub(crate) todo_input_focused: bool,
-    todo_ime_active: bool,
-    todo_ime_frame: bool,
+    pub(crate) todo_ime_active: bool,
+    pub(crate) todo_ime_frame: bool,
     pub(crate) todo_pop: Spring,
 
     // 音乐
@@ -950,6 +980,9 @@ pub struct App {
     pub(crate) settings_category:usize,
     pub messenger_statuses:std::collections::HashMap<Messenger,String>,
     pub(crate) oppo_messengers: std::collections::HashSet<Messenger>,
+    pub(crate) oppo_messenger_icons: std::collections::HashMap<Messenger, std::sync::Arc<Vec<u8>>>,
+    pub(crate) oppo_messenger_counts: std::collections::HashMap<Messenger, usize>,
+    pub(crate) pending_oppo_orbs: Vec<PendingOppoOrb>,
     pill_inside_at: f64,
     pub(crate) notification_apps:model::NotificationApps,
     /// [ai-status-mod] 通知历史：按软件分类记录收到的系统通知。
@@ -1027,6 +1060,14 @@ pub struct App {
     pub(crate) last_had_wireless_devices: bool,
     pub(crate) long_to_short_latched: bool,
     pub(crate) page_switch_grace_until: f64,
+    pub(crate) auralsle_music_mix: f32,
+    pub(crate) auralsle_music_mix_from: f32,
+    pub(crate) auralsle_music_mix_target: f32,
+    pub(crate) auralsle_music_mix_started: f64,
+    pub(crate) auralsle_music_liked: bool,
+    pub(crate) auralsle_music_shuffle: u8,
+    pub(crate) auralsle_glow: crate::auralsle_music::MusicGlowState,
+    pub(crate) auralsle_blur_cache: crate::auralsle_music::CoverBlurCache,
 }
 
 impl App {
@@ -1100,6 +1141,25 @@ impl App {
             drag_hot: false,
             drag_a: 0.0,
             drag_saved: None,
+            oppo_drag_hot: false,
+            oppo_orb_pin_pos: false,
+            oppo_orb_a: 0.0,
+            oppo_orb_hover_a: 0.0,
+            oppo_orb_rect: None,
+            oppo_orb_hold_until: -10.0,
+            oppo_sending: false,
+            oppo_progress: 0.0,
+            oppo_progress_vis: 0.0,
+            oppo_done_ok: None,
+            oppo_link: crate::oppo_bridge::LinkStatus::default(),
+            oppo_link_at: -10.0,
+            oppo_link_rx: None,
+            oppo_orb_x: Spring::new(0.0, 220.0, 0.78),
+            oppo_orb_y: Spring::new(0.0, 220.0, 0.78),
+            oppo_orb_d: Spring::new(42.0, 240.0, 0.80),
+            oppo_orb_initialized: false,
+            oppo_transfer_rx: None,
+            oppo_icon: None,
             shelf_scroll: Spring::new(0.0, 300.0, 0.9),
             shelf_first: 0,
             brightness_scroll: 0.0,
@@ -1150,7 +1210,7 @@ impl App {
             music_paused_since: None,
             media: NowPlaying::default(),
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:std::env::var("AURALSLE_SETTINGS_TAB").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(0), settings_category:0, messenger_statuses:Default::default(), oppo_messengers:Default::default(), pill_inside_at: -10.0, notification_apps:model::NotificationApps::load(), notification_log:model::NotificationLog::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:std::env::var("AURALSLE_SETTINGS_TAB").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(0), settings_category:0, messenger_statuses:Default::default(), oppo_messengers:Default::default(), oppo_messenger_icons:Default::default(), oppo_messenger_counts:Default::default(), pending_oppo_orbs:Default::default(), pill_inside_at: -10.0, notification_apps:model::NotificationApps::load(), notification_log:model::NotificationLog::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, orb_entry_at: -10.0, orb_was_visible: false, orb_x: Spring::new(0.0, 420.0, 0.88), orb_y: Spring::new(0.0, 420.0, 0.88), orb_w: Spring::new(0.0, 420.0, 0.88), orb_h: Spring::new(0.0, 420.0, 0.88), notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
@@ -1189,6 +1249,29 @@ impl App {
             last_had_wireless_devices: false,
             long_to_short_latched: false,
             page_switch_grace_until: 0.0,
+            auralsle_music_mix: {
+                let layout = crate::auralsle_music::MusicLayout::from_setting(
+                    &crate::auralsle_ai_status::config::get().auralsle_music_layout,
+                );
+                layout.position()
+            },
+            auralsle_music_mix_from: {
+                let layout = crate::auralsle_music::MusicLayout::from_setting(
+                    &crate::auralsle_ai_status::config::get().auralsle_music_layout,
+                );
+                layout.position()
+            },
+            auralsle_music_mix_target: {
+                let layout = crate::auralsle_music::MusicLayout::from_setting(
+                    &crate::auralsle_ai_status::config::get().auralsle_music_layout,
+                );
+                layout.position()
+            },
+            auralsle_music_mix_started: 0.0,
+            auralsle_music_liked: false,
+            auralsle_music_shuffle: 0,
+            auralsle_glow: Default::default(),
+            auralsle_blur_cache: Default::default(),
         }
     }
 
@@ -1205,6 +1288,236 @@ impl App {
     pub(crate) fn code_copied(&mut self, _code:&str) {
         self.say("验证码已复制");
         self.toast_below = true;
+    }
+
+    fn oppo_module_enabled(&self) -> bool {
+        if cfg!(test) {
+            return false;
+        }
+        let cfg = crate::auralsle_ai_status::config::get();
+        cfg.mod_oppo_connect_enabled && cfg.oppo_drag_transfer_enabled
+    }
+
+    fn start_oppo_transfer(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let count = paths.len();
+        self.oppo_sending = true;
+        self.oppo_done_ok = None;
+        self.oppo_progress = 0.04;
+        self.oppo_progress_vis = 0.04;
+        self.oppo_orb_hold_until = self.t + 2.6;
+        self.say(format!("OPPO 互联正在后台发送 {} 个文件…", count));
+        self.toast_below = true;
+        self.oppo_transfer_rx = Some(crate::oppo_bridge::send_files_async(paths));
+    }
+
+    fn poll_oppo_transfer(&mut self) {
+        if let Some(rx) = self.oppo_link_rx.take() {
+            let mut got = None;
+            while let Ok(st) = rx.try_recv() {
+                got = Some(st);
+            }
+            if let Some(st) = got {
+                self.oppo_link = st;
+            } else {
+                self.oppo_link_rx = Some(rx);
+            }
+        }
+        let mut finished = false;
+        if let Some(rx) = self.oppo_transfer_rx.take() {
+            while let Ok(ev) = rx.try_recv() {
+                match ev {
+                    crate::oppo_bridge::TransferEvent::Progress(p) => {
+                        self.oppo_progress = p.clamp(0.0, 1.0);
+                    }
+                    crate::oppo_bridge::TransferEvent::Done { ok, message } => {
+                        self.oppo_sending = false;
+                        self.oppo_done_ok = Some(ok);
+                        if ok {
+                            self.oppo_progress = 1.0;
+                        }
+                        self.oppo_orb_hold_until = self.t + 1.6;
+                        self.say(message);
+                        self.toast_below = true;
+                        finished = true;
+                    }
+                }
+            }
+            if !finished {
+                self.oppo_transfer_rx = Some(rx);
+            }
+        }
+        if finished {
+            self.oppo_transfer_rx = None;
+        }
+        if !self.oppo_sending && self.t >= self.oppo_orb_hold_until && self.oppo_orb_a < 0.02 {
+            self.oppo_done_ok = None;
+            self.oppo_progress = 0.0;
+            self.oppo_progress_vis = 0.0;
+        }
+    }
+
+    fn refresh_oppo_link_if_needed(&mut self, force: bool) {
+        if !self.oppo_module_enabled() || self.oppo_link_rx.is_some() {
+            return;
+        }
+        if force || (self.t - self.oppo_link_at) > 3.5 {
+            self.oppo_link_at = self.t;
+            self.oppo_link_rx = Some(crate::oppo_bridge::probe_link_async());
+        }
+    }
+
+    /// 计算 OPPO 互联悬浮球的非线性弹簧目标位置：
+    /// - 拖拽期间：在岛体侧边以大号目标圆球弹出；
+    /// - 投放后鼠标离开：随主岛收起，通过非线性弹簧动画平滑回到主岛旁边（与主岛等高），
+    ///   并自动避让微信/健康悬浮球与时间胶囊，绝不重叠。
+    fn step_oppo_drop_orb(
+        &mut self,
+        canvas: Rect,
+        win: Rect,
+        panel: Rect,
+        outside_badge: Option<Rect>,
+        dt: f32,
+    ) -> Option<(Rect, Option<Rect>)> {
+        if !self.oppo_module_enabled() || self.oppo_orb_a <= 0.015 {
+            self.oppo_orb_initialized = false;
+            return None;
+        }
+        self.step_oppo_drop_orb_inner(canvas, win, panel, outside_badge, dt)
+    }
+
+    fn step_oppo_drop_orb_inner(
+        &mut self,
+        canvas: Rect,
+        win: Rect,
+        panel: Rect,
+        outside_badge: Option<Rect>,
+        dt: f32,
+    ) -> Option<(Rect, Option<Rect>)> {
+        if self.oppo_orb_a <= 0.015 {
+            self.oppo_orb_initialized = false;
+            return None;
+        }
+        let docked_compact = !self.oppo_drag_hot && (self.oppo_sending || self.t < self.oppo_orb_hold_until);
+        let target_d = if docked_compact && !self.open {
+            panel.height().clamp(34.0, 44.0)
+        } else if docked_compact {
+            44.0
+        } else {
+            54.0 + self.oppo_orb_hover_a * 8.0
+        };
+        let gap = if docked_compact && !self.open { 8.0 } else { 12.0 };
+
+        // 始终保留外发光环 (2.5px + 描边) 与底部状态胶囊所需的屏幕安全边距，绝不被屏幕边缘截断
+        let safe_bounds = self.screen.map_or(canvas, |s| canvas.intersect(s));
+        let edge_pad = 10.0_f32;
+        let top_floor = safe_bounds.top().max(win.top()) + target_d * 0.5 + edge_pad;
+        let bot_ceil = (safe_bounds.bottom() - target_d * 0.5 - 32.0).max(top_floor);
+        let left_floor = safe_bounds.left() + target_d * 0.5 + edge_pad;
+        let right_ceil = (safe_bounds.right() - target_d * 0.5 - edge_pad).max(left_floor);
+
+        // 始终放在岛体右侧（绝不放到左侧与设备药丸/时间胶囊重叠），并自动避让右侧已有的微信/健康悬浮球
+        let right_badge = outside_badge.filter(|mr| mr.center().x >= panel.center().x);
+        let right_anchor = right_badge.map_or(panel.right(), |mr| panel.right().max(mr.right()));
+        let right_row_fits = right_anchor + gap + target_d + edge_pad <= safe_bounds.right();
+
+        let (target_cx, target_cy) = if self.dock() == model::Dock::Right {
+            // 仅当岛体停靠在屏幕最右边时，才回落到右侧悬浮球下方或面板左侧
+            let cy = right_badge.map_or(
+                panel.top() + panel.height().min(96.0) * 0.5,
+                |mr| mr.bottom() + 14.0 + target_d * 0.5,
+            );
+            let cx = (panel.left() - gap - target_d * 0.5).clamp(left_floor, right_ceil);
+            (cx, cy.clamp(top_floor, bot_ceil))
+        } else if right_row_fits {
+            // 优先放在右侧已有悬浮球（如微信悬浮球）的右方同一水平线，绝不重叠
+            let cx = right_anchor + gap + target_d * 0.5;
+            let cy = if let Some(mr) = right_badge {
+                mr.center().y
+            } else if !self.open {
+                panel.center().y
+            } else {
+                panel.top() + panel.height().min(96.0) * 0.5
+            };
+            (cx.clamp(left_floor, right_ceil), cy.clamp(top_floor, bot_ceil))
+        } else {
+            // 若右侧已有悬浮球过多超出画布右边界，则垂直排到微信悬浮球正下方（仍在岛体右侧，不放左边）
+            let cx = right_badge
+                .map(|mr| mr.center().x)
+                .unwrap_or(panel.right() + gap + target_d * 0.5)
+                .clamp(left_floor, right_ceil);
+            let cy = right_badge
+                .map(|mr| mr.bottom() + 14.0 + target_d * 0.5)
+                .unwrap_or(panel.top() + panel.height().min(96.0) * 0.5)
+                .clamp(top_floor, bot_ceil);
+            (cx, cy)
+        };
+
+        if !self.oppo_orb_initialized {
+            self.oppo_orb_initialized = true;
+            let start_cx = if self.dock() == model::Dock::Right { target_cx + 18.0 } else { target_cx - 18.0 };
+            self.oppo_orb_x.snap(start_cx.clamp(left_floor, right_ceil));
+            self.oppo_orb_y.snap(target_cy);
+            self.oppo_orb_d.snap(target_d * 0.78);
+        } else {
+            // 拖着文件靠近/停留在 OPPO 互传悬浮球上时锁定球体位置，但绝不能被正在展开的面板吞进内部（防止与 + 添加 / 齿轮重叠）
+            if self.oppo_orb_pin_pos {
+                let half_d = target_d * 0.5;
+                if self.dock() == model::Dock::Right {
+                    let max_safe_x = panel.left() - gap - half_d;
+                    if self.oppo_orb_x.pos > max_safe_x {
+                        self.oppo_orb_x.target = target_cx.min(max_safe_x);
+                    }
+                } else {
+                    let min_safe_x = panel.right() + gap + half_d;
+                    if self.oppo_orb_x.pos < min_safe_x {
+                        self.oppo_orb_x.target = target_cx.max(min_safe_x);
+                    }
+                }
+            } else {
+                self.oppo_orb_x.target = target_cx;
+                self.oppo_orb_y.target = target_cy;
+            }
+            self.oppo_orb_x.step(dt);
+            self.oppo_orb_y.step(dt);
+            if self.oppo_orb_pin_pos {
+                let half_d = target_d * 0.5;
+                if self.dock() == model::Dock::Right {
+                    let max_safe_x = panel.left() - gap - half_d;
+                    if self.oppo_orb_x.pos > max_safe_x {
+                        self.oppo_orb_x.pos = max_safe_x;
+                    }
+                } else {
+                    let min_safe_x = panel.right() + gap + half_d;
+                    if self.oppo_orb_x.pos < min_safe_x {
+                        self.oppo_orb_x.pos = min_safe_x;
+                    }
+                }
+            }
+            self.oppo_orb_d.target = target_d;
+            self.oppo_orb_d.step(dt);
+        }
+
+        let d = self.oppo_orb_d.pos.max(24.0);
+        // 弹簧每帧步进后再次钳制到当前真实直径的屏幕安全区内，彻底消除过冲/放大动效贴边截断
+        let pos_top = safe_bounds.top().max(win.top()) + d * 0.5 + edge_pad;
+        let pos_bot = (safe_bounds.bottom() - d * 0.5 - 32.0).max(pos_top);
+        let pos_left = safe_bounds.left() + d * 0.5 + edge_pad;
+        let pos_right = (safe_bounds.right() - d * 0.5 - edge_pad).max(pos_left);
+        self.oppo_orb_x.pos = self.oppo_orb_x.pos.clamp(pos_left, pos_right);
+        self.oppo_orb_y.pos = self.oppo_orb_y.pos.clamp(pos_top, pos_bot);
+
+        let orb = Rect::from_center_size(Pos2::new(self.oppo_orb_x.pos, self.oppo_orb_y.pos), Vec2::splat(d));
+        let label = if self.oppo_drag_hot || self.oppo_sending || self.oppo_done_ok.is_some() {
+            let w = if self.oppo_drag_hot { 68.0 } else { 44.0 };
+            // 精简胶囊尺寸并保留 9px 净间距，彻底避免与圆球及其悬停外发光环重叠
+            Some(Rect::from_center_size(Pos2::new(orb.center().x, orb.bottom() + 16.5), Vec2::new(w, 15.0)))
+        } else {
+            None
+        };
+        Some((orb, label))
     }
 
     pub(crate) fn mail_code_hidden(&self,item:&mail::Item)->bool {
@@ -1273,13 +1586,31 @@ impl App {
                 if new{self.mail.manage.next_refresh=0.0;}
                 self.mail.privacy.retain(self.mail.recent.iter().chain(&self.mail.manage.trash).chain(&self.mail.reading));
                 if new && self.mail_active() {
-                    let item=&self.mail.recent[0];
-                    let body=format!("{} · {}",item.from,item.subject);
-                    let body=item.code.as_ref().map(|code|crate::mail_privacy::mask(&body,code)).unwrap_or(body);
-                    let dur = self.preview_duration();
-                    self.alert_with_duration("新邮件",body,5,false,dur);
+                    let (item_from, item_subject, item_code) = {
+                        let item = &self.mail.recent[0];
+                        (item.from.clone(), item.subject.clone(), item.code.clone())
+                    };
+                    let otp_sent = if !cfg!(test)
+                        && self.settings.mail_code
+                        && crate::auralsle_ai_status::config::get().auralsle_otp_capsule
+                    {
+                        if let Some(code) = item_code.clone() {
+                            self.push_verification_code(item_from.clone(), code);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !otp_sent {
+                        let body = format!("{} · {}", item_from, item_subject);
+                        let body = item_code.as_ref().map(|code| crate::mail_privacy::mask(&body, code)).unwrap_or(body);
+                        let dur = self.preview_duration();
+                        self.alert_with_duration("新邮件", body, 5, false, dur);
+                    }
                     self.notification_bell_at = self.t;
-                    self.notification_bell_until = self.t + dur;
+                    self.notification_bell_until = self.t + self.preview_duration();
                     if !cfg!(test) {
                         crate::auralsle_ai_status::aora_face::trigger_mascot_event(20, 6.0);
                     }
@@ -1654,6 +1985,30 @@ impl App {
         }
     }
 
+    /// 按单个快照增量同步蓝牙/无线外设连接状态，保证快速连断跳变不丢失提示。
+    pub fn sync_bt_snapshot(&mut self, found: &[crate::bt::Device]) {
+        if !self.settings.bluetooth_notifications {
+            self.bt_shown.clear();
+            self.bt_initialized = false;
+            self.alerts.retain(|a| a.source != crate::extras::AlertSource::Internal || a.title != "蓝牙设备");
+            if self.notice.as_ref().is_some_and(|a| a.source == crate::extras::AlertSource::Internal && a.title == "蓝牙设备") {
+                self.notice = None;
+            }
+            return;
+        }
+        // 只把首次完整扫描作为基线，之后的连接变化都应提示。
+        if !self.bt_initialized {
+            self.bt_initialized = true;
+            self.bt_shown = found.to_vec();
+            return;
+        }
+        let connected: Vec<_> = found.iter().filter(|d| !self.bt_shown.iter().any(|old| old.id == d.id)).cloned().collect();
+        let disconnected: Vec<_> = self.bt_shown.iter().filter(|d| !found.iter().any(|new| new.id == d.id)).cloned().collect();
+        for device in &connected { self.bluetooth_alert(device, true); }
+        for device in &disconnected { self.bluetooth_alert(device, false); }
+        self.bt_shown = found.to_vec();
+    }
+
     /// v0.5.4：把系统音量与蓝牙设备状态同步进界面；只在连接/断开时提示一次。
     fn sync_device(&mut self, env: &Env) {
         if self.t >= self.volume_quiet_until {
@@ -1662,24 +2017,11 @@ impl App {
             }
         }
         if !self.settings.bluetooth_notifications {
-            self.bt_shown.clear();
-            self.bt_initialized=false;
-            self.alerts.retain(|a|a.source!=crate::extras::AlertSource::Internal || a.title!="蓝牙设备");
-            if self.notice.as_ref().is_some_and(|a|a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备") {self.notice=None;}
+            self.sync_bt_snapshot(&env.bt);
             return;
         }
         if !env.bt_ready { return; }
-        // 只把首次完整扫描作为基线，之后的连接变化都应提示。
-        if !self.bt_initialized {
-            self.bt_initialized = true;
-            self.bt_shown = env.bt.clone();
-            return;
-        }
-        let connected: Vec<_> = env.bt.iter().filter(|d| !self.bt_shown.iter().any(|old| old.id == d.id)).cloned().collect();
-        let disconnected: Vec<_> = self.bt_shown.iter().filter(|d| !env.bt.iter().any(|new| new.id == d.id)).cloned().collect();
-        for device in &connected { self.bluetooth_alert(device, true); }
-        for device in &disconnected { self.bluetooth_alert(device, false); }
-        self.bt_shown = env.bt.clone();
+        self.sync_bt_snapshot(&env.bt);
     }
 
     /// 距离上次交互的秒数（小精灵出现的依据）。
@@ -1845,6 +2187,8 @@ impl App {
         self.notice=None;
         self.go(page,1.0);
         self.open=true;
+        self.hover_lock=false;
+        self.minimal_stage1=false;
         let from_pill = !cfg!(test) && (self.t - self.pill_inside_at).abs() <= 0.25;
         self.forced_open_until = if from_pill { 0.0 } else { self.t + 4.0 };
         self.w.tune(OPEN_W.0,OPEN_W.1);self.h.tune(OPEN_H.0,OPEN_H.1);
@@ -1859,8 +2203,11 @@ impl App {
     #[cfg(windows)]
     pub fn start_tray(&self,state:crate::tray::State)->Option<crate::tray::Tray>{
         let layout=self.settings_window.clone();
-        // 原生文件选择框会占用界面线程，托盘退出时直接保存最近一次观察到的布局。
-        crate::tray::Tray::start_with_exit(state,move||layout.lock().unwrap_or_else(|e|e.into_inner()).close())
+        // 原生文件选择框会占用界面线程，托盘退出时直接保存最近一次观察到的布局并恢复受托管的 OPPO 原生通知设置。
+        crate::tray::Tray::start_with_exit(state,move||{
+            layout.lock().unwrap_or_else(|e|e.into_inner()).close();
+            crate::oppo_notify::restore_on_normal_exit();
+        })
     }
 
     pub fn open_settings(&mut self){
@@ -2020,6 +2367,53 @@ impl App {
 
     pub fn filter_todo_input(&mut self,input:&mut egui::RawInput) {
         self.todo_ime_frame=false;
+        if !cfg!(test) {
+            // 运行时待办内联输入框不再锁死 `self.adding`；只要在待办页且处于打开态（或弹窗编辑），就过滤输入法组合键，
+            // 并且仅在存在真实非空 `Preedit` 时判定为组合输入中，避免 winit 获得焦点时发送 `ImeEvent::Enabled` 导致回车/退格永久失效。
+            if !self.adding && self.editing.is_none() && !(self.open && self.page == 4) {
+                self.todo_ime_active = false;
+                return;
+            }
+            let has_nonempty_preedit = input.events.iter().any(|event| {
+                matches!(event, egui::Event::Ime(egui::ImeEvent::Preedit(s)) if !s.is_empty())
+            });
+            let has_commit = input.events.iter().any(|event| {
+                matches!(event, egui::Event::Ime(egui::ImeEvent::Commit(_)))
+            });
+            self.todo_ime_frame = self.todo_ime_active || has_nonempty_preedit || has_commit;
+            for event in &input.events {
+                match event {
+                    egui::Event::Ime(egui::ImeEvent::Preedit(s)) if !s.is_empty() => {
+                        self.todo_ime_active = true;
+                    }
+                    egui::Event::Ime(
+                        egui::ImeEvent::Preedit(_) | egui::ImeEvent::Commit(_) | egui::ImeEvent::Disabled,
+                    ) => {
+                        self.todo_ime_active = false;
+                    }
+                    _ => {}
+                }
+            }
+            if self.todo_ime_frame {
+                input.events.retain(|event| {
+                    !matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Backspace
+                                | egui::Key::Delete
+                                | egui::Key::Enter
+                                | egui::Key::Escape
+                                | egui::Key::ArrowLeft
+                                | egui::Key::ArrowRight
+                                | egui::Key::ArrowUp
+                                | egui::Key::ArrowDown,
+                            ..
+                        }
+                    )
+                });
+            }
+            return;
+        }
         if !self.adding && self.editing.is_none(){self.todo_ime_active=false;return;}
         self.todo_ime_frame=self.todo_ime_active || input.events.iter().any(|event|matches!(event,egui::Event::Ime(egui::ImeEvent::Enabled|egui::ImeEvent::Preedit(_)|egui::ImeEvent::Commit(_))));
         for event in &input.events {
@@ -2039,6 +2433,12 @@ impl App {
             return;
         }
         self.hover_lock=true;
+        if !cfg!(test) && self.page == 4 && self.adding && self.editing.is_none() {
+            self.adding = false;
+            self.todo_input_focused = false;
+            self.todo_ime_active = false;
+            return;
+        }
         if self.adding && self.buf.trim().is_empty(){self.cancel_edit();}
     }
 
@@ -2055,6 +2455,12 @@ impl App {
             self.is_page_currently_visible(page)
         };
         if page == self.page || !page_ok { return; }
+        if self.page == 4 && page != 4 {
+            self.adding = false;
+            self.editing = None;
+            self.todo_input_focused = false;
+            self.todo_ime_active = false;
+        }
         if !cfg!(test) && page == 11 && crate::auralsle_ai_status::config::get().translate_auto_clipboard {
             let cached_clip = self
                 .clipboard
@@ -2142,11 +2548,21 @@ impl App {
     fn island_lyrics_active(&self)->bool {
         if self.side() {return false;}
         self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music()
-            && (cfg!(test) || crate::auralsle_ai_status::config::get().pill_show_music)
             && (!cfg!(test) || !self.browser_minimal_active)
-            && !crate::auralsle_ai_status::music_pause_expired(self.music_paused_since, self.t)
+            && (self.media.playing || !crate::auralsle_ai_status::music_pause_expired(self.music_paused_since, self.t))
     }
-    pub(crate) fn compact_notices(&self)->bool {self.island_lyrics_active()&&!self.open&&!self.notice.as_ref().is_some_and(|a|a.meeting.is_some()||self.settings.notification_preview&&matches!(a.source,crate::extras::AlertSource::External(_)))}
+    pub(crate) fn compact_notices(&self) -> bool {
+        self.island_lyrics_active()
+            && !self.open
+            && !self.notice.as_ref().is_some_and(|a| {
+                a.verification_code.is_some()
+                    || a.meeting.is_some()
+                    || (!cfg!(test) && !a.is_hud() && a.health().is_none())
+                    || (cfg!(test)
+                        && self.settings.notification_preview
+                        && matches!(a.source, crate::extras::AlertSource::External(_)))
+            })
+    }
 
     /// 换句、分段和展开高亮共用时间调整；正数延后，负数提前。
     pub(crate) fn lyric_position(&self)->f32 {(self.media.position-self.settings.lyric_delay_ms as f64/1000.0)as f32}
@@ -2244,6 +2660,7 @@ impl App {
             && !self.side()
             && crate::auralsle_ai_status::config::get().minimal_pill_msg_badge
             && (!self.pending_messengers.is_empty()
+                || !self.pending_oppo_orbs.is_empty()
                 || self.t < self.notification_bell_until
                 || !self.health_badges().is_empty())
             && self.calendar.draft.is_none()
@@ -2252,7 +2669,7 @@ impl App {
 
     /// 外置悬浮球的独立条目：(消息悬浮球数, 待处理健康提醒列表, 是否使用通知铃声兜底消息球)。
     fn floating_orb_items(&self) -> (usize, Vec<crate::extras::HealthReminder>, bool) {
-        let n = self.pending_messengers.len();
+        let n = self.pending_messengers.len() + self.pending_oppo_orbs.len();
         let health = self.health_badges();
         let fallback_bell = !cfg!(test)
             && n == 0
@@ -2291,6 +2708,78 @@ impl App {
             && self.subpage.is_none()
             && crate::auralsle_ai_status::config::get().music_ui_style == 5
     }
+    /// 当前是否处于 Auralsle 灵屿音乐岛模式（`page == 0 && music_ui_style == 6`）。
+    pub(crate) fn auralsle_music_island_active(&self)->bool {
+        !cfg!(test)
+            && self.page == 0
+            && self.subpage.is_none()
+            && crate::auralsle_ai_status::config::get().music_ui_style == 6
+    }
+    /// 计算收起态岛体上被点击元素对应的目标展开页（天气->10、AI->6/8、音乐->0、番茄->1、电池->13/14、时钟->7）。
+    fn collapsed_click_target_page(&self, click_pos: Pos2, cx: f32) -> Option<usize> {
+        if self.side() {
+            return None;
+        }
+        if self.island_lyrics_active() {
+            if self.lyric_ai_space() > 0.0 {
+                let width = self.w.pos.max(self.lyric_bar_width());
+                let left = cx - width * 0.5;
+                let pet_end = if self.pet_enabled() { left + 34.0 } else { left + 5.0 };
+                let ai_cx = pet_end + 9.0 + 10.0;
+                if (click_pos.x - ai_cx).abs() <= 15.0 {
+                    let target = if crate::auralsle_ai_status::config::get().ai_island_scheme == 2 { 6 } else { 8 };
+                    if self.is_page_currently_visible(target) {
+                        return Some(target);
+                    }
+                }
+            }
+            return Some(0);
+        }
+        let layout = self.resident.current();
+        if let Some(wx) = layout.x[bar::WEATHER] {
+            if (click_pos.x - (cx + wx)).abs() <= 28.0 && self.is_page_currently_visible(WEATHER_PAGE) {
+                return Some(WEATHER_PAGE);
+            }
+        }
+        if crate::auralsle_ai_status::shown().is_some() {
+            let ai_left = cx + crate::auralsle_ai_status::compact_x(&layout);
+            let ai_w = crate::auralsle_ai_status::compact_list_width().max(64.0);
+            if click_pos.x >= ai_left - 6.0 && click_pos.x <= ai_left + ai_w + 8.0 {
+                let target = if crate::auralsle_ai_status::config::get().ai_island_scheme == 2 { 6 } else { 8 };
+                if self.is_page_currently_visible(target) {
+                    return Some(target);
+                }
+            }
+        }
+        if let Some(mx) = layout.x[bar::MUSIC] {
+            if (click_pos.x - (cx + mx)).abs() <= 16.0 && self.is_page_currently_visible(0) {
+                return Some(0);
+            }
+        }
+        if self.pomo.running {
+            if let Some(fx) = layout.x[bar::FOCUS] {
+                if (click_pos.x - (cx + fx)).abs() <= 26.0 && self.is_page_currently_visible(1) {
+                    return Some(1);
+                }
+            }
+        }
+        if let Some(bx) = layout.x[bar::BATTERY] {
+            if (click_pos.x - (cx + bx)).abs() <= 18.0 {
+                if self.is_page_currently_visible(13) {
+                    return Some(13);
+                } else if self.is_page_currently_visible(14) {
+                    return Some(14);
+                }
+            }
+        }
+        if let Some(clx) = layout.x[bar::CLOCK] {
+            let clock_x = cx + clx;
+            if click_pos.x >= clock_x - 6.0 && click_pos.x <= clock_x + 64.0 && self.is_page_currently_visible(CALENDAR_PAGE) {
+                return Some(CALENDAR_PAGE);
+            }
+        }
+        None
+    }
     /// 展开态目标宽度：常规页面为 `PW (419.0)`；当处于 Glance 音乐控件模式时不写死长度，按音乐控件形态与歌名/歌词长度动态自适应！
     pub(crate) fn expanded_width(&self)->f32 {
         if self.glance_music_island_active() {
@@ -2301,8 +2790,9 @@ impl App {
     }
     pub(crate) fn minimal_pill_dims(&self)->(f32, f32) {
         let user_w = crate::auralsle_ai_status::config::get().minimal_pill_width.clamp(48, 120) as f32;
-        let w = if crate::auralsle_ai_status::shown().is_some() {
-            user_w + 14.0
+        let ai_n = crate::auralsle_ai_status::shown_list().len();
+        let w = if ai_n > 0 {
+            (user_w + 18.0 + (ai_n.saturating_sub(1) as f32) * 14.0).min(220.0)
         } else {
             user_w
         };
@@ -2313,7 +2803,7 @@ impl App {
     }
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
     pub(crate) fn notice_pet_space(&self, a: &Alert)->f32 {
-        if a.meeting.is_some() { 0.0 } else if !cfg!(test) && self.settings.pet && !self.side() { 44.0 } else { self.pet_space() }
+        if a.meeting.is_some() || a.verification_code.is_some() { 0.0 } else if !cfg!(test) && self.settings.pet && !self.side() { 44.0 } else { self.pet_space() }
     }
     fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
     fn lyric_unread_space(&self)->f32 {
@@ -2324,9 +2814,103 @@ impl App {
             0.0
         }
     }
-    fn lyric_bar_width(&self)->f32 {LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()+self.lyric_unread_space()}
+    pub(crate) fn compute_lyric_slot_width(&self, user_width: f32, auto_expand: bool, music_style: u8) -> f32 {
+        let max_safe = (WIN_W - 36.0 - if self.pet_enabled() { 38.0 } else { 0.0 } - self.lyric_ai_space() - self.lyric_focus_space() - self.lyric_unread_space()).clamp(200.0, 440.0);
+        let custom_w = user_width.clamp(200.0, 440.0).min(max_safe);
+        if music_style != 6 || !auto_expand {
+            return custom_w;
+        }
+        let text_len = self
+            .island_lyric()
+            .map(|(_, s)| s.chars().count())
+            .unwrap_or_else(|| self.media.title.trim().chars().count());
+        let est = 92.0 + text_len as f32 * 9.5;
+        est.clamp(custom_w, max_safe)
+    }
+    pub(crate) fn compact_lyric_slot_width(&self) -> f32 {
+        if cfg!(test) {
+            return LYRIC_BAR_W;
+        }
+        let cfg = crate::auralsle_ai_status::config::get();
+        self.compute_lyric_slot_width(cfg.lyric_island_width as f32, cfg.auralsle_auto_compact_width, cfg.music_ui_style)
+    }
+    fn lyric_ai_space(&self) -> f32 {
+        if !cfg!(test)
+            && crate::auralsle_ai_status::config::get().music_show_ai_status
+            && crate::auralsle_ai_status::shown().is_some()
+        {
+            29.0
+        } else {
+            0.0
+        }
+    }
+    /// 时间胶囊与首枚设备药丸合一切换插值：
+    /// 展开时同一个左侧胶囊从时间位置/尺寸丝滑形变为设备药丸，内部文字从时间交叉淡出切换为设备电量；收起时无缝恢复时间。
+    pub(crate) fn morph_tc_to_device_pill(tc_rect: Rect, dev_rect: Rect, pc: f32, tc_raw_t: f32) -> (Rect, f32, f32, f32) {
+        let p = pc.clamp(0.0, 1.0);
+        let morph_t = smoothstep(0.04, 0.86, p);
+        let box_alpha = tc_raw_t.max(smoothstep(0.02, 0.22, p)).clamp(0.0, 1.0);
+        let tc_text_alpha = ((1.0 - smoothstep(0.04, 0.42, p)) * box_alpha).clamp(0.0, 1.0);
+        let dev0_alpha = (smoothstep(0.32, 0.78, p) * box_alpha).clamp(0.0, 1.0);
+        let cur_r = Rect::from_min_max(
+            Pos2::new(lerp(tc_rect.left(), dev_rect.left(), morph_t), lerp(tc_rect.top(), dev_rect.top(), morph_t)),
+            Pos2::new(lerp(tc_rect.right(), dev_rect.right(), morph_t), lerp(tc_rect.bottom(), dev_rect.bottom(), morph_t)),
+        );
+        (cur_r, box_alpha, tc_text_alpha, dev0_alpha)
+    }
+
+    fn lyric_time_capsule_with_t(&self, ctx: &egui::Context, win: Rect, panel: Rect, pc: f32) -> (f32, Option<(Rect, f32, f32)>) {
+        if cfg!(test) || self.side() {
+            return (0.0, None);
+        }
+        let want = self.island_lyrics_active()
+            && !self.open
+            && pc <= 0.12
+            && crate::auralsle_ai_status::config::get().lyric_island_time_capsule;
+        let raw_t = ctx.animate_bool_with_time(egui::Id::new("auralsle_lyric_tc_appear"), want, 0.20);
+        if raw_t > 0.002 && raw_t < 0.998 {
+            ctx.request_repaint();
+        }
+        (raw_t, self.lyric_time_capsule_at(win, panel, pc, raw_t))
+    }
+
+    fn lyric_time_capsule_at(&self, win: Rect, panel: Rect, pc: f32, raw_t: f32) -> Option<(Rect, f32, f32)> {
+        if cfg!(test) {
+            return None;
+        }
+        self.lyric_time_capsule_geom(win, panel, pc, raw_t)
+    }
+
+    fn lyric_time_capsule_geom(&self, win: Rect, panel: Rect, pc: f32, raw_t: f32) -> Option<(Rect, f32, f32)> {
+        if self.side() {
+            return None;
+        }
+        let alpha = raw_t * (1.0 - smoothstep(0.0, 0.16, pc));
+        if alpha <= 0.015 {
+            return None;
+        }
+        let ease = 1.0 - (1.0 - alpha).powi(3);
+        let swell = (panel.height() / BAR_H).clamp(1.0, 1.35);
+        let full_w = (if self.settings.clock_seconds { 76.0 } else { 58.0 }) * swell;
+        let full_h = panel.height().clamp(BAR_H_MIN, 46.0);
+        let gap = 7.0 * swell;
+        let target_x = (panel.left() - gap - full_w).max(win.left() + 4.0);
+        if target_x + full_w + 2.0 > panel.left() {
+            return None;
+        }
+        let scale = lerp(0.84, 1.0, ease);
+        let w = full_w * scale;
+        let h = full_h * scale;
+        let start_x = panel.left() - w * 0.35;
+        let x = lerp(start_x, target_x + (full_w - w) * 0.5, ease);
+        let y = panel.top() + (full_h - h) * 0.5;
+        Some((Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h)), ease, scale))
+    }
+    fn lyric_bar_width(&self)->f32 {self.compact_lyric_slot_width()+if self.pet_enabled(){38.0}else{0.0}+self.lyric_ai_space()+self.lyric_focus_space()+self.lyric_unread_space()}
     fn notice_size(&self,a:&Alert)->(f32,f32) {
-        let (width,height)=if let Some((m,_))=&a.meeting{if m.uid.starts_with("course-"){(360.0,162.0)}else{(360.0,136.0)}}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
+        let (width,height)=if a.verification_code.is_some() {
+            (crate::auralsle_otp::WIDTH, crate::auralsle_otp::HEIGHT)
+        } else if let Some((m,_))=&a.meeting{if m.uid.starts_with("course-"){(360.0,162.0)}else{(360.0,136.0)}}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
         (width,height)
     }
     pub fn set_pet(&mut self,enabled:bool) {
@@ -2390,6 +2974,12 @@ impl App {
             let h_scale = (crate::auralsle_ai_status::config::get().expanded_h_scale.clamp(80, 135) as f32) / 100.0;
             return (self.glance_music_target_dims().1 * h_scale).clamp(92.0, 260.0);
         }
+        if self.auralsle_music_island_active() {
+            let cfg = crate::auralsle_ai_status::config::get();
+            let h_scale = (cfg.expanded_h_scale.clamp(80, 135) as f32) / 100.0;
+            let base = crate::auralsle_music::target_card_height(&cfg, self.auralsle_music_mix) + 14.0;
+            return (base * h_scale).clamp(210.0, 326.0);
+        }
         let base_h = if cfg!(test) {
             if self.page == 5 && self.mail.open_uid.is_some() {
                 236.0
@@ -2400,15 +2990,9 @@ impl App {
             } else {
                 PH
             }
-        } else if self.page == 8 {
-            let mcfg = crate::auralsle_ai_status::config::get();
-            let mod_on = mcfg.enabled && mcfg.mod_ai_status_enabled;
-            let (agents, _) = crate::auralsle_ai_status::state::snapshot();
-            if !mod_on || agents.len() <= 1 {
-                174.0
-            } else {
-                278.0
-            }
+        } else if self.page == 8 || (self.page == 6 && !cfg!(test) && crate::auralsle_ai_status::config::get().ai_island_scheme == 2) {
+            // AI 工作岛统一使用长岛，避免条目被短岛截断
+            278.0
         } else if self.page == 14 {
             if cfg!(test) {
                 278.0
@@ -2533,10 +3117,12 @@ impl App {
         // [ai-status-mod] 截图工具（PixPin / Snipaste 等）在前台时冻结岛：
         // 收起并锁住悬停，免得岛浮在截图画面上挡内容。
         if crate::auralsle_ai_status::shot::frozen() {
-            self.open=false;
-            self.hover_lock=true;
-            self.hover_since=None;
-            self.forced_open_until=0.0;
+            self.open = false;
+            self.drag_hot = false;
+            self.hover_lock = true;
+            self.hover_since = None;
+            self.leave_since = None;
+            self.forced_open_until = 0.0;
         }
 
         self.tick(env, dt, elapsed);
@@ -2547,11 +3133,47 @@ impl App {
         if let Some(a)=&hud_active {self.hud_notice=Some(a.clone());}
         self.hud_alpha=anim::approach(self.hud_alpha,if hud_active.is_some(){1.0}else{0.0},if hud_active.is_some(){16.0}else{8.0},dt);
         if hud_active.is_none() && self.hud_alpha<0.003 {self.hud_notice=None;}
-        let has_msg_orb = !cfg!(test) && (self.minimal_pill_msg_badge_active() || !self.pending_messengers.is_empty());
+        let has_msg_orb = !cfg!(test) && (self.minimal_pill_msg_badge_active() || !self.pending_messengers.is_empty() || !self.pending_oppo_orbs.is_empty());
         let notice_target=if !has_msg_orb && !self.notice.as_ref().is_some_and(|a|a.messenger().is_some()) && self.compact_notices()&&(self.notice.is_some()||self.t<self.notification_bell_until) {44.0}else{0.0};
         self.notice_width.target=notice_target;
         if self.compact_notices(){self.notice_width.step(dt);}else{self.notice_width.snap(0.0);self.notice_details=false;}
         self.update_media(env,&ctx);
+        let mut auralsle_glow_strength = 0.0f32;
+        let mut auralsle_glow_col = Color32::from_rgb(152, 229, 194);
+        if !cfg!(test) {
+            let mcfg = crate::auralsle_ai_status::config::get();
+            let target_mix = crate::auralsle_music::MusicLayout::from_setting(&mcfg.auralsle_music_layout).position();
+            if (target_mix - self.auralsle_music_mix_target).abs() > 0.001 {
+                self.auralsle_music_mix_from = self.auralsle_music_mix;
+                self.auralsle_music_mix_target = target_mix;
+                self.auralsle_music_mix_started = self.t;
+            }
+            self.auralsle_music_mix = crate::auralsle_music::music_layout_mix(
+                self.auralsle_music_mix_from,
+                self.auralsle_music_mix_target,
+                self.t - self.auralsle_music_mix_started,
+            );
+            let glow_active = mcfg.music_ui_style == 6
+                && mcfg.auralsle_music_glow
+                && self.media.playing
+                && self.media.is_music()
+                && !self.side()
+                && !self.effective_minimal();
+            auralsle_glow_strength = self.auralsle_glow.tick(
+                dt,
+                glow_active,
+                mcfg.auralsle_music_glow_mode == "Rhythm",
+                self.t,
+            );
+            if auralsle_glow_strength > 0.01 {
+                auralsle_glow_col = crate::auralsle_music::resolve_palette(
+                    &mcfg,
+                    self.music_artwork.as_ref().map(|(img, _)| img.as_ref()),
+                )
+                .0
+                .accent;
+            }
+        }
         let bell=self.t<self.notification_bell_until&&!self.compact_notices()&&!has_msg_orb;
         self.resident_power=(env.battery,env.charging);
         let mcfg_pill = if cfg!(test) { None } else { Some(crate::auralsle_ai_status::config::get()) };
@@ -2575,7 +3197,7 @@ impl App {
                 let ps = self.notice_pet_space(a);
                 layout.x[bar::PET]=Some(27.0-(self.notice_size(a).0+ps)/2.0);
             }
-            else if self.island_lyrics_active() {layout.x[bar::PET]=Some(60.0-self.lyric_bar_width()/2.0);}
+            else if self.island_lyrics_active() {layout.x[bar::PET]=Some(24.0-self.lyric_bar_width()/2.0);}
         }
         self.resident.step(layout,dt,ctx.style().animation_time>0.0&&bar::animations_enabled());
         if self.opts.fetch_lyrics {
@@ -2590,16 +3212,67 @@ impl App {
         let side = self.side();
         let dock = self.dock();
 
-        // ---------- 输入：拖放 ----------
-        let (hovering_files, dropped) = ctx.input(|i| {
+        // ---------- 输入：拖放（置物架 + OPPO 互联悬浮球） ----------
+        let oppo_mod_on = self.oppo_module_enabled();
+        self.poll_oppo_transfer();
+        let (any_hovering_files, dropped, drag_ptr) = ctx.input(|i| {
             (
-                self.settings.visible_pages[3] && !i.raw.hovered_files.is_empty(),
+                !i.raw.hovered_files.is_empty(),
                 i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>(),
+                i.pointer.latest_pos().or_else(|| i.pointer.interact_pos()),
             )
         });
-        if !dropped.is_empty() && self.settings.visible_pages[3] {
+        let drag_cursor = drag_ptr.or(env.cursor);
+        let was_oppo_drag = self.oppo_drag_hot;
+        self.oppo_drag_hot = oppo_mod_on && any_hovering_files;
+        if self.oppo_drag_hot && !was_oppo_drag {
+            self.refresh_oppo_link_if_needed(true);
+        } else if self.oppo_drag_hot {
+            self.refresh_oppo_link_if_needed(false);
+        }
+        let oppo_orb_hovered = self.oppo_drag_hot
+            && self.oppo_orb_rect.is_some_and(|r| drag_cursor.is_some_and(|pt| r.expand(18.0).contains(pt)));
+        let dropped_on_oppo = oppo_mod_on
+            && !dropped.is_empty()
+            && self.oppo_orb_rect.is_some_and(|r| drag_cursor.is_some_and(|pt| r.expand(16.0).contains(pt)));
+        let shelf_drop_zone = if side {
+            self.island_rect(win, PW, self.expanded_height())
+        } else if self.open || self.drag_hot {
+            self.island_rect(win, PW, self.expanded_height().max(96.0))
+        } else {
+            Rect::from_min_size(Pos2::new(cx - PW / 2.0, top), Vec2::new(PW, 96.0))
+        };
+        // 边缘滞回防抖：未拖入前从严格区域内触发；已拖入后保留更宽外缘，防止停在边缘来回抖动触发反复展开。
+        // 若光标停在/瞄准 OPPO 互传悬浮球，不触发展开置物架（并从边缘移向悬浮球时主动让位，防止面板展开吞住悬浮球）。
+        let in_shelf_drop_zone = drag_cursor.is_some_and(|pt| {
+            let zone = if self.drag_hot {
+                shelf_drop_zone.expand(8.0)
+            } else {
+                shelf_drop_zone.shrink(2.0)
+            };
+            zone.contains(pt)
+        }) && !oppo_orb_hovered;
+        let hovering_files = self.settings.visible_pages[3] && any_hovering_files && in_shelf_drop_zone;
+        self.oppo_orb_pin_pos = self.oppo_drag_hot
+            && self.oppo_orb_initialized
+            && !self.drag_hot
+            && self.oppo_orb_rect.is_some_and(|r| drag_cursor.is_some_and(|pt| r.expand(42.0).contains(pt)));
+
+        if dropped_on_oppo {
+            self.drag_hot = false;
+            if let Some(p) = self.drag_saved.take() {
+                self.go(p, if p < 3 { -1.0 } else { 1.0 });
+            }
+            self.start_oppo_transfer(dropped);
+        } else if !dropped.is_empty() && self.settings.visible_pages[3] && in_shelf_drop_zone {
             self.on_drop(dropped);
             self.show_page(3);
+        } else if !dropped.is_empty() && self.drag_hot && !in_shelf_drop_zone {
+            // 在置物架面板外（如右侧透明区域或悬浮球周边空白）松手时取消拖入，不收录进置物架
+            self.drag_hot = false;
+            if let Some(p) = self.drag_saved.take() {
+                self.go(p, if p < 3 { -1.0 } else { 1.0 });
+            }
         } else if hovering_files && !self.drag_hot {
             self.drag_hot = true;
             if !cfg!(test) {
@@ -2617,6 +3290,10 @@ impl App {
             }
         }
         self.drag_a = anim::approach(self.drag_a, if self.drag_hot { 1.0 } else { 0.0 }, 16.0, dt);
+        let oppo_orb_want = oppo_mod_on && (self.oppo_drag_hot || self.oppo_sending || self.t < self.oppo_orb_hold_until);
+        self.oppo_orb_a = anim::approach(self.oppo_orb_a, if oppo_orb_want { 1.0 } else { 0.0 }, 16.0, dt);
+        self.oppo_orb_hover_a = anim::approach(self.oppo_orb_hover_a, if oppo_orb_hovered { 1.0 } else { 0.0 }, 18.0, dt);
+        self.oppo_progress_vis = anim::approach(self.oppo_progress_vis, self.oppo_progress, 10.0, dt);
 
         // ---------- 输入：智能检测「复制」事件 + N 秒内打开岛默认第一展开剪贴板（需求 9） ----------
         let mcfg_clip = if cfg!(test) {
@@ -2675,7 +3352,25 @@ impl App {
         let p_prev = self.progress();
         let hit = if side {self.side_hit_rect(win,p_prev)} else {self.hit_rect(cx, top, p_prev)};
         let previous_menu=self.shelf_menu_rect.take();
-        let inside = env.cursor.is_some_and(|c| hit.contains(c) || previous_menu.is_some_and(|r|r.contains(c)));
+        let prev_panel = self.island_rect(win, self.w.pos, self.h.pos);
+        let (tc_raw_t, prev_lyric_time_cap) = self.lyric_time_capsule_with_t(&ctx, win, prev_panel, p_prev);
+        let tc_hover_zone = prev_lyric_time_cap.and_then(|(tc_r, tc_a, _)| {
+            (tc_a > 0.05).then(|| {
+                // 覆盖时间胶囊与主岛左缘之间的 7px 缝隙，保证鼠标在时间胶囊上同样触发岛体悬停动效与流畅切换
+                Rect::from_min_max(
+                    Pos2::new(tc_r.left() - 2.0, tc_r.top() - 2.0),
+                    Pos2::new(tc_r.right().max(prev_panel.left() + 2.0), tc_r.bottom() + 2.0),
+                )
+            })
+        });
+        let on_lyric_tc_direct = env.cursor.is_some_and(|c| {
+            prev_lyric_time_cap.is_some_and(|(tc_r, tc_a, _)| tc_a > 0.05 && tc_r.expand(2.0).contains(c))
+        });
+        let inside = env.cursor.is_some_and(|c| {
+            hit.contains(c)
+                || previous_menu.is_some_and(|r| r.contains(c))
+                || tc_hover_zone.is_some_and(|r| r.contains(c))
+        });
         let copy_active_now = !cfg!(test)
             && mcfg_clip.copy_auto_open_clipboard
             && self.is_page_currently_visible(12)
@@ -2689,7 +3384,7 @@ impl App {
         if !self.open {
             self.copy_opened_session = false;
         }
-        let stage1_ready = if cfg!(test) {
+        let _stage1_ready = if cfg!(test) {
             true
         } else {
             (!self.minimal_time_pill_mode() || self.minimal_stage1)
@@ -2701,16 +3396,21 @@ impl App {
                 self.go(12, 1.0);
             }
             self.copy_opened_session = true;
-            if !self.minimal_time_pill_mode() || (stage1_ready && ctx.input(|i| i.pointer.primary_clicked())) {
+            if !self.minimal_time_pill_mode() || ctx.input(|i| i.pointer.primary_clicked()) {
                 self.copy_hot_until = -10.0;
                 crate::clipboard::clear_recent_external_copy();
                 if !self.open {
                     self.open = true;
+                    self.hover_lock = false;
+                    self.minimal_stage1 = false;
+                    let target_w = self.expanded_width();
                     self.w.tune(OPEN_W.0, OPEN_W.1);
                     self.h.tune(OPEN_H.0, OPEN_H.1);
-                    self.w.target = self.expanded_width();
+                    self.w.target = target_w;
                     self.h.target = self.expanded_height();
-                    self.w.vel = self.w.vel.max(600.0);
+                    if self.w.pos < target_w - 24.0 {
+                        self.w.vel = self.w.vel.max(600.0);
+                    }
                     self.h.vel = self.h.vel.max(260.0);
                 }
             }
@@ -2742,7 +3442,7 @@ impl App {
                 let y_off = if cfg!(test) || self.glance_music_island_active() { 0.0 } else { 22.0 };
                 let mail_reading=self.page==5 && self.mail.open_uid.is_some();
                 let mail_list=self.page==5 && ((!cfg!(test) && crate::auralsle_ai_status::config::get().msg_island_filter < 10 && cursor.y >= 32.0 && cursor.y <= (self.h.pos - 14.0).max(236.0)) || (!self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().translate(Vec2::new(0.0, y_off)).contains(cursor)));
-                let fly_scroll_page=!cfg!(test) && cursor.y >= 32.0 && cursor.y <= (self.h.pos - 14.0).max(236.0) && matches!(self.page, 4 | 5 | 8 | 9 | 12 | 13 | 14);
+                let fly_scroll_page=!cfg!(test) && cursor.y >= 32.0 && cursor.y <= (self.h.pos - 14.0).max(236.0) && matches!(self.page, 4 | 5 | 6 | 8 | 9 | 12 | 13 | 14);
                 let music_volume=self.page==0 && (Rect::from_min_max(Pos2::new(354.0,106.0 + y_off),Pos2::new(380.0,130.0 + y_off)).contains(cursor)
                     || self.music_volume_open && crate::pages::MUSIC_VOLUME_RECT.translate(Vec2::new(0.0, y_off)).contains(cursor));
                 let prev_wheel_at=self.wheel_at;
@@ -2858,17 +3558,27 @@ impl App {
         self.orb_hovered = on_messenger_orb;
         let volume_dragging=self.music_volume_open && ctx.is_being_dragged(egui::Id::new(("card-drag",true,"m-volume-track")));
         let brightness_dragging = self.open && self.page == 14 && (ctx.dragged_id().is_some() || ctx.drag_started_id().is_some() || ctx.input(|i| i.pointer.primary_down()));
-        let hover_opens = cfg!(test) || self.settings.island_open_mode == 1;
+        let _hover_opens = cfg!(test) || self.settings.island_open_mode == 1;
         // [需求 7 / 修复] 复制期内即使正在播放音乐并显示歌词胶囊，点击打开也优先进入剪贴板（Page 12），否则打开音乐岛 (Page 0)
-        // 极简胶囊模式下须先悬停过渡到第一阶段大胶囊 (`stage1_ready`) 后才响应点击进展开岛，禁止从极简小药丸直接跳变。
-        if !cfg!(test) && stage1_ready && self.island_lyrics_active() && !self.open && inside && ctx.input(|i| i.pointer.primary_clicked()) {
+        // 修复：无论是否处于悬停放大过渡、悬停锁定或极简小药丸，用户显式点击主岛时都应直接响应并展开，不再只放大一下却不展开。
+        if !cfg!(test) && self.island_lyrics_active() && !self.open && inside && ctx.input(|i| i.pointer.primary_clicked()) {
             let copy_win_ms = (crate::auralsle_ai_status::config::get().copy_auto_open_secs.clamp(1, 60) as i64) * 1000;
             let recent_copy = self.clip_copy_override
                 || self.copy_opened_session
                 || (crate::auralsle_ai_status::config::get().copy_auto_open_clipboard
                     && self.is_page_currently_visible(12)
                     && crate::clipboard::has_recent_external_copy(copy_win_ms));
-            if recent_copy {
+            let click_target = ctx
+                .input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()))
+                .or(env.cursor)
+                .and_then(|pt| self.collapsed_click_target_page(pt, cx));
+            if let Some(tp) = click_target.filter(|&p| p != 0) {
+                self.page_from = tp;
+                self.page = tp;
+            } else if on_lyric_tc_direct && self.is_page_currently_visible(CALENDAR_PAGE) {
+                self.page_from = CALENDAR_PAGE;
+                self.page = CALENDAR_PAGE;
+            } else if recent_copy {
                 self.page_from = 12;
                 self.page = 12;
                 self.copy_opened_session = true;
@@ -2881,13 +3591,29 @@ impl App {
             }
             self.dots_target();
             self.open = true;
+            self.hover_lock = false;
+            self.minimal_stage1 = false;
             self.w.tune(OPEN_W.0, OPEN_W.1);
             self.h.tune(OPEN_H.0, OPEN_H.1);
             self.w.target = self.expanded_width();
             self.h.target = self.expanded_height();
         }
-        if (self.minimal_time_pill_mode() || !hover_opens) && stage1_ready && !self.open && inside_all && ctx.input(|i| i.pointer.primary_clicked()) {
-            if !cfg!(test) && self.clip_copy_override {
+        if !self.open && inside_all && ctx.input(|i| i.pointer.primary_clicked()) {
+            let click_target = if cfg!(test) {
+                None
+            } else {
+                ctx.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()))
+                    .or(env.cursor)
+                    .and_then(|pt| self.collapsed_click_target_page(pt, cx))
+            };
+            if let Some(tp) = click_target {
+                if tp == 0 {
+                    self.settings.visible_pages[0] = true;
+                }
+                self.page_from = tp;
+                self.page = tp;
+                self.dots_target();
+            } else if !cfg!(test) && self.clip_copy_override {
                 self.page_from = 12;
                 self.page = 12;
                 self.copy_hot_until = -10.0;
@@ -2900,6 +3626,8 @@ impl App {
                 self.dots_target();
             }
             self.open = true;
+            self.hover_lock = false;
+            self.minimal_stage1 = false;
             self.w.tune(OPEN_W.0, OPEN_W.1);
             self.h.tune(OPEN_H.0, OPEN_H.1);
             self.w.target = self.expanded_width();
@@ -2983,6 +3711,9 @@ impl App {
             self.messenger_appear() * arr_alpha
         };
         let outside_badge = messenger_rect.filter(|_| appear > 0.02);
+        let lyric_time_cap = self.lyric_time_capsule_at(win, panel, anim::clamp01(p), tc_raw_t);
+        let oppo_orb_geom = self.step_oppo_drop_orb(ui.max_rect(), win, panel, outside_badge, dt);
+        self.oppo_orb_rect = oppo_orb_geom.map(|(orb, _)| orb);
         // [React Bits · ClickSpark] 展开岛与收起岛上的任意点击均严格在当前鼠标指针真实位置播放 8 芒星烟花动效
         if !cfg!(test) && ctx.input(|i| i.pointer.primary_pressed()) {
             if let Some(click_pos) = ctx.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos())).or(env.cursor) {
@@ -3008,7 +3739,9 @@ impl App {
         let flare = if minimal_pill || pill || !cfg!(test) { 0.0 } else { lerp(5.0, FLARE, pc) };
         let k = (w / PW).clamp(0.3, 1.1);
         let thickness = if side { crate::side_dock::SIDE_BAR_W } else { BAR_H };
-        let pill_closed_r = if self.notice.as_ref().is_some_and(|a| a.meeting.is_some()) || h > 56.0 {
+        let pill_closed_r = if self.notice.as_ref().is_some_and(|a| a.verification_code.is_some()) {
+            22.0
+        } else if self.notice.as_ref().is_some_and(|a| a.meeting.is_some()) || h > 56.0 {
             24.0
         } else {
             h * 0.5
@@ -3033,15 +3766,53 @@ impl App {
         let island_shadow=|r:Rect,flare:f32,flare_h:f32,radius:f32,strength:f32| if pill {pill_shadow(&painter,r,radius,strength)} else if side {shape::shadow_docked(&painter,r,dock,flare,flare_h,radius,strength)} else {shape::shadow(&painter,r,flare,flare_h,radius,strength)};
         // 拿起时投影加深，像被从屏幕边缘提起来。
         let lifted = self.drag_lift.pos.clamp(0.0, 1.2);
-        island_shadow(body, flare, flare_h, radius, (smoothstep(0.1, 0.9, pc) + lifted * 0.9) * shadow_k);
-        // [ai-status-mod] 恢复原版岛仔未读悬浮球：深色圆角胶囊底板 + 细描边（底板完整跟随当前岛体主题，修复图六）。
+        let suppress_outer_shadow = !cfg!(test) && self.open && (self.auralsle_music_island_active() || glass_skin);
+        if !suppress_outer_shadow {
+            island_shadow(body, flare, flare_h, radius, (smoothstep(0.1, 0.9, pc) + lifted * 0.9) * shadow_k);
+        }
+        // 歌词岛时间胶囊与设备药丸底板统一延后至 `pill_layout` 合并计算阶段绘制（位于 content_from 之前），
+        // 确保展开时可由同一枚左侧胶囊直接形变切换内容为设备电量、收起时平滑还原为时间。
+        let has_active_music_bg = !cfg!(test) && self.open && (!self.media.title.trim().is_empty() || self.auralsle_music_island_active());
+        let surf_alpha = if has_active_music_bg && (self.auralsle_music_island_active() || self.reveal > 0.04) {
+            if self.auralsle_music_island_active() {
+                smoothstep(0.20, 0.85, pc)
+            } else {
+                self.reveal
+            }
+        } else {
+            0.0
+        };
+        let active_music_surf = (surf_alpha > 0.01).then(|| {
+            let dcfg = crate::auralsle_ai_status::config::get();
+            let artwork_img = self.music_artwork.as_ref().map(|(img, _)| img.as_ref());
+            let (pal, _) = crate::auralsle_music::resolve_palette(&dcfg, artwork_img);
+            let blurred_tex = self.auralsle_blur_cache.get_or_build(
+                &ctx,
+                self.music_artwork.as_ref(),
+                dcfg.auralsle_acrylic_frost,
+            );
+            let is_glass = dcfg.auralsle_card_material == "Glass";
+            let aurora_colors = crate::auralsle_music::extract_salt_aurora_colors(artwork_img, &pal);
+            (dcfg, pal, blurred_tex, is_glass, aurora_colors)
+        });
+
+        // OPPO 互联拖拽悬浮球及状态胶囊：统一采用当前主题材质
+        if let Some((orb_r, label_r)) = oppo_orb_geom {
+            let oa = anim::ease_out_cubic(self.oppo_orb_a);
+            self.paint_card_body_themed(&painter.with_clip_rect(orb_r.intersect(ui.max_rect())), orb_r, orb_r.width() * 0.5, feather, oa, body, true, false);
+            if let Some(lr) = label_r {
+                self.paint_card_body_themed(&painter.with_clip_rect(lr.intersect(ui.max_rect())), lr, lr.height() * 0.5, feather, oa, body, true, false);
+            }
+        }
+        // 未读消息悬浮球：统一采用当前主题材质
         if let Some(r)=outside_badge{
             if cfg!(test) {
                 painter.rect_filled(r,r.width()/2.0,paint::alpha(self.glass_fill(),appear));
                 if glass_skin {painter.rect_stroke(r,r.width()/2.0,egui::Stroke::new(1.0_f32,paint::alpha(self.glass_rim(),appear)),egui::StrokeKind::Inside);}
             } else {
                 for orb_r in self.outside_badge_body_rects(r) {
-                    self.paint_card_body(&painter, orb_r, orb_r.width().min(orb_r.height()) * 0.5, feather, appear, body);
+                    let orb_rad = orb_r.width().min(orb_r.height()) * 0.5;
+                    self.paint_card_body_themed(&painter.with_clip_rect(orb_r.intersect(ui.max_rect())), orb_r, orb_rad, feather, appear, body, true, false);
                     if arr_ripple < 0.99 {
                         let ring_expand = arr_ripple * 5.0;
                         let ring_alpha = ((1.0 - arr_ripple).powi(2) * 0.68 * appear).clamp(0.0, 1.0);
@@ -3064,7 +3835,7 @@ impl App {
         if matches!(self.settings.skin,model::Skin::Fluid|model::Skin::LiquidGlass) {
             self.fluid_origin=body.min;
             let cover_tint_on = cfg!(test) || (self.settings.skin != model::Skin::Cream && crate::auralsle_ai_status::config::get().fluid_cover_tint);
-            let active_music_tint = cover_tint_on && (self.media.playing || cfg!(test)) && !self.media.title.is_empty();
+            let active_music_tint = cover_tint_on && !self.media.title.trim().is_empty();
             let art = if active_music_tint { self.music_artwork.as_ref().map(|(_,texture)|texture.id()) } else { None };
             let title_key = if active_music_tint { self.media.title.as_str() } else { "" };
             if art != self.fluid_art || title_key != self.fluid_title {
@@ -3083,7 +3854,32 @@ impl App {
             if !self.open || self.page!=0 || !active_music_tint {self.fluid.set_seek(None,0.0);}
             self.fluid.advance(env.t,dt);
         }
+        if auralsle_glow_strength > 0.01 && !minimal_pill {
+            crate::auralsle_music::paint_outer_glow(&painter, body, radius, auralsle_glow_col, auralsle_glow_strength);
+        }
         self.paint_body(&painter, body, flare, flare_h, radius, feather);
+        // 音乐播放/暂停期间及 Auralsle 音乐卡展开时，直接在主岛真实轮廓 `body` 上实时渲染封面流光渐变背景，
+        // 确保与窗口圆角、DWM 毛玻璃轮廓像素级重合，彻底消除边缘/底部裁切残缺。
+        if let Some((ref dcfg, ref pal, ref blurred_tex, is_glass, ref aurora_colors)) = active_music_surf {
+            let bg_card = Card::new(ui, body.min, ui.max_rect()).faded(surf_alpha);
+            let surf_r = radius.min(body.width().min(body.height()) * 0.5);
+            crate::auralsle_music::paint_music_surface_flowing(
+                &bg_card,
+                body.width(),
+                body.height(),
+                surf_r,
+                pal,
+                blurred_tex.as_ref(),
+                dcfg.auralsle_acrylic_frost,
+                dcfg.auralsle_cover_overlay,
+                dcfg.auralsle_acrylic_opacity,
+                is_glass,
+                Some(*aurora_colors),
+                self.t,
+                self.media.playing,
+                dcfg.salt_flow_bg,
+            );
+        }
         if lifted > 0.01 {self.paint_lift_halo(&painter, body, flare, flare_h, radius, lifted.min(1.0));}
         let center_guide=self.paint_center_rim(&painter, body, panel, flare, flare_h, radius, env.screen);
         let content_from=crate::skin_paint::shape_count(&ctx,layer);
@@ -3101,8 +3897,7 @@ impl App {
             let circle_r = c_rect.width().min(c_rect.height()) * 0.5;
             let target_cr = radius.min(circle_r);
             let c_radius = lerp(circle_r, target_cr, c_morph * c_morph);
-            let c_clipped = painter.with_clip_rect(c_rect.intersect(ui.max_rect()));
-            self.paint_card_body(&c_clipped, c_rect, c_radius, feather, c_fade, body);
+            self.paint_card_body_styled(&painter.with_clip_rect(c_rect.intersect(ui.max_rect())), c_rect, c_radius, feather, c_fade, body, false);
         }
         // [设备药丸] 与课程岛解耦：有没有课程卡只影响药丸的 y，不决定它是否存在。
         // 本帧窗口 / 主岛 / 课程卡实测矩形交给自适应布局器，位置不再写死。
@@ -3116,25 +3911,99 @@ impl App {
             course: course_geom.map(|(r, _, _)| r),
             mode: crate::auralsle_ai_status::config::get().pill_placement,
         };
-        let pill_layout = crate::auralsle_ai_status::ui::device_pill_layout(
-            &base, cx - origin.x, self.w.pos, self.progress(), self.side(), island_devs.len(),
-            pill_area,
-        );
-        // 每枚底板单独走主岛同一套皮肤材质（悬浮云流体网格 / 液态玻璃 / 奶油 / 毛玻璃），
-        // 背景与课程卡同源；不画白色描边、不画外扩阴影。
-        // 自带不透明底板的预设（扁平徽章 / 终端等宽等）跳过这一层，避免双层叠色。
+        // 歌词时间胶囊与设备药丸联动编排：
+        // 若展开后左侧存在设备药丸，则让同一枚左侧胶囊直接丝滑形变并在内部交叉淡入切换内容（时间 <-> 设备电量）；
+        // 否则按原有分时让位逻辑退场，绝不叠字或抢动画。
+        let tc_handoff_active = !cfg!(test)
+            && !side
+            && self.island_lyrics_active()
+            && crate::auralsle_ai_status::config::get().lyric_island_time_capsule;
+        let morph_tc_rect0 = if tc_handoff_active {
+            self.lyric_time_capsule_geom(win, panel, 0.0, 1.0).map(|(r, _, _)| r)
+        } else {
+            None
+        };
+        let target_pills = if morph_tc_rect0.is_some() && !island_devs.is_empty() {
+            crate::auralsle_ai_status::ui::device_pill_layout(
+                &base, cx - origin.x, self.w.pos, 1.0, self.side(), island_devs.len(), pill_area,
+            )
+        } else {
+            Vec::new()
+        };
+        let morph_tc_state = morph_tc_rect0.and_then(|r0| {
+            target_pills
+                .first()
+                .filter(|p0| p0.rect.center().x < panel.center().x)
+                .map(|p0| {
+                    let (cur_r, box_alpha, tc_text_alpha, dev0_alpha) =
+                        Self::morph_tc_to_device_pill(r0, p0.rect, pc, tc_raw_t);
+                    (cur_r, box_alpha, tc_text_alpha, dev0_alpha, p0.overflow)
+                })
+        });
+
+        let pill_layout = if morph_tc_state.is_some() {
+            let extra_p = ((self.progress() - 0.30) / 0.70).clamp(0.0, 1.0);
+            crate::auralsle_ai_status::ui::device_pill_layout(
+                &base, cx - origin.x, self.w.pos, extra_p, self.side(), island_devs.len(), pill_area,
+            )
+        } else {
+            let tc_alpha_now = lyric_time_cap.map(|(_, a, _)| a).unwrap_or(0.0);
+            let pill_progress = if tc_handoff_active || tc_alpha_now > 0.01 {
+                let clear_gate = 1.0 - smoothstep(0.01, 0.14, tc_alpha_now);
+                ((self.progress() - 0.16) / 0.84).clamp(0.0, 1.0) * clear_gate
+            } else {
+                self.progress()
+            };
+            crate::auralsle_ai_status::ui::device_pill_layout(
+                &base, cx - origin.x, self.w.pos, pill_progress, self.side(), island_devs.len(),
+                pill_area,
+            )
+        };
+
         let pill_style = crate::auralsle_ai_status::config::get().pill_style;
-        if !crate::auralsle_ai_status::ui::pill_style_owns_background(pill_style) {
-            for p in &pill_layout {
-                // 材质网格的羽化带会溢出胶囊矩形（悬浮云皮肤下表现为药丸下方一条约 10px 的
-                // 灰带，看起来像套了一层外罩）。这里把绘制严格裁进药丸矩形，外圈不再有多余材质。
-                let clipped = painter.with_clip_rect(p.rect.intersect(ui.max_rect()));
-                self.paint_card_body_styled(&clipped, p.rect, crate::auralsle_ai_status::ui::pill_style_corner_radius(pill_style, p.h), feather, p.fade, body, false);
+        if let Some((cur_r, box_alpha, tc_text_alpha, dev0_alpha, overflow0)) = morph_tc_state {
+            if box_alpha > 0.015
+                && (!crate::auralsle_ai_status::ui::pill_style_owns_background(pill_style) || dev0_alpha < 0.99)
+            {
+                let bg_alpha = if crate::auralsle_ai_status::ui::pill_style_owns_background(pill_style) {
+                    (box_alpha * (1.0 - dev0_alpha)).max(tc_text_alpha)
+                } else {
+                    box_alpha
+                };
+                if bg_alpha > 0.01 {
+                    let rad = radius.min(cur_r.height() * 0.5);
+                    self.paint_card_body_themed(&painter.with_clip_rect(cur_r.intersect(ui.max_rect())), cur_r, rad, feather, bg_alpha, body, true, false);
+                }
             }
+            if !crate::auralsle_ai_status::ui::pill_style_owns_background(pill_style) {
+                for p in pill_layout.iter().skip(1) {
+                    let rad = crate::auralsle_ai_status::ui::pill_style_corner_radius(pill_style, p.h);
+                    self.paint_card_body_themed(&painter.with_clip_rect(p.rect.intersect(ui.max_rect())), p.rect, rad, feather, p.fade, body, true, false);
+                }
+            }
+            let mut active_rects = Vec::with_capacity(1 + pill_layout.len().saturating_sub(1));
+            if box_alpha > 0.015 {
+                active_rects.push(cur_r);
+            }
+            active_rects.extend(pill_layout.iter().skip(1).map(|p| p.rect));
+            crate::auralsle_ai_status::record_device_pill_rects(active_rects);
+            let _ = overflow0;
+        } else {
+            // 未合体时分别绘制时间胶囊与设备药丸的主题材质底板
+            if let Some((tc_r, tc_alpha, _)) = lyric_time_cap {
+                let tc_rad = radius.min(tc_r.height() * 0.5);
+                self.paint_card_body_themed(&painter.with_clip_rect(tc_r.intersect(ui.max_rect())), tc_r, tc_rad, feather, tc_alpha, body, true, false);
+            }
+            if !crate::auralsle_ai_status::ui::pill_style_owns_background(pill_style) {
+                for p in &pill_layout {
+                    let rad = crate::auralsle_ai_status::ui::pill_style_corner_radius(pill_style, p.h);
+                    self.paint_card_body_themed(&painter.with_clip_rect(p.rect.intersect(ui.max_rect())), p.rect, rad, feather, p.fade, body, true, false);
+                }
+            }
+            crate::auralsle_ai_status::record_device_pill_rects(
+                pill_layout.iter().map(|p| p.rect).collect(),
+            );
         }
-        crate::auralsle_ai_status::record_device_pill_rects(
-            pill_layout.iter().map(|p| p.rect).collect(),
-        );
         let content_from=crate::skin_paint::shape_count(&ctx,layer);
         // [修复需求 9]：将课程岛内容绘制移出 shared_header（shared_header 在极简时间药丸模式下会提前 return），
         // 确保无论主岛处于极简药丸、歌词态还是展开态，左侧课程岛内容始终实时渲染并立即响应 UI 样式切换！
@@ -3157,9 +4026,31 @@ impl App {
                 })
                 .unwrap_or(false);
             let pill_theme = crate::auralsle_ai_status::ui::PillTheme::from_skin(ink_rgb, light_skin);
-            crate::auralsle_ai_status::ui::draw_device_pills(
-                &outer, &pill_layout, &island_devs, icon_tint, pill_theme, pill_style,
-            );
+            if let Some((cur_r, _, _, dev0_alpha, overflow0)) = morph_tc_state {
+                if dev0_alpha > 0.01 && !island_devs.is_empty() {
+                    let slot0 = crate::auralsle_ai_status::ui::PillPlacement {
+                        x: cur_r.left() - origin.x,
+                        y: cur_r.top() - origin.y,
+                        w: cur_r.width(),
+                        h: cur_r.height(),
+                        fade: dev0_alpha,
+                        rect: cur_r,
+                        overflow: overflow0,
+                    };
+                    crate::auralsle_ai_status::ui::draw_device_pills(
+                        &outer, &[slot0], &island_devs[..1], icon_tint, pill_theme, pill_style,
+                    );
+                }
+                if pill_layout.len() > 1 && island_devs.len() > 1 {
+                    crate::auralsle_ai_status::ui::draw_device_pills(
+                        &outer, &pill_layout[1..], &island_devs[1..], icon_tint, pill_theme, pill_style,
+                    );
+                }
+            } else {
+                crate::auralsle_ai_status::ui::draw_device_pills(
+                    &outer, &pill_layout, &island_devs, icon_tint, pill_theme, pill_style,
+                );
+            }
             let pill_to = crate::skin_paint::shape_count(&ctx, layer);
             if pill_to > pill_from {
                 keep_colors.push((pill_from, pill_to));
@@ -3184,12 +4075,16 @@ impl App {
             }
         }else if banner {
             if let Some(a)=self.notice.clone(){
-                let mut ps = self.notice_pet_space(&a);
-                // 外部横幅通知（如 OPPO 互联）在带吉祥物时往左紧凑 4px，使左右留白完全对称
-                if ps > 0.0 && a.source != crate::extras::AlertSource::Internal && a.messenger().is_none() {
-                    ps = (ps - 4.0).max(0.0);
-                }
+                let ps = self.notice_pet_space(&a);
+                let otp_from = if a.verification_code.is_some() {
+                    Some(crate::skin_paint::shape_count(&ctx, layer))
+                } else {
+                    None
+                };
                 self.draw_notice(&Card::new(ui,panel.min+Vec2::new(ps,0.0),panel.intersect(ui.max_rect())),panel,&a,&mut cmds);
+                if let Some(from) = otp_from {
+                    keep_colors.push((from, crate::skin_paint::shape_count(&ctx, layer)));
+                }
             }
         }else if !minimal_pill || self.minimal_time_pill_mode() || pc > 0.0 {
             self.resident_header(&base, panel, cx, if restoring_lyrics{0.0}else{pc}, reveal, env);
@@ -3200,8 +4095,23 @@ impl App {
                 let opacity=self.hud_alpha*smoothstep(0.45,0.95,self.notice_width.pos/44.0);
                 let c=c.faded(opacity);let c=if self.notice.is_none()||opacity<0.85 {c.ghost()}else{c};
                 if a.source!=crate::extras::AlertSource::Internal {
-                    paint::bell(&c.scaled(18.0,15.0,0.85),18.0,15.0,theme::WHITE,paint::bell_swing(self.t-a.at));
-                    c.circle(22.0,10.5,2.0,Color32::from_rgb(255,72,72));
+                    if let Some(tex) = if cfg!(test) {
+                        None
+                    } else {
+                        a.icon_png.as_deref().and_then(|png| crate::extras::oppo_icon_texture(c.ui.ctx(), png))
+                    } {
+                        let ir = c.rect(8.0, 5.0, 20.0, 20.0);
+                        c.painter.add(
+                            egui::epaint::RectShape::filled(ir, egui::CornerRadius::same(5), Color32::WHITE)
+                                .with_texture(tex.id(), Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0))),
+                        );
+                        if a.oppo_badge {
+                            crate::extras::oppo_corner_badge(&c, 26.5, 23.0, 3.6);
+                        }
+                    } else {
+                        paint::bell(&c.scaled(18.0,15.0,0.85),18.0,15.0,theme::WHITE,paint::bell_swing(self.t-a.at));
+                        c.circle(22.0,10.5,2.0,Color32::from_rgb(255,72,72));
+                    }
                 }else{crate::extras::notice_badge(&c,18.0,15.0,&a);}
                 let button=crate::quota_ui::bar_tooltip(c.hit(0.0,0.0,36.0,BAR_H,"notice-badge"),format!("{}\n{}",a.title,a.body));
                 if button.clicked(){if let Some(kind)=a.health(){self.confirm_health_reminder(kind);}else{self.notice_details=!self.notice_details;}}
@@ -3209,6 +4119,37 @@ impl App {
                 paint::bell(&c.scaled(20.0,14.0,1.2),20.0,14.0,theme::WHITE,paint::bell_swing(self.t-self.notification_bell_at));
                 c.circle(24.0,9.5,2.0,Color32::from_rgb(255,72,72));
                 if c.hit(6.0,0.0,28.0,30.0,"bell-mail").clicked(){self.show_page(5);}
+            }
+        }
+        let active_tc_draw = if let Some((cur_r, _, tc_text_alpha, _, _)) = morph_tc_state {
+            (tc_text_alpha > 0.01).then_some((cur_r, tc_text_alpha, 1.0))
+        } else {
+            lyric_time_cap
+        };
+        if let Some((tc_r, tc_alpha, tc_scale)) = active_tc_draw {
+            let tc_card = Card::new(ui, tc_r.min, tc_r.intersect(ui.max_rect())).faded(tc_alpha);
+            let fmt = match (self.settings.clock_12h, self.settings.clock_seconds) {
+                (true, true) => "%I:%M:%S",
+                (true, false) => "%I:%M",
+                (false, true) => "%H:%M:%S",
+                (false, false) => "%H:%M",
+            };
+            let now_str = chrono::Local::now().format(fmt).to_string();
+            let swell = (panel.height() / BAR_H).clamp(1.0, 1.35);
+            let fsz = (if self.settings.clock_seconds { 11.2 } else { 12.2 }) * swell * tc_scale;
+            tc_card.centered_text(tc_r.width() * 0.5, tc_r.height() * 0.5, &now_str, fsz, W::Semibold, theme::WHITE, H::Center);
+            if !cfg!(test) && tc_alpha > 0.35 && tc_card.hit(0.0, 0.0, tc_r.width(), tc_r.height(), "lyric-tc-jump").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                if self.is_page_currently_visible(CALENDAR_PAGE) {
+                    self.show_page(CALENDAR_PAGE);
+                } else if !self.open {
+                    self.open = true;
+                    self.hover_lock = false;
+                    self.minimal_stage1 = false;
+                    self.w.tune(OPEN_W.0, OPEN_W.1);
+                    self.h.tune(OPEN_H.0, OPEN_H.1);
+                    self.w.target = self.expanded_width();
+                    self.h.target = self.expanded_height();
+                }
             }
         }
         if let Some(rect)=messenger_rect {
@@ -3258,15 +4199,52 @@ impl App {
             // 吉祥物跟随皮肤换色：原生单色眼睛在浅色底上变成深色，而 Aora Bot 彩色角色保留自身配色。
             let fit=if self.island_lyrics_active()||self.notice.is_some(){1.0}else{((WIN_W-32.0)/self.resident.target.width).min(1.0)};
             let pet_from=crate::skin_paint::shape_count(&ctx,layer);
-            self.pet.draw(&base.scaled(cx-origin.x,15.0,fit).shifted(0.0,y).faded(pet_alpha),cx-origin.x+self.resident.position(bar::PET),self.t,self.skin_palette());
+            if self.island_lyrics_active() && !banner {
+                let hover_s = if !self.open && pc < 0.02 {
+                    ((w / self.lyric_bar_width().max(1.0)).min(h / BAR_H)).clamp(1.0, 1.14)
+                } else {
+                    1.0
+                };
+                let live_w = (w / hover_s).max(self.lyric_bar_width());
+                let pet_draw_x = (cx - origin.x) - live_w * 0.5 + 24.0;
+                let pet_card = base
+                    .shifted(0.0, (h - BAR_H) * 0.5)
+                    .scaled(cx - origin.x, BAR_H * 0.5, fit * hover_s)
+                    .faded(pet_alpha);
+                self.pet.draw(&pet_card, pet_draw_x, self.t, self.skin_palette());
+            } else {
+                let main_hover_s = if !cfg!(test) && !self.open && !banner && pc < 0.02 {
+                    let base_w = self.base_size().0.max(1.0);
+                    ((w / base_w).min(h / BAR_H)).clamp(1.0, 1.14)
+                } else {
+                    1.0
+                };
+                let pet_card = base
+                    .shifted(0.0, (h - BAR_H).max(0.0) * 0.5)
+                    .scaled(cx - origin.x, BAR_H * 0.5, fit * main_hover_s)
+                    .faded(pet_alpha);
+                self.pet.draw(&pet_card, cx - origin.x + self.resident.position(bar::PET), self.t, self.skin_palette());
+            }
             if crate::auralsle_ai_status::config::get().islo_face && (!cfg!(test) || (self.pet.state!=PetState::Music && self.pet.expressions.current().is_none())) {
                 keep_colors.push((pet_from,crate::skin_paint::shape_count(&ctx,layer)));
             }
         }
         if reveal > 0.004 && !banner && !restoring_lyrics {
-            let c = base.shifted(0.0, (1.0 - reveal) * -5.0).faded(reveal);
+            let reveal_dy = if !cfg!(test) && self.auralsle_music_island_active() { 0.0 } else { (1.0 - reveal) * -5.0 };
+            let c = base.shifted(0.0, reveal_dy).faded(reveal);
             let c = if reveal < 0.6 { c.ghost() } else { c };
+            let dm_from = if self.auralsle_music_island_active() {
+                Some(crate::skin_paint::shape_count(&ctx, layer))
+            } else {
+                None
+            };
             if self.calendar.draft.is_some(){self.draw_calendar_editor(&c);}else if self.task_dialog.is_some(){self.draw_task_editor(&c);}else{self.panel_body(&c, env, &mut cmds);}
+            if let Some(from) = dm_from {
+                keep_colors.push((from, crate::skin_paint::shape_count(&ctx, layer)));
+            }
+            if auralsle_glow_strength > 0.01 && !minimal_pill {
+                crate::auralsle_music::paint_inner_glow(&painter, body, radius, auralsle_glow_col, auralsle_glow_strength);
+            }
             let toast_y = if !cfg!(test) && self.expanded_height() >= 190.0 {
                 self.expanded_height() - 52.0
             } else {
@@ -3334,7 +4312,19 @@ impl App {
                 )
             }
         };
+        if auralsle_glow_strength > 0.01 && !minimal_pill {
+            region = region.union(body.expand(12.0));
+        }
         if self.drag_lift.pos.abs()>0.005 || self.drag_stretch.pos.abs()>0.001 {region=region.union(panel.expand2(Vec2::new(18.0,22.0)));}
+        if let Some((cur_r, box_alpha, _, _, _)) = morph_tc_state {
+            if box_alpha > 0.015 {
+                let pad = if cfg!(test) || self.open || p > 0.005 { 6.0 } else { 1.5 };
+                region = region.union(cur_r.expand(pad));
+            }
+        } else if let Some((tc_r, _, _)) = lyric_time_cap {
+            let pad = if cfg!(test) || self.open || p > 0.005 { 6.0 } else { 1.5 };
+            region = region.union(tc_r.expand(pad));
+        }
         if let Some(r)=messenger_rect{
             let pad = if cfg!(test) || self.open || p > 0.005 { 9.0 } else { 0.5 };
             region=region.union(r.expand(pad));
@@ -3351,6 +4341,13 @@ impl App {
             let pad = if cfg!(test) || self.open || p > 0.005 { 6.0 } else { 1.0 };
             region=region.union(r.expand(pad));
         }
+        if let Some((orb_r, label_r)) = oppo_orb_geom {
+            let pad = if self.oppo_drag_hot { 24.0 } else { 12.0 };
+            region = region.union(orb_r.expand(pad));
+            if let Some(lr) = label_r {
+                region = region.union(lr.expand(8.0));
+            }
+        }
         // 胶囊上方留空的那一小条也要在窗口区域内，阴影才不会被截断。
         if pill && !side {region.min.y=region.min.y.min(win.top());}
         // 浅色皮肤：把这一帧岛体内容统一换成皮肤配色。
@@ -3362,6 +4359,147 @@ impl App {
             if end>at {ranges.push((at,end));}
             crate::skin_paint::recolor_layer(&ctx,layer,&ranges,&palette);
         }
+        // 绘制 OPPO 互联拖拽悬浮球前景（保留图标原色 + 环形传输进度条 + 连接状态指示灯）
+        if let Some((orb_r, label_r)) = oppo_orb_geom {
+            let oa = anim::ease_out_cubic(self.oppo_orb_a);
+            let ha = self.oppo_orb_hover_a;
+            let accent = Color32::from_rgb(28, 174, 255);
+            let ok_green = Color32::from_rgb(46, 213, 115);
+            let warn_amber = Color32::from_rgb(251, 191, 36);
+            let err_red = Color32::from_rgb(239, 68, 68);
+
+            if self.oppo_icon.is_none() {
+                if let Some(img) = crate::oppo_bridge::icon_color_image() {
+                    self.oppo_icon = Some(ctx.load_texture(
+                        "oppo_connect_orb_icon",
+                        img.clone(),
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+            }
+
+            // 悬停高亮外环
+            if ha > 0.02 && !self.oppo_sending {
+                let glow_r = orb_r.expand(2.5 * ha);
+                painter.rect_stroke(
+                    glow_r,
+                    glow_r.width() * 0.5,
+                    egui::Stroke::new(2.0 + 0.8 * ha, paint::alpha(accent, (0.35 + 0.55 * ha) * oa)),
+                    egui::StrokeKind::Outside,
+                );
+                painter.rect_filled(
+                    orb_r,
+                    orb_r.width() * 0.5,
+                    paint::alpha(accent, 0.14 * ha * oa),
+                );
+            }
+
+            // 居中绘制 OPPO 互联图标
+            if let Some(tex) = &self.oppo_icon {
+                let icon_r = orb_r.shrink(orb_r.width() * 0.20);
+                painter.image(
+                    tex.id(),
+                    icon_r,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::from_white_alpha((255.0 * oa).round() as u8),
+                );
+            }
+
+            // 悬浮球一圈环形进度条（后台传输中 / 刚完成时展示）
+            if self.oppo_sending || self.oppo_done_ok.is_some() {
+                let ring_radius = (orb_r.width() * 0.5 - 2.2).max(8.0);
+                let center = orb_r.center();
+                let ring_col = match self.oppo_done_ok {
+                    Some(true) => ok_green,
+                    Some(false) => err_red,
+                    None => accent,
+                };
+                painter.circle_stroke(
+                    center,
+                    ring_radius,
+                    egui::Stroke::new(2.8, paint::alpha(Color32::WHITE, 0.18 * oa)),
+                );
+                let frac = self.oppo_progress_vis.clamp(0.02, 1.0);
+                let segs = ((frac * 56.0).ceil() as usize).max(6);
+                let start_ang = -std::f32::consts::FRAC_PI_2;
+                let sweep = std::f32::consts::TAU * frac;
+                let pts: Vec<Pos2> = (0..=segs)
+                    .map(|k| {
+                        let a = start_ang + sweep * (k as f32 / segs as f32);
+                        Pos2::new(center.x + ring_radius * a.cos(), center.y + ring_radius * a.sin())
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(
+                    pts,
+                    egui::Stroke::new(3.0, paint::alpha(ring_col, 0.96 * oa)),
+                ));
+            }
+
+            // 右上角连接状态指示灯（绿 = 已连接，黄 = 重连中，红 = 未连接）
+            let conn_col = match self.oppo_link.conn {
+                crate::oppo_bridge::Conn::Connected => ok_green,
+                crate::oppo_bridge::Conn::Reconnecting => warn_amber,
+                crate::oppo_bridge::Conn::Disconnected => err_red,
+            };
+            let dot_r = (orb_r.width() * 0.105).clamp(3.6, 5.0);
+            let dot_angle = -std::f32::consts::FRAC_PI_4;
+            let dot_dist = orb_r.width() * 0.5 - dot_r * 0.65;
+            let dot_center = Pos2::new(
+                orb_r.center().x + dot_dist * dot_angle.cos(),
+                orb_r.center().y + dot_dist * dot_angle.sin(),
+            );
+            painter.circle_filled(
+                dot_center,
+                dot_r + 1.4,
+                paint::alpha(Color32::from_rgb(16, 20, 26), 0.88 * oa),
+            );
+            painter.circle_filled(dot_center, dot_r, paint::alpha(conn_col, 0.98 * oa));
+
+            // 底部精简状态/进度胶囊
+            if let Some(lr) = label_r {
+                let caption = if self.oppo_sending {
+                    format!("{}%", (self.oppo_progress_vis * 100.0).round().clamp(1.0, 99.0) as u32)
+                } else if let Some(ok) = self.oppo_done_ok {
+                    if ok { "已发送".to_string() } else { "失败".to_string() }
+                } else if ha > 0.35 {
+                    match self.oppo_link.conn {
+                        crate::oppo_bridge::Conn::Connected => "松手互传".to_string(),
+                        crate::oppo_bridge::Conn::Reconnecting => "重连中".to_string(),
+                        crate::oppo_bridge::Conn::Disconnected => "未连接".to_string(),
+                    }
+                } else {
+                    self.oppo_link.detail.clone()
+                };
+                let gf = self.glass_fill();
+                let lum = 0.299 * (gf.r() as f32) + 0.587 * (gf.g() as f32) + 0.114 * (gf.b() as f32);
+                let is_light_theme = matches!(self.settings.skin, model::Skin::Cream | model::Skin::GlassLight) || lum > 150.0;
+                let has_semantic_bg = self.oppo_done_ok.is_some() || ha > 0.35 || self.oppo_sending;
+                let cap_r = lr.height() * 0.5;
+                if has_semantic_bg {
+                    let cap_bg = if self.oppo_done_ok == Some(true) {
+                        paint::alpha(Color32::from_rgb(22, 138, 76), 0.90 * oa)
+                    } else if self.oppo_done_ok == Some(false) {
+                        paint::alpha(Color32::from_rgb(185, 42, 42), 0.90 * oa)
+                    } else {
+                        paint::alpha(Color32::from_rgb(18, 128, 214), 0.90 * oa)
+                    };
+                    painter.rect_filled(lr, cap_r, cap_bg);
+                }
+                let text_col = if is_light_theme && !has_semantic_bg {
+                    Color32::from_rgb(24, 28, 36)
+                } else {
+                    Color32::WHITE
+                };
+                let clipped_lr = painter.with_clip_rect(lr.shrink2(Vec2::new(4.0, 0.0)));
+                clipped_lr.text(
+                    lr.center(),
+                    egui::Align2::CENTER_CENTER,
+                    caption,
+                    theme::font(8.2, theme::W::Regular),
+                    paint::alpha(text_col, 0.96 * oa),
+                );
+            }
+        }
         // 原生裁剪还需包含悬停提示；只扩大绘制区域，保持桌面点击穿透。
         let mut tooltips=Vec::new();
         ctx.memory(|memory|{
@@ -3372,47 +4510,69 @@ impl App {
             }
         });
         // 毛玻璃：窗口区域只取岛体与浮层的真实轮廓，系统模糊不会溢出到透明画布上。
-        let glass_region=((glass_skin || self.settings.skin==model::Skin::Fluid || (!cfg!(test) && crate::auralsle_ai_status::config::get().win_theme > 0)) && (self.settings.glass_blur || !cfg!(test) || self.settings.skin==model::Skin::LiquidGlass) || env.opaque_surface).then(||{
-            let outline=|r:Rect,flare:f32,flare_h:f32,radius:f32| if pill {GlassShape::Round(rel(r),radius.min(r.height().min(r.width())*0.5))}
-                else if side {GlassShape::Docked{rect:rel(r),dock,flare,flare_h,radius}} else {GlassShape::Notch{rect:rel(r),flare,flare_h,radius}};
-            let mut shapes=vec![outline(body,flare,flare_h,radius)];
-            if let Some(r)=outside_badge{
-                if cfg!(test) {
-                    shapes.push(GlassShape::Round(rel(r),r.width()/2.0));
-                } else {
-                    for orb_r in self.outside_badge_body_rects(r) {
-                        shapes.push(GlassShape::Round(rel(orb_r), orb_r.width().min(orb_r.height()) * 0.5));
+        let glass_region = ((glass_skin || self.settings.skin == model::Skin::Fluid || (!cfg!(test) && crate::auralsle_ai_status::config::get().win_theme > 0))
+            && (self.settings.glass_blur || !cfg!(test) || self.settings.skin == model::Skin::LiquidGlass)
+            || env.opaque_surface)
+            .then(|| {
+                let outline = |r: Rect, flare: f32, flare_h: f32, radius: f32| {
+                    if pill {
+                        GlassShape::Round(rel(r), radius.min(r.height().min(r.width()) * 0.5))
+                    } else if side {
+                        GlassShape::Docked { rect: rel(r), dock, flare, flare_h, radius }
+                    } else {
+                        GlassShape::Notch { rect: rel(r), flare, flare_h, radius }
+                    }
+                };
+                let mut shapes = vec![outline(body, flare, flare_h, radius)];
+                if morph_tc_state.is_none() {
+                    if let Some((tc_r, tc_alpha, _)) = lyric_time_cap {
+                        if tc_alpha > 0.12 {
+                            shapes.push(GlassShape::Round(rel(tc_r), radius.min(tc_r.height() * 0.5)));
+                        }
                     }
                 }
-            }  // [ai-status-mod] 原版悬浮球进毛玻璃轮廓
-            if let Some(r)=notice_details {
-                let radius=if self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()){14.0}else{10.0};
-                shapes.push(GlassShape::Round(rel(r),radius));
-            }
-            if let Some(r)=floating_toast {shapes.push(GlassShape::Round(rel(r),11.0));}
-            // [ai-status-mod] 课程卡与每枚药丸各自单独铺系统毛玻璃，绝不用合并大矩形
-            // （合并会把卡片之间的透明缝填成一条亮带）。模糊块向内缩 1.5px，
-            // 让亚克力亮边严格落在皮肤底板内部，圆角外沿不会再留一圈白色遮罩。
-            for r in crate::auralsle_ai_status::course_glass_rects() {
-                // 为课程岛与每枚设备药丸各自单独注册精确的 DWM 背景毛玻璃轮廓，使设备药丸同样具备实时背景模糊！
-                let inset = if r.height() < 60.0 { 0.6 } else { 1.0 };
-                let rr = rel(r.shrink(inset));
-                let base_rad = if course_geom.is_some_and(|(cr, _, _)| (cr.center() - r.center()).length_sq() < 4.0) {
-                    let (_, _, cm) = course_geom.unwrap();
-                    let circle_r = r.width().min(r.height()) * 0.5;
-                    lerp(circle_r, radius.min(circle_r), cm * cm)
-                } else if r.height() < 60.0 {
-                    crate::auralsle_ai_status::ui::pill_style_corner_radius(pill_style, r.height())
-                } else {
-                    radius
-                };
-                let rad = (base_rad - inset).max(2.0);
-                shapes.push(GlassShape::Round(rr, rad));
-            }
-            // [ai-status-mod] 岛外按钮不再铺玻璃底（外圈遮罩已按需求彻底删除）
-            shapes.extend(tooltips.iter().map(|r|GlassShape::Round(rel(*r),6.0)));
-            shapes
-        });
+                if let Some((orb_r, label_r)) = oppo_orb_geom {
+                    if self.oppo_orb_a > 0.12 {
+                        shapes.push(GlassShape::Round(rel(orb_r), orb_r.width() * 0.5));
+                        if let Some(lr) = label_r {
+                            shapes.push(GlassShape::Round(rel(lr), lr.height() * 0.5));
+                        }
+                    }
+                }
+                if let Some(r) = outside_badge {
+                    if cfg!(test) {
+                        shapes.push(GlassShape::Round(rel(r), r.width() / 2.0));
+                    } else {
+                        for orb_r in self.outside_badge_body_rects(r) {
+                            shapes.push(GlassShape::Round(rel(orb_r), orb_r.width().min(orb_r.height()) * 0.5));
+                        }
+                    }
+                }
+                if let Some(r) = notice_details {
+                    let radius = if self.hud_notice.as_ref().is_some_and(|a| a.meeting.is_some()) { 14.0 } else { 10.0 };
+                    shapes.push(GlassShape::Round(rel(r), radius));
+                }
+                if let Some(r) = floating_toast {
+                    shapes.push(GlassShape::Round(rel(r), 11.0));
+                }
+                for r in crate::auralsle_ai_status::course_glass_rects() {
+                    let inset = if r.height() < 60.0 { 0.6 } else { 1.0 };
+                    let rr = rel(r.shrink(inset));
+                    let base_rad = if course_geom.is_some_and(|(cr, _, _)| (cr.center() - r.center()).length_sq() < 4.0) {
+                        let (_, _, cm) = course_geom.unwrap();
+                        let circle_r = r.width().min(r.height()) * 0.5;
+                        lerp(circle_r, radius.min(circle_r), cm * cm)
+                    } else if r.height() < 60.0 {
+                        crate::auralsle_ai_status::ui::pill_style_corner_radius(pill_style, r.height())
+                    } else {
+                        radius
+                    };
+                    let rad = (base_rad - inset).max(2.0);
+                    shapes.push(GlassShape::Round(rr, rad));
+                }
+                shapes.extend(tooltips.iter().map(|r| GlassShape::Round(rel(*r), 6.0)));
+                shapes
+            });
         self.update_position_drag(&ctx,env,dt);
         let actively_scrolling = !cfg!(test) && (root_scrolling || (self.open && ctx.input(|i| i.raw_scroll_delta != Vec2::ZERO || i.smooth_scroll_delta != Vec2::ZERO)));
         if actively_scrolling {
@@ -3428,6 +4588,15 @@ impl App {
             || self.leave_since.is_some()
             || (self.drag_a > 0.001 && self.drag_a < 0.999)
             || self.drag_hot
+            || (self.oppo_orb_a > 0.001 && self.oppo_orb_a < 0.999)
+            || (self.oppo_orb_hover_a > 0.001 && self.oppo_orb_hover_a < 0.999)
+            || (self.oppo_orb_initialized && (!self.oppo_orb_x.settled(0.4) || !self.oppo_orb_y.settled(0.4) || !self.oppo_orb_d.settled(0.4)))
+            || (self.oppo_progress_vis - self.oppo_progress).abs() > 0.003
+            || self.oppo_drag_hot
+            || self.oppo_sending
+            || self.oppo_transfer_rx.is_some()
+            || self.oppo_link_rx.is_some()
+            || self.t < self.oppo_orb_hold_until
             || (self.pet_a > 0.001 && self.pet_a < 0.999)
             || !self.resident.settled()
             || self.open && self.page==3 && self.shelf_x.values().any(|s| !s.settled(68.0))
@@ -3441,6 +4610,7 @@ impl App {
                     || !self.orb_w.settled(0.6)
                     || !self.orb_h.settled(0.6)))
             || self.notice.as_ref().is_some_and(|a|a.source!=crate::extras::AlertSource::Internal&&self.t-a.at<0.95)
+            || (!cfg!(test) && (self.auralsle_music_mix - self.auralsle_music_mix_target).abs() > 0.002)
             || self.hud_alpha > 0.003 && self.hud_alpha < 0.997
             || !self.notice_width.settled(1.0);
         let pet_visible=self.pet_a>0.01 && !self.open && !minimal_pill;
@@ -3448,8 +4618,9 @@ impl App {
             crate::auralsle_ai_status::ui::paint_click_sparks(&painter, self.t);
         }
         let spark_anim = !cfg!(test) && crate::auralsle_ai_status::ui::has_active_click_sparks(self.t);
-        let border_anim=crate::auralsle_ai_status::ui::border_effect_active(pc,self.t,false).is_some() || spark_anim;
+        let border_anim=crate::auralsle_ai_status::ui::border_effect_active(pc,self.t,false).is_some() || spark_anim || auralsle_glow_strength > 0.01;
         let ambient=border_anim || matches!(self.settings.skin,model::Skin::Fluid|model::Skin::LiquidGlass) && self.fluid.animating() || self.pomo.running && (self.open && self.page==1 || !self.open && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
+            || (!cfg!(test) && self.open && !self.media.title.trim().is_empty() && crate::auralsle_ai_status::config::get().salt_flow_bg)
             || self.media.playing && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.media.is_music())
             || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some())
             || (!cfg!(test) && ctx.memory(|m| m.focused().is_some()));
@@ -3459,7 +4630,10 @@ impl App {
         let fps_trans = if fps_120 { 1.0 / 120.0 } else { 1.0 / 60.0 };
         let high_fps_ui = !cfg!(test)
             && ((self.settings_open && matches!(self.settings_tab, 12 | 13 | 17))
-                || (pet_visible && crate::auralsle_ai_status::aora_face::is_ai_mascot_active()));
+                || (pet_visible && crate::auralsle_ai_status::aora_face::is_ai_mascot_active())
+                || (self.open
+                    && (!self.media.title.trim().is_empty() || self.auralsle_music_island_active())
+                    && crate::auralsle_ai_status::config::get().salt_flow_bg));
         let repaint_after=std::time::Duration::from_secs_f64(
             if transitioning || high_fps_ui {
                 fps_trans
@@ -3488,8 +4662,48 @@ impl App {
                 };
                 base.union(painted)
             }),
-            notice_hit:notice_shape.into_iter().chain(notice_details).chain(messenger_rect).chain(self.shelf_menu_rect).reduce(|a,b|a.union(b)).map(rel),
-            file_drop_zone:self.settings.visible_pages[3].then(||rel(if side {self.island_rect(win,PW,self.expanded_height())} else {Rect::from_min_size(Pos2::new(cx-PW/2.0,top),Vec2::new(PW,96.0))})),
+            notice_hit:notice_shape
+                .into_iter()
+                .chain(notice_details)
+                .chain(messenger_rect)
+                .chain(self.shelf_menu_rect)
+                .chain(lyric_time_cap.map(|(r, _, _)| r.expand(2.0)))
+                .chain(oppo_orb_geom.map(|(orb, _)| orb))
+                .reduce(|a,b|a.union(b))
+                .map(rel),
+            file_drop_zone:{
+                let oppo_on = self.oppo_module_enabled();
+                let enabled = self.settings.visible_pages[3] || oppo_on;
+                enabled.then(|| {
+                    let drop_h = if side {
+                        self.expanded_height()
+                    } else if self.open || self.drag_hot || self.oppo_drag_hot {
+                        self.expanded_height().max(96.0)
+                    } else {
+                        96.0
+                    };
+                    let mut z = if side {
+                        self.island_rect(win, PW, drop_h)
+                    } else {
+                        Rect::from_min_size(Pos2::new(cx - PW / 2.0, top), Vec2::new(PW, drop_h))
+                    };
+                    if oppo_on {
+                        let canvas = ui.max_rect();
+                        if dock == model::Dock::Right {
+                            z.min.x = (z.min.x - 240.0).max(canvas.left());
+                        } else {
+                            z.max.x = (z.max.x + 240.0).min(canvas.right());
+                        }
+                        if let Some((orb, label)) = oppo_orb_geom {
+                            z = z.union(orb.expand(28.0));
+                            if let Some(lr) = label {
+                                z = z.union(lr.expand(12.0));
+                            }
+                        }
+                    }
+                    rel(z)
+                })
+            },
             expanded: self.open,
             editing: self.is_editing(),
             animating,
@@ -3554,7 +4768,9 @@ impl App {
     fn messenger_stack_appear(&self)->f32 {1.0-smoothstep(0.04,0.30,self.progress())}
     /// 收起态给未读图标预留的宽度（图标 + 与左侧控件的间距）。
     fn compact_badge_count(&self)->usize {
-        self.unread_sources().len().min(2)+self.health_badges().len()
+        let sources_len = self.unread_sources().len();
+        let oppo_slots = 2usize.saturating_sub(sources_len.min(2)).min(self.pending_oppo_orbs.len());
+        sources_len + oppo_slots + self.health_badges().len()
     }
     fn compact_tail_width(&self)->f32 {
         if self.open || self.effective_minimal() || self.minimal_pill_msg_badge_active() || self.island_lyrics_active() {return 0.0;}
@@ -3582,7 +4798,7 @@ impl App {
     fn unread_slot(&self,height:f32)->f32 {
         if self.unread_count()>=3 {(height-4.0)/3.0} else {UNREAD_SLOT}
     }
-    fn unread_count(&self)->usize {self.pending_messengers.len()+self.health_badges().len()}
+    fn unread_count(&self)->usize {self.pending_messengers.len()+self.pending_oppo_orbs.len()+self.health_badges().len()}
     /// 收起时叠放的来源图标，每个客户端各占一个。
     fn unread_sources(&self)->Vec<Messenger>{
         let mut sources=Vec::new();
@@ -3649,6 +4865,37 @@ impl App {
         (Some(scaled), arr_alpha, arr_ripple)
     }
 
+    /// 计算水平悬浮球条带在画布与屏幕边界内的无遮挡水平起点：
+    /// 始终保留至少 `gap` 的净间距，优先放目标侧；若该侧越出画布/屏幕边界，则镜像翻到另一侧，绝不向内夹紧压在 `panel` 上。
+    pub(crate) fn compute_floating_orb_rect(
+        panel: Rect,
+        bounds: Rect,
+        target_w: f32,
+        target_h: f32,
+        gap: f32,
+        top_y: f32,
+        place_left: bool,
+    ) -> Rect {
+        let right_x = panel.right() + gap;
+        let left_x = panel.left() - gap - target_w;
+        let chosen_x = if place_left {
+            if left_x >= bounds.left() {
+                left_x
+            } else if right_x + target_w <= bounds.right() {
+                right_x
+            } else {
+                left_x
+            }
+        } else if right_x + target_w <= bounds.right() {
+            right_x
+        } else if left_x >= bounds.left() {
+            left_x
+        } else {
+            right_x
+        };
+        Rect::from_min_size(Pos2::new(chosen_x, top_y), Vec2::new(target_w, target_h))
+    }
+
     fn messenger_badge_rect(&self,win:Rect,panel:Rect)->Option<Rect>{
         if (self.unread_count()==0 && !self.minimal_pill_msg_badge_active())
             || (self.browser_minimal_active && !self.open && !self.minimal_pill_msg_badge_active())
@@ -3671,32 +4918,47 @@ impl App {
                 smoothstep(0.0, 1.0, anim::clamp01(self.progress()))
             };
             let base_h = self.base_size().1;
-            let d_min = pill_orb_diameter(base_h.clamp(PILL_ORB_MIN, 44.0));
+            let is_tall_banner = base_h >= 80.0;
+            let orb_ref_h = if !self.open && !is_tall_banner {
+                panel.height().clamp(PILL_ORB_MIN, 48.0)
+            } else {
+                base_h.clamp(PILL_ORB_MIN, 44.0)
+            };
+            let d_min = pill_orb_diameter(orb_ref_h);
             let d_exp = if total_orbs <= 1 { 40.0 } else { 34.0 };
             let d_cur = lerp(d_min, d_exp, t_open);
-            let gap = lerp(6.0, UNREAD_GAP, t_open);
+            let gap = lerp(8.0, UNREAD_GAP.max(10.0), t_open);
             let place_left = self.dock() == model::Dock::Right;
 
             let orb_gap = 6.0_f32;
             let target_w = total_orbs as f32 * d_cur + (total_orbs.saturating_sub(1) as f32) * orb_gap;
             let target_h = d_cur;
-            let collapsed_panel = self.island_rect(win, self.w.pos, base_h);
-            let y_collapsed = pill_orb_top(collapsed_panel, target_h);
             let y_expanded = panel.top() + self.unread_top_inset();
+            let y_collapsed = if is_tall_banner {
+                panel.top() + self.unread_top_inset()
+            } else {
+                pill_orb_top(panel, target_h)
+            };
             let top_y = lerp(y_collapsed, y_expanded, t_open);
-            let raw_x = if place_left {
-                panel.left() - gap - target_w
+            // 顶部停靠时实际窗口画布在右侧拥有 +320px 扩展区（左侧拥有 LEFT_PAD），不可被 WIN_W(640) 夹紧回退导致重叠面板或横幅。
+            let orb_canvas = if self.side() {
+                win
             } else {
-                panel.right() + gap
+                Rect::from_min_max(
+                    Pos2::new(win.left() - LEFT_PAD, win.top()),
+                    Pos2::new(win.right() + 320.0, win.bottom()),
+                )
             };
-            let clamped_x = if raw_x + target_w > bounds.right() {
-                bounds.right() - target_w
-            } else if raw_x < bounds.left() {
-                bounds.left()
-            } else {
-                raw_x
-            };
-            return Some(Rect::from_min_size(Pos2::new(clamped_x, top_y), Vec2::new(target_w, target_h)));
+            let orb_bounds = self.screen.map_or(orb_canvas, |screen| screen.intersect(orb_canvas));
+            return Some(Self::compute_floating_orb_rect(
+                panel,
+                orb_bounds,
+                target_w,
+                target_h,
+                gap,
+                top_y,
+                place_left,
+            ));
         }
         if appear>0.02 {
             // 展开：贴在面板外侧、顶端对齐的竖向胶囊；顶部停靠和左停靠在右边，右停靠在左边。
@@ -3738,27 +5000,136 @@ impl App {
 
     pub(crate) fn mark_oppo_messenger(&mut self, source: Messenger) {
         self.oppo_messengers.insert(source);
+        let cnt = self.oppo_messenger_counts.entry(source).or_insert(0);
+        *cnt = cnt.saturating_add(1);
     }
 
     pub(crate) fn clear_oppo_messenger(&mut self, source: Messenger) {
         self.oppo_messengers.remove(&source);
+        self.oppo_messenger_icons.remove(&source);
+        self.oppo_messenger_counts.remove(&source);
     }
 
-    pub(crate) fn has_oppo_messenger(&self, source: Messenger) -> bool {
+    pub fn has_oppo_messenger(&self, source: Messenger) -> bool {
         self.oppo_messengers.contains(&source)
+    }
+
+    pub(crate) fn upsert_oppo_orb(&mut self, pkg: String, app_name: String, title: String, icon_png: Option<std::sync::Arc<Vec<u8>>>) {
+        let prev_count = self
+            .pending_oppo_orbs
+            .iter()
+            .find(|o| o.pkg == pkg)
+            .map_or(0, |o| o.count);
+        self.pending_oppo_orbs.retain(|o| o.pkg != pkg);
+        self.pending_oppo_orbs.insert(0, PendingOppoOrb {
+            pkg,
+            app_name,
+            title,
+            icon_png,
+            count: prev_count.saturating_add(1).max(1),
+        });
+        self.pending_oppo_orbs.truncate(4);
+    }
+
+    pub(crate) fn dismiss_oppo_orb(&mut self, pkg: &str) {
+        self.pending_oppo_orbs.retain(|o| o.pkg != pkg);
+        let expected = format!("oppo-mirror:{pkg}");
+        self.alerts.retain(|a| !matches!(&a.source, crate::extras::AlertSource::External(id) if id == &expected));
+        if self.notice.as_ref().is_some_and(|a| matches!(&a.source, crate::extras::AlertSource::External(id) if id == &expected)) {
+            self.notice = None;
+            self.notification_bell_until = 0.0;
+        }
+        if self.pending_messengers.is_empty() && self.pending_oppo_orbs.is_empty() {
+            self.notification_bell_until = 0.0;
+        }
+    }
+
+    /// 点击镜像消息悬浮球：仅关闭并清除对应镜像悬浮球，不跳转到通知岛页面。
+    pub(crate) fn dismiss_mirrored_messenger_orb(&mut self, u: Unread) {
+        self.discard_unread(u);
+        if !self.pending_messengers.iter().any(|c| c.source == u.source) {
+            self.clear_oppo_messenger(u.source);
+        }
+        if self.pending_messengers.is_empty() && self.pending_oppo_orbs.is_empty() {
+            self.notification_bell_until = 0.0;
+        }
+    }
+
+    fn draw_oppo_native_orb_icon(inner: &Card, cx: f32, cy: f32, side: f32, png: &[u8]) -> bool {
+        if cfg!(test) {
+            return false;
+        }
+        let Some(tex) = crate::extras::oppo_icon_texture(inner.ui.ctx(), png) else {
+            return false;
+        };
+        let r = inner.rect(cx - side * 0.5, cy - side * 0.5, side, side);
+        let round = ((side * inner.s) * 0.24).clamp(4.0, 9.0).round() as u8;
+        inner.painter.add(
+            egui::epaint::RectShape::filled(r, egui::CornerRadius::same(round), Color32::WHITE)
+                .with_texture(tex.id(), Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0))),
+        );
+        true
+    }
+
+    fn draw_oppo_orb_icon(inner: &Card, cx: f32, cy: f32, side: f32, item: &PendingOppoOrb) {
+        let is_oppo_pkg = item.pkg.trim().eq_ignore_ascii_case(crate::oppo_notify::OPPO_AUMID);
+        if !cfg!(test) && !is_oppo_pkg {
+            let native_png = item
+                .icon_png
+                .clone()
+                .or_else(|| crate::oppo_notify::cached_icon_png(&item.pkg).map(std::sync::Arc::new));
+            if let Some(png) = native_png.as_deref() {
+                if Self::draw_oppo_native_orb_icon(inner, cx, cy, side, png) {
+                    return;
+                }
+            }
+            let aid = format!("oppo-mirror:{}", item.pkg);
+            if let Some(tex) = crate::icons::extract_app_icon_texture(inner.ui.ctx(), &aid, &item.app_name) {
+                let r = inner.rect(cx - side * 0.5, cy - side * 0.5, side, side);
+                let round = ((side * inner.s) * 0.24).clamp(4.0, 9.0).round() as u8;
+                inner.painter.add(
+                    egui::epaint::RectShape::filled(r, egui::CornerRadius::same(round), Color32::WHITE)
+                        .with_texture(tex.id(), Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0))),
+                );
+                return;
+            }
+        }
+        let aid = format!("oppo-mirror:{}", item.pkg);
+        if let Some((letter, bg)) = crate::extras::fallback_badge_info(
+            &aid,
+            &item.app_name,
+            &item.title,
+            Color32::from_rgb(64, 132, 244),
+        ) {
+            let radius = (side * 0.24).clamp(4.0, 7.0);
+            inner.fill(cx - side * 0.5, cy - side * 0.5, side, side, radius, bg);
+            inner.centered_text(
+                cx,
+                cy,
+                &letter,
+                (side * 0.58).clamp(9.0, 14.0),
+                W::Bold,
+                Color32::WHITE,
+                H::Center,
+            );
+            return;
+        }
+        let scale = (side / 20.0).clamp(0.7, 1.3);
+        paint::bell(&inner.scaled(cx, cy, scale), cx, cy, theme::WHITE, 0.0);
     }
 
     /// 展开后的未读胶囊 & 极简胶囊/大胶囊/展开岛旁悬浮球（全程显示+流畅入场）：
     fn draw_unread_capsule(&mut self,ctx:&egui::Context,c:&Card,rect:Rect,cursor:Option<Pos2>,cmds:&mut Vec<Cmd>){
         let n=self.pending_messengers.len();
+        let oppo_n = self.pending_oppo_orbs.len();
         let health=self.health_badges();
-        let total_n=n+health.len();
+        let total_n=n+oppo_n+health.len();
         let width = (rect.width() / c.s).max(16.0);
         let height=rect.height()/c.s;
         let size_ratio = if cfg!(test) { 1.0 } else { (width / UNREAD_W).clamp(0.52, 1.6) };
 
         // 收起态（极简胶囊与大胶囊）以及展开态单球模式下：
-        // 每枚悬浮球（微信/QQ未读悬浮球、饮水悬浮球、久坐悬浮球）均在各自独立的圆形底板内绘制，
+        // 每枚悬浮球（微信/QQ未读悬浮球、OPPO 手机通知悬浮球、饮水悬浮球、久坐悬浮球）均在各自独立的圆形底板内绘制，
         // 且所有图标严格对齐圆心做光学视觉居中（修复图2重叠与图标偏移问题）。
         if !cfg!(test) && self.minimal_pill_msg_badge_active() {
             let (msg_count, health_items, fallback_bell) = self.floating_orb_items();
@@ -3792,14 +5163,20 @@ impl App {
                     };
                     let scale = orb.icon_side / 20.0;
                     crate::extras::messenger_icon(&inner.scaled(cx, cy, scale), cx, cy, src);
+                    if self.settings.unread_dot {
+                        let dot_r = (d * 0.085).clamp(2.0, 3.0);
+                        inner.circle(cx + d * 0.23, cy - d * 0.22, dot_r, Color32::from_rgb(255, 72, 72));
+                    }
                     let is_oppo = self.has_oppo_messenger(src);
                     let hist_cnt = self.notification_log.items.len();
+                    let show_digit = hist_cnt > 0 && crate::auralsle_ai_status::config::get().show_unread_badge_count;
                     if is_oppo {
-                        crate::extras::oppo_corner_badge(&inner, cx + orb.badge_dx, cy + orb.badge_dy, orb.badge_r);
+                        let ox = if show_digit { cx - orb.badge_dx } else { cx + orb.badge_dx };
+                        crate::extras::oppo_corner_badge(&inner, ox, cy + orb.badge_dy, orb.badge_r);
                     }
-                    if hist_cnt > 0 && crate::auralsle_ai_status::config::get().show_unread_badge_count {
+                    if show_digit {
                         let bx = cx + orb.badge_dx;
-                        let by = if is_oppo { cy - orb.badge_dy.abs() * 0.85 } else { cy + orb.badge_dy };
+                        let by = cy + orb.badge_dy;
                         inner.circle(bx, by, orb.badge_r, Color32::from_gray(242));
                         inner.centered_text(
                             bx,
@@ -3819,47 +5196,107 @@ impl App {
                         self.show_page(5);
                     }
                 } else {
+                    let show_digit_cfg = crate::auralsle_ai_status::config::get().show_unread_badge_count;
+                    let mut clicked_oppo_messenger: Option<Unread> = None;
                     for i in 0..n {
                         let u = self.pending_messengers[i];
                         let (orb_left, cx, cy) = orb_slot(i);
-                        let scale = orb.icon_side / 20.0;
-                        crate::extras::messenger_icon(&inner.scaled(cx, cy, scale), cx, cy, u.source);
                         let is_oppo = u.pid == 0 && self.has_oppo_messenger(u.source);
+                        let drew_native = if is_oppo {
+                            self.oppo_messenger_icons
+                                .get(&u.source)
+                                .is_some_and(|png| Self::draw_oppo_native_orb_icon(&inner, cx, cy, orb.icon_side, png))
+                        } else {
+                            false
+                        };
+                        if !drew_native {
+                            let scale = orb.icon_side / 20.0;
+                            crate::extras::messenger_icon(&inner.scaled(cx, cy, scale), cx, cy, u.source);
+                        }
                         if self.settings.unread_dot {
                             let dot_r = (d * 0.085).clamp(2.0, 3.0);
                             inner.circle(cx + d * 0.23, cy - d * 0.22, dot_r, Color32::from_rgb(255, 72, 72));
                         }
-                        if is_oppo {
-                            crate::extras::oppo_corner_badge(&inner, cx + orb.badge_dx, cy + orb.badge_dy, orb.badge_r);
-                        }
-                        let tag = if !crate::auralsle_ai_status::config::get().show_unread_badge_count || is_oppo {
+                        let tag = if !show_digit_cfg {
                             None
+                        } else if is_oppo {
+                            let cnt = self.oppo_messenger_counts.get(&u.source).copied().unwrap_or(1).clamp(1, 99);
+                            Some(cnt.to_string())
                         } else {
                             self.unread_tag(i)
                                 .map(|tag| tag.to_string())
                                 .or_else(|| u.unidentified().then(|| "?".to_string()))
                                 .or_else(|| Some(format!("{}", n.max(1))))
                         };
+                        if is_oppo {
+                            let ox = if tag.is_some() { cx - orb.badge_dx } else { cx + orb.badge_dx };
+                            crate::extras::oppo_corner_badge(&inner, ox, cy + orb.badge_dy, orb.badge_r);
+                        }
                         if let Some(tag) = tag {
                             let bx = cx + orb.badge_dx;
                             let by = cy + orb.badge_dy;
                             inner.circle(bx, by, orb.badge_r, Color32::from_gray(238));
                             inner.centered_text(bx, by, &tag, orb.digit, W::Bold, Color32::from_gray(28), H::Center);
                         }
-                        let name = if u.unidentified() {
-                            format!("{} · 账号未确认", u.source.name())
+                        let name = if is_oppo {
+                            format!("{} · 点击消除悬浮球", u.source.name())
+                        } else if u.unidentified() {
+                            format!("查看{} · 账号未确认", u.source.name())
                         } else {
                             match self.unread_tag(i) {
-                                Some(idx) => format!("{} · 账号 {idx}", u.source.name()),
-                                None => u.source.name().to_string(),
+                                Some(idx) => format!("查看{} · 账号 {idx}", u.source.name()),
+                                None => format!("查看{}", u.source.name()),
                             }
                         };
                         let button = inner
                             .hit(orb_left, 0.0, d, height, self.unread_id(i))
-                            .on_hover_text(format!("查看{name}"));
+                            .on_hover_text(name);
                         if button.clicked() {
-                            cmds.push(Cmd::ViewMessenger(u));
+                            if is_oppo {
+                                clicked_oppo_messenger = Some(u);
+                            } else {
+                                cmds.push(Cmd::ViewMessenger(u));
+                            }
                         }
+                    }
+
+                    let mut clicked_oppo_pkg: Option<String> = None;
+                    for j in 0..oppo_n {
+                        let orb_item = &self.pending_oppo_orbs[j];
+                        let (orb_left, cx, cy) = orb_slot(n + j);
+                        Self::draw_oppo_orb_icon(&inner, cx, cy, orb.icon_side, orb_item);
+                        if self.settings.unread_dot {
+                            let dot_r = (d * 0.085).clamp(2.0, 3.0);
+                            inner.circle(cx + d * 0.23, cy - d * 0.22, dot_r, Color32::from_rgb(255, 72, 72));
+                        }
+                        let ox = if show_digit_cfg { cx - orb.badge_dx } else { cx + orb.badge_dx };
+                        crate::extras::oppo_corner_badge(&inner, ox, cy + orb.badge_dy, orb.badge_r);
+                        if show_digit_cfg {
+                            let bx = cx + orb.badge_dx;
+                            let by = cy + orb.badge_dy;
+                            inner.circle(bx, by, orb.badge_r, Color32::from_gray(238));
+                            inner.centered_text(
+                                bx,
+                                by,
+                                &format!("{}", orb_item.count.clamp(1, 99)),
+                                orb.digit,
+                                W::Bold,
+                                Color32::from_gray(28),
+                                H::Center,
+                            );
+                        }
+                        let button = inner
+                            .hit(orb_left, 0.0, d, height, ("oppo-orb", orb_item.pkg.as_str()))
+                            .on_hover_text(format!("{} · 点击消除悬浮球", orb_item.app_name));
+                        if button.clicked() {
+                            clicked_oppo_pkg = Some(orb_item.pkg.clone());
+                        }
+                    }
+                    if let Some(u) = clicked_oppo_messenger {
+                        self.dismiss_mirrored_messenger_orb(u);
+                    }
+                    if let Some(pkg) = clicked_oppo_pkg {
+                        self.dismiss_oppo_orb(&pkg);
                     }
                 }
 
@@ -3922,42 +5359,109 @@ impl App {
             } else {
                 cy + (8.0 - self.unread_top_inset() - crate::auralsle_ai_status::MESSENGER_OPTICAL_Y) * size_ratio
             };
-            crate::extras::messenger_icon(&inner.scaled(x,icon_y,scale),x,icon_y,u.source);
             let is_oppo = !cfg!(test) && u.pid == 0 && self.has_oppo_messenger(u.source);
+            let drew_native = if is_oppo {
+                self.oppo_messenger_icons
+                    .get(&u.source)
+                    .is_some_and(|png| Self::draw_oppo_native_orb_icon(&inner, x, icon_y, 20.0 * scale, png))
+            } else {
+                false
+            };
+            if !drew_native {
+                crate::extras::messenger_icon(&inner.scaled(x,icon_y,scale),x,icon_y,u.source);
+            }
             // 红点跟随设置（默认关闭）：只要图标、不要角标时这里不画。
             if self.settings.unread_dot {
                 inner.circle(x + 10.0 * size_ratio, icon_y - 9.0 * size_ratio, 2.6 * size_ratio, Color32::from_rgb(255,72,72));
             }
-            if is_oppo {
-                crate::extras::oppo_corner_badge(&inner, x + 8.5 * size_ratio, icon_y + 7.5 * size_ratio, 5.2 * size_ratio);
-            }
             let tag = if cfg!(test) {
                 self.unread_tag(i).map(|tag|tag.to_string()).or_else(||(u.unidentified()).then(||"?".to_string()))
-            } else if !crate::auralsle_ai_status::config::get().show_unread_badge_count || is_oppo {
+            } else if !crate::auralsle_ai_status::config::get().show_unread_badge_count {
                 None
+            } else if is_oppo {
+                let cnt = self.oppo_messenger_counts.get(&u.source).copied().unwrap_or(1).clamp(1, 99);
+                Some(cnt.to_string())
             } else {
-                // 支持开关控制通知悬浮窗软件图标右下角的数字角标显示与隐藏（需求 9，图五 `image_a9ec52.png`）
+                // 支持开关控制通知悬浮球软件图标右下角的数字角标显示与隐藏
                 self.unread_tag(i)
                     .map(|tag| tag.to_string())
                     .or_else(|| (u.unidentified()).then(|| "?".to_string()))
                     .or_else(|| self.minimal_pill_msg_badge_active().then(|| format!("{}", n.max(1))))
             };
+            if is_oppo {
+                let ox = if tag.is_some() { x - 8.5 * size_ratio } else { x + 8.5 * size_ratio };
+                crate::extras::oppo_corner_badge(&inner, ox, icon_y + 7.5 * size_ratio, 5.2 * size_ratio);
+            }
             if let Some(tag)=tag{
                 let bx = x + 8.5 * size_ratio;
                 let by = icon_y + 7.5 * size_ratio;
                 inner.circle(bx, by, 5.8 * size_ratio, Color32::from_gray(238));  // [ai-status-mod] 原版数字圆底（按比例等比缩放）
                 inner.centered_text(bx, by, &tag, (8.4 * size_ratio).max(6.2), W::Bold, Color32::from_gray(28), H::Center);
             }
-            let name=if u.unidentified(){format!("{} · 账号未确认",u.source.name())}
-                else{match self.unread_tag(i){Some(n)=>format!("{} · 账号 {n}",u.source.name()),None=>u.source.name().to_string()}};
-            let button=inner.hit(0.0,cy-slot/2.0,width,slot,self.unread_id(i)).on_hover_text(format!("查看{name}"));
-            if button.clicked(){cmds.push(Cmd::ViewMessenger(u));}
+            let tip=if is_oppo {
+                format!("{} · 点击消除悬浮球",u.source.name())
+            } else if u.unidentified(){
+                format!("查看{} · 账号未确认",u.source.name())
+            } else {
+                match self.unread_tag(i){Some(n)=>format!("查看{} · 账号 {n}",u.source.name()),None=>format!("查看{}",u.source.name())}
+            };
+            let button=inner.hit(0.0,cy-slot/2.0,width,slot,self.unread_id(i)).on_hover_text(tip);
+            if button.clicked(){
+                if is_oppo {
+                    self.dismiss_mirrored_messenger_orb(u);
+                } else {
+                    cmds.push(Cmd::ViewMessenger(u));
+                }
+            }
+        }
+        let show_v_digit = !cfg!(test) && crate::auralsle_ai_status::config::get().show_unread_badge_count;
+        let mut clicked_oppo_pkg: Option<String> = None;
+        for j in 0..oppo_n {
+            let orb_item = &self.pending_oppo_orbs[j];
+            let cy = if single_msg {
+                height * 0.5
+            } else {
+                2.0 * size_ratio + slot * ((n + j) as f32 + 0.5) - self.messenger_scroll
+            };
+            if cy < -slot || cy > height + slot {
+                continue;
+            }
+            let icon_side = 20.0 * size_ratio;
+            Self::draw_oppo_orb_icon(&inner, x, cy, icon_side, orb_item);
+            if self.settings.unread_dot {
+                inner.circle(x + 10.0 * size_ratio, cy - 9.0 * size_ratio, 2.6 * size_ratio, Color32::from_rgb(255, 72, 72));
+            }
+            let ox = if show_v_digit { x - 8.5 * size_ratio } else { x + 8.5 * size_ratio };
+            crate::extras::oppo_corner_badge(&inner, ox, cy + 7.5 * size_ratio, 5.2 * size_ratio);
+            if show_v_digit {
+                let bx = x + 8.5 * size_ratio;
+                let by = cy + 7.5 * size_ratio;
+                inner.circle(bx, by, 5.8 * size_ratio, Color32::from_gray(238));
+                inner.centered_text(
+                    bx,
+                    by,
+                    &format!("{}", orb_item.count.clamp(1, 99)),
+                    (8.4 * size_ratio).max(6.2),
+                    W::Bold,
+                    Color32::from_gray(28),
+                    H::Center,
+                );
+            }
+            let button = inner
+                .hit(0.0, cy - slot / 2.0, width, slot, ("oppo-orb-v", orb_item.pkg.as_str()))
+                .on_hover_text(format!("{} · 点击消除悬浮球", orb_item.app_name));
+            if button.clicked() {
+                clicked_oppo_pkg = Some(orb_item.pkg.clone());
+            }
+        }
+        if let Some(pkg) = clicked_oppo_pkg {
+            self.dismiss_oppo_orb(&pkg);
         }
         for (i,kind) in health.into_iter().enumerate() {
             let cy = if single_msg {
                 height * 0.5
             } else {
-                2.0 * size_ratio + slot * ((n + i) as f32 + 0.5) - self.messenger_scroll
+                2.0 * size_ratio + slot * ((n + oppo_n + i) as f32 + 0.5) - self.messenger_scroll
             };
             if cy< -slot || cy>height+slot {continue;}
             kind.icon(&inner,x,cy,0.8*size_ratio);
@@ -3976,9 +5480,12 @@ impl App {
     /// 收起时的未读入口：每个来源一个图标加小红点（同一来源多个账号合成一个）。只有一条时点它直接跳转，多条时展开面板挑选。
     fn draw_unread_stack(&mut self,c:&Card,horizontal:bool,cmds:&mut Vec<Cmd>){
         let sources=self.unread_sources();
+        let oppo_slots = 2usize.saturating_sub(sources.len().min(2)).min(self.pending_oppo_orbs.len());
+        let msg_icons = sources.len() + oppo_slots;
         let health=self.health_badges();
         let count=self.pending_messengers.len();
-        let icons=sources.len()+health.len();
+        let oppo_total = self.pending_oppo_orbs.len();
+        let icons=msg_icons+health.len();
         let step=unread_step(horizontal);
         let at=|k:usize|if horizontal {
             // [ai-status-mod] 横排以「图标左边缘 = 10.5」为锚，卡片宽就是图标宽，右端由布局给。
@@ -3991,33 +5498,77 @@ impl App {
             } else {
                 crate::auralsle_ai_status::unread_icon_scale(sources[k]==Messenger::Wechat,true)  // [ai-status-mod] 与岛上其它图标同尺寸（入口）
             };
-            crate::extras::messenger_icon(&c.scaled(x,y,scale),x,y,sources[k]);
-            if !cfg!(test) && self.has_oppo_messenger(sources[k]) {
+            let is_oppo = !cfg!(test) && self.has_oppo_messenger(sources[k]);
+            let drew_native = if is_oppo {
+                self.oppo_messenger_icons
+                    .get(&sources[k])
+                    .is_some_and(|png| Self::draw_oppo_native_orb_icon(c, x, y, 18.0 * scale, png))
+            } else {
+                false
+            };
+            if !drew_native {
+                crate::extras::messenger_icon(&c.scaled(x,y,scale),x,y,sources[k]);
+            }
+            if is_oppo {
                 crate::extras::oppo_corner_badge(c, x + 6.8, y + 6.2, 4.2);
             }
         }
+        for j in 0..oppo_slots {
+            let (x, y) = at(sources.len() + j);
+            let orb_item = &self.pending_oppo_orbs[j];
+            Self::draw_oppo_orb_icon(c, x, y, 16.0, orb_item);
+            crate::extras::oppo_corner_badge(c, x + 6.8, y + 6.2, 4.2);
+        }
         for (i,kind) in health.iter().enumerate() {
-            let (x,y)=at(sources.len()+i);
+            let (x,y)=at(msg_icons+i);
             kind.icon(c,x,y,0.7);
         }
         // 每个来源图标右上角一个小红点（可关），不显示数字；健康待办徽标固定显示红点。
         for k in 0..icons {
-            if k < sources.len() && !self.settings.unread_dot { continue; }
+            if k < msg_icons && !self.settings.unread_dot { continue; }
             let (x,y)=at(k);c.circle(x+8.0,y-7.0,2.6,Color32::from_rgb(255,59,48));
         }
         let length=self.unread_stack_len(horizontal);
-        let messenger_length=if health.is_empty(){length}else if horizontal{crate::auralsle_ai_status::COMPACT_UNREAD_W+crate::auralsle_ai_status::COMPACT_UNREAD_STEP*(sources.len() as f32-1.0).max(0.0)}else{sources.len() as f32*step+3.0};
+        let messenger_length=if health.is_empty(){length}else if horizontal{crate::auralsle_ai_status::COMPACT_UNREAD_W+crate::auralsle_ai_status::COMPACT_UNREAD_STEP*(msg_icons as f32-1.0).max(0.0)}else{msg_icons as f32*step+3.0};
         let (w,h)=if horizontal {(messenger_length,BAR_H)}else{(32.0,messenger_length)};
-        if count==1 {
+        if count==1 && oppo_total == 0 {
             let u=self.pending_messengers[0];
-            let button=c.hit(0.0,0.0,w,h,u.source.name()).on_hover_text(format!("查看{}",u.source.name()));
-            if button.clicked(){cmds.push(Cmd::ViewMessenger(u));}
-        }else if count>1{
-            let button=c.hit(0.0,0.0,w,h,"messenger-stack").on_hover_text(format!("{count} 条未读 · 展开挑选"));
+            let is_oppo = u.pid == 0 && self.has_oppo_messenger(u.source);
+            let tip = if is_oppo {
+                format!("{} · 点击消除悬浮球", u.source.name())
+            } else {
+                format!("查看{}", u.source.name())
+            };
+            let button=c.hit(0.0,0.0,w,h,u.source.name()).on_hover_text(tip);
+            if button.clicked(){
+                if is_oppo {
+                    self.dismiss_mirrored_messenger_orb(u);
+                } else {
+                    cmds.push(Cmd::ViewMessenger(u));
+                }
+            }
+        }else if count==0 && oppo_total >= 1 {
+            let pkg = self.pending_oppo_orbs[0].pkg.clone();
+            let app_name = self.pending_oppo_orbs[0].app_name.clone();
+            let button = c.hit(0.0, 0.0, w, h, "oppo-stack").on_hover_text(if oppo_total == 1 {
+                format!("{app_name} · 点击消除悬浮球")
+            } else {
+                format!("{oppo_total} 条未读 · 展开挑选")
+            });
+            if button.clicked() {
+                if oppo_total == 1 {
+                    self.dismiss_oppo_orb(&pkg);
+                } else {
+                    self.reveal_unread();
+                }
+            }
+        }else if count + oppo_total > 1{
+            let total_msgs = count + oppo_total;
+            let button=c.hit(0.0,0.0,w,h,"messenger-stack").on_hover_text(format!("{total_msgs} 条未读 · 展开挑选"));
             if button.clicked(){self.reveal_unread();}
         }
         for (i,kind) in health.into_iter().enumerate() {
-            let k=sources.len()+i;
+            let k=msg_icons+i;
             let (x,y)=at(k);
             let start=if k==0{0.0}else{(if horizontal{x}else{y})-step/2.0};
             let end=if k+1==icons{length}else{(if horizontal{x}else{y})+step/2.0};
@@ -4490,18 +6041,63 @@ impl App {
         }
     }
 
-    /// 为独立模块卡片（如左侧课程岛）绘制与主岛完全一致的皮肤材质、液态玻璃光学边缘、圆角与 Venu 流光边框。
+    /// 为独立模块卡片（如左侧课程岛）、悬浮球与设备胶囊绘制当前主题材质。
     pub(crate) fn paint_card_body(&self, painter:&egui::Painter, rect:Rect, radius:f32, feather:f32, fade:f32, host:Rect) {
         self.paint_card_body_styled(painter, rect, radius, feather, fade, host, true);
     }
 
     pub(crate) fn paint_card_body_styled(&self, painter:&egui::Painter, rect:Rect, radius:f32, feather:f32, fade:f32, host:Rect, draw_rim: bool) {
+        self.paint_card_body_themed(painter, rect, radius, feather, fade, host, draw_rim, true);
+    }
+
+    pub(crate) fn paint_card_body_themed(&self, painter:&egui::Painter, rect:Rect, radius:f32, feather:f32, fade:f32, host:Rect, draw_rim: bool, sync_music: bool) {
         if rect.width() < 8.0 || rect.height() < 8.0 || fade <= 0.01 {
             return;
         }
         let skin = self.settings.skin;
         let r0 = radius.min(rect.width() * 0.5).min(rect.height() * 0.5).max(1.0);
         let expand = self.progress().clamp(0.0, 1.0);
+
+        // 仅主关联扩展卡在音乐展开态同步专辑取色；悬浮球与设备胶囊始终统一采用当前主题材质
+        if sync_music && !cfg!(test) && self.open && !self.media.title.trim().is_empty() && expand > 0.35 {
+            let dcfg = crate::auralsle_ai_status::config::get();
+            let (pal, _) = crate::auralsle_music::resolve_palette(
+                &dcfg,
+                self.music_artwork.as_ref().map(|(img, _)| img.as_ref()),
+            );
+            let cover_bg = paint::mix(pal.background, pal.accent, 0.14);
+            let surf_col = Color32::from_rgba_unmultiplied(
+                cover_bg.r().saturating_add(16),
+                cover_bg.g().saturating_add(16),
+                cover_bg.b().saturating_add(16),
+                238,
+            );
+            shape::fill_pill(painter, rect, r0, paint::alpha(surf_col, fade), feather);
+            shape::fill_pill_gradient(
+                painter,
+                rect,
+                r0,
+                paint::alpha(Color32::from_white_alpha(18), fade),
+                Color32::TRANSPARENT,
+                (rect.height() * 0.55).min(64.0),
+                feather,
+            );
+            if draw_rim {
+                if let Some((effect, ef_fade)) = crate::auralsle_ai_status::ui::border_effect_active(expand, self.t, false) {
+                    let pts = Self::rounded_rect_contour(rect.shrink(0.5), (r0 - 0.5).max(0.5));
+                    crate::auralsle_ai_status::ui::paint_contour_border_effect(
+                        painter,
+                        &pts,
+                        None,
+                        0.0,
+                        effect,
+                        self.t as f32,
+                        fade * ef_fade,
+                    );
+                }
+            }
+            return;
+        }
 
         if skin == model::Skin::Fluid || skin == model::Skin::LiquidGlass {
             let rows = shape::pill_sections(rect, r0);
@@ -4525,17 +6121,21 @@ impl App {
                     let (l, r) = span_at(y);
                     self.liquid_glass_compose(x, y, l, r, rect, true, expand)
                 } else {
-                    self.fluid.compose_card_in_host(
-                        x,
-                        y,
-                        rect.left(),
-                        rect.top(),
+                    let local_c = self.fluid.compose(
+                        x - rect.left(),
+                        y - rect.top(),
                         rect.width(),
                         rect.height(),
-                        host.left(),
-                        host.top(),
                         expand,
-                    )
+                    );
+                    let host_mid = self.fluid.compose(
+                        host.width() * 0.5,
+                        host.height() * 0.5,
+                        host.width().max(1.0),
+                        host.height().max(1.0),
+                        expand,
+                    );
+                    paint::mix(local_c, host_mid, 0.42)
                 };
                 paint::alpha(c, fade)
             });
@@ -4632,6 +6232,7 @@ impl App {
 
     fn paint_body(&self,painter:&egui::Painter,rect:Rect,flare:f32,flare_h:f32,radius:f32,feather:f32){
         let skin=self.settings.skin;
+        let hide_expanded_white_rim = !cfg!(test) && (self.open || self.progress() > 0.05);
         if skin==model::Skin::Fluid || skin==model::Skin::LiquidGlass {
             let pill=self.settings.island_shape==model::IslandShape::Pill;
             let (map,frame)=shape::EdgeMap::of(rect,if pill {model::Dock::Top}else{self.dock()});
@@ -4692,7 +6293,7 @@ impl App {
                 arc
             };
             painter.add(egui::Shape::Mesh(arc_mesh));
-            if skin==model::Skin::LiquidGlass {
+            if skin==model::Skin::LiquidGlass && !hide_expanded_white_rim {
                 self.liquid_glass_edge(painter,rect,flare,flare_h,radius);
             }
             self.paint_island_border_effect(painter,rect,flare,flare_h,radius);
@@ -4707,7 +6308,7 @@ impl App {
                 }
             } else {
                 shape::fill_pill(painter, rect, radius, self.glass_fill(), feather);
-                if skin.is_glass() && rect.height() >= 10.0 {
+                if !hide_expanded_white_rim && skin.is_glass() && rect.height() >= 10.0 {
                     let ppp = painter.ctx().pixels_per_point();
                     let snap = |v: f32| (v * ppp).round() / ppp;
                     let snapped = Rect::from_min_max(
@@ -4730,7 +6331,7 @@ impl App {
                     let sheen=Color32::from_white_alpha(15);
                     shape::fill_gradient_docked(painter,rect,dock,flare,flare_h,radius,sheen,Color32::TRANSPARENT,(rect.width()*0.6).min(64.0),feather);
                 }
-                if rect.height()>=20.0 && rect.width()>=10.0 {
+                if !hide_expanded_white_rim && rect.height()>=20.0 && rect.width()>=10.0 {
                     let edge=if dock==model::Dock::Left {Rect::from_min_max(rect.min+Vec2::new(0.0,0.5),rect.max-Vec2::new(0.5,0.5))}
                         else {Rect::from_min_max(rect.min+Vec2::new(0.5,0.5),rect.max-Vec2::new(0.0,0.5))};
                     painter.add(egui::Shape::line(shape::outline_docked(edge,dock,flare,flare_h,(radius-0.5).max(0.0)),egui::Stroke::new(1.0_f32,self.glass_rim())));
@@ -4746,7 +6347,7 @@ impl App {
                 let sheen=Color32::from_white_alpha(15);
                 shape::fill_gradient(painter,rect,flare,flare_h,radius,sheen,Color32::TRANSPARENT,(rect.height()*0.6).min(64.0),feather);
             }
-            if rect.height()>=10.0 && rect.width()>=20.0 {
+            if !hide_expanded_white_rim && rect.height()>=10.0 && rect.width()>=20.0 {
                 let edge=Rect::from_min_max(rect.min+Vec2::new(0.5,0.0),rect.max-Vec2::new(0.5,0.5));
                 painter.add(egui::Shape::line(shape::outline(edge,flare,flare_h,(radius-0.5).max(0.0)),egui::Stroke::new(1.0_f32,self.glass_rim())));
             }
@@ -5004,19 +6605,26 @@ impl App {
                         self.dots_target();
                     }
                     self.open = true;
+                    let target_w = self.expanded_width();
                     self.w.tune(OPEN_W.0, OPEN_W.1);
                     self.h.tune(OPEN_H.0, OPEN_H.1);
-                    self.w.target = PW;
+                    self.w.target = target_w;
                     self.h.target = self.expanded_height();
                     if self.drag_hot {
-                        self.w.vel = self.w.vel.max(600.0);
+                        if self.w.pos < target_w - 24.0 {
+                            self.w.vel = self.w.vel.max(600.0);
+                        }
                         self.h.vel = self.h.vel.max(260.0);
                     }
                 } else if !self.open {
                     self.w.tune(SWELL_K.0, SWELL_K.1);
                     self.h.tune(SWELL_K.0, SWELL_K.1);
-                    let (sw,sh)=if self.side(){(SWELL.1,SWELL.0)}else{SWELL};
-                    self.w.target = bw * sw;
+                    let (mut sw, sh) = if self.side() { (SWELL.1, SWELL.0) } else { SWELL };
+                    if !self.side() && bh <= BAR_H + 2.0 {
+                        // 主岛与歌词岛统一采用平滑等比悬停膨胀，确保左右元素距边缘留白对称
+                        sw = sw.max(sh).min(1.12);
+                    }
+                    self.w.target = (bw * sw).min(WIN_W - 28.0);
                     self.h.target = bh * sh;
                 }
             }
@@ -5071,6 +6679,18 @@ impl App {
         self.w.step(dt);
         self.h.step(dt);
         self.open_t.step(dt);
+        // 宽度安全边界：防止拖拽震荡或重复触发速度脉冲导致岛体横向无限膨胀。
+        let max_safe_w = if self.side() {
+            crate::side_dock::SIDE_W - 12.0
+        } else if self.open {
+            (self.expanded_width() * 1.12).min(WIN_W - 24.0)
+        } else {
+            WIN_W - 24.0
+        };
+        if self.w.pos > max_safe_w {
+            self.w.pos = max_safe_w;
+            self.w.vel = self.w.vel.min(0.0);
+        }
         // 仅在从外侧越过目标时收住，扩展提示条时不强制跳到目标宽度。
         if !self.open {
             let (cur_bw, cur_bh) = self.base_size();
@@ -5089,25 +6709,76 @@ impl App {
     fn shared_header(&mut self, base: &Card, cx: f32, p: f32, reveal: f32, env: &Env) {
         let local_cx = cx - base.origin.x;
         let fit=((WIN_W-32.0)/self.resident.target.width).min(1.0);
-        let fitted=base.scaled(local_cx,15.0,lerp(fit,1.0,p));
+        let main_hover_s = if !cfg!(test) && !self.open && !self.island_lyrics_active() && p < 0.02 {
+            let base_w = self.base_size().0.max(1.0);
+            ((self.w.pos / base_w).min(self.h.pos / BAR_H)).clamp(1.0, 1.14)
+        } else {
+            1.0
+        };
+        let main_shift_y = if !cfg!(test) && !self.open && !self.island_lyrics_active() && p < 0.02 {
+            (self.h.pos - BAR_H).max(0.0) * 0.5
+        } else {
+            0.0
+        };
+        let fitted=base.shifted(0.0, main_shift_y).scaled(local_cx, 15.0, lerp(fit * main_hover_s, 1.0, p));
         let base=&fitted;
         let lyric=self.island_lyric().map(|(index,_)|index);
         let lyric_alpha=if self.island_lyrics_active() {1.0-smoothstep(0.0,0.35,p)}else{0.0};
         if let Some(galley)=self.island_lyric_layout.clone().filter(|_|lyric_alpha>0.003) {
-            let c=base.faded(lyric_alpha);
+            let hover_s = if !cfg!(test) && !self.open && p < 0.02 {
+                ((self.w.pos / self.lyric_bar_width().max(1.0)).min(self.h.pos / BAR_H)).clamp(1.0, 1.14)
+            } else {
+                1.0
+            };
+            let shift_y = if !cfg!(test) && !self.open && p < 0.02 {
+                (self.h.pos - BAR_H).max(0.0) * 0.5
+            } else {
+                0.0
+            };
+            let c = base
+                .shifted(0.0, shift_y)
+                .scaled(local_cx, BAR_H * 0.5, hover_s)
+                .faded(lyric_alpha);
             let unread_tail=self.lyric_unread_space();
-            let content_width=self.lyric_bar_width()-self.lyric_focus_space()-unread_tail;
-            let width=self.w.pos.max(content_width+unread_tail);
+            let focus_tail = self.lyric_focus_space();
+            let content_width=self.lyric_bar_width()-focus_tail-unread_tail;
+            let width=(self.w.pos / hover_s).max(content_width+unread_tail);
+            let live_content_w = (width - focus_tail - unread_tail).max(content_width);
             let left=local_cx-width/2.0;
             let center_y=BAR_H/2.0;
+            let bar_base_w_art = self.compact_lyric_slot_width();
+            // 左侧三元素（吉祥物、AI 图标、专辑封面）：14px 边缘安全留白、统一 20px 视觉大小、中间保持约一个数字宽度 (9px) 间距并垂直居中
+            let pet_end = if self.pet_enabled() { left + 34.0 } else { left + 5.0 };
+            let has_ai = self.lyric_ai_space() > 0.0;
+            let elem_gap = 9.0_f32;
+            let art_x = if cfg!(test) {
+                left + 12.0
+            } else if has_ai {
+                pet_end + elem_gap + 20.0 + elem_gap
+            } else {
+                pet_end + elem_gap
+            };
+            let mut ai_clicked_lyric = false;
+            if has_ai {
+                let ai_cx = pet_end + elem_gap + 10.0;
+                let ai_from = crate::skin_paint::shape_count(c.ui.ctx(), c.painter.layer_id());
+                crate::auralsle_ai_status::ui::draw_compact_icon_only(&c, ai_cx, center_y, lyric_alpha);
+                crate::skin_paint::tone_since(c.ui.ctx(), c.painter.layer_id(), ai_from, |col, _| col);
+                if !cfg!(test) && !self.open && c.hit(ai_cx - 12.0, center_y - 12.0, 24.0, 24.0, "lyric-ai-jump").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    let target = if crate::auralsle_ai_status::config::get().ai_island_scheme == 2 { 6 } else { 8 };
+                    self.show_page(target);
+                    ai_clicked_lyric = true;
+                }
+            }
+            let _ = bar_base_w_art;
             if let Some((image,texture))=&self.music_artwork {
                 let [width,height]=image.size;
                 let uv_size=if width>height {egui::vec2(height as f32/width as f32,1.0)}else{egui::vec2(1.0,width as f32/height as f32)};
                 let uv=Rect::from_center_size(Pos2::new(0.5,0.5),uv_size);
-                c.painter.add(egui::epaint::RectShape::filled(c.rect(left+12.0,center_y-10.0,20.0,20.0),5.0*c.s,Color32::WHITE).with_texture(texture.id(),uv));
+                c.painter.add(egui::epaint::RectShape::filled(c.rect(art_x,center_y-10.0,20.0,20.0),5.0*c.s,Color32::WHITE).with_texture(texture.id(),uv));
             } else {
-                c.fill(left+12.0,center_y-10.0,20.0,20.0,5.0,theme::CARD);
-                paint::note(&c,left+22.0,center_y,13.0,theme::WHITE);
+                c.fill(art_x,center_y-10.0,20.0,20.0,5.0,theme::CARD);
+                paint::note(&c,art_x+10.0,center_y,13.0,theme::WHITE);
             }
             let index=lyric.unwrap_or(0);
             let id=egui::Id::new("island-lyric-line");
@@ -5121,8 +6792,10 @@ impl App {
                 let position=c.pos(left+content_width-LYRIC_BAR_W/2.0,center_y-galley.size().y/2.0+(1.0-fade)*3.0);
                 c.painter.galley(position,galley,if lyric.is_some(){theme::WHITE}else{theme::GRAY});
             } else {
-                // 歌词胶囊平滑横向滚动 + 换行上浮渐显 + 逐字卡拉OK点亮动效
-                let (raw_line, line_prog, is_lyric) = if let Some((idx, line_str)) = self.island_lyric() {
+                // 歌词胶囊平滑横向滚动 + 换行上浮渐显 + 逐字卡拉OK点亮 + 灵屿胶囊尺寸/译文/动态配色
+                let dcfg = crate::auralsle_ai_status::config::get();
+                let is_auralsle = dcfg.music_ui_style == 6;
+                let (raw_line, line_prog, is_lyric, idx_opt) = if let Some((idx, line_str)) = self.island_lyric() {
                     let p_val = if let Some(lyrics) = &self.ly.lyrics {
                         if lyrics.synced && idx < lyrics.lines.len() {
                             let st = lyrics.lines[idx].t;
@@ -5134,18 +6807,48 @@ impl App {
                     } else {
                         1.0
                     };
-                    (line_str.to_owned(), p_val, true)
+                    (line_str.to_owned(), p_val, true, Some(idx))
                 } else {
                     let t_str = if self.media.title.trim().is_empty() { "正在播放音乐" } else { self.media.title.trim() };
-                    (t_str.to_owned(), ((self.t * 0.35).sin() * 0.5 + 0.5) as f32, false)
+                    (t_str.to_owned(), ((self.t * 0.35).sin() * 0.5 + 0.5) as f32, false, None)
                 };
-                let slot_x = left + content_width - LYRIC_BAR_W + 38.0;
-                let slot_w = (LYRIC_BAR_W - 76.0).max(120.0);
-                let fsz = 11.0_f32;
+                let slot_x = art_x + 28.0;
+                let slot_w = ((left + live_content_w - 34.0) - slot_x).max(96.0);
+                let sub_line = if is_auralsle && dcfg.auralsle_compact_translation {
+                    idx_opt.and_then(|idx| {
+                        self.ly.lyrics.as_ref().and_then(|l| {
+                            l.lines
+                                .get(idx)
+                                .and_then(|ln| ln.translation.as_deref())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned)
+                        })
+                    })
+                } else {
+                    None
+                };
+                let has_sub = sub_line.is_some();
+                let fsz = if is_auralsle {
+                    let target = (dcfg.auralsle_lyric_font_size * 0.78).clamp(9.8, 12.0);
+                    if has_sub { (target - 1.2).max(9.2) } else { target }
+                } else {
+                    11.0_f32
+                };
+                let accent_hi = if is_auralsle && dcfg.auralsle_capsule_dynamic_color {
+                    crate::auralsle_music::resolve_palette(
+                        &dcfg,
+                        self.music_artwork.as_ref().map(|(img, _)| img.as_ref()),
+                    )
+                    .0
+                    .accent
+                } else {
+                    theme::WHITE
+                };
                 let full_w = c.text_w(&raw_line, fsz, W::Semibold);
                 let slide_dy = (1.0 - fade) * 5.0;
-                let base_y = center_y + 4.0 + slide_dy;
-                let viewport = c.faded(fade.clamp(0.15, 1.0)).clipped(slot_x, 2.0, slot_w, BAR_H - 4.0);
+                let base_y = if has_sub { center_y - 1.5 + slide_dy } else { center_y + slide_dy };
+                let viewport = c.faded(fade.clamp(0.15, 1.0)).clipped(slot_x, 1.0, slot_w, BAR_H - 2.0);
                 let draw_x = if full_w > slot_w {
                     let scroll_u = if is_lyric {
                         ((line_prog - 0.12) / 0.76).clamp(0.0, 1.0)
@@ -5158,23 +6861,38 @@ impl App {
                 } else {
                     slot_x + (slot_w - full_w) * 0.5
                 };
-                if is_lyric {
+                let word_hi = !is_auralsle || dcfg.auralsle_word_highlight;
+                if is_lyric && word_hi {
                     let lit_w = (full_w * line_prog.clamp(0.15, 1.0)).clamp(0.0, full_w + 2.0);
-                    let clip_lit = viewport.clipped(draw_x - 1.0, 2.0, lit_w + 1.0, BAR_H - 4.0);
-                    clip_lit.text(draw_x, base_y, &raw_line, fsz, W::Semibold, theme::WHITE, H::Left);
-                    if lit_w < full_w {
-                        let clip_dim = viewport.clipped(draw_x + lit_w, 2.0, (full_w - lit_w) + 4.0, BAR_H - 4.0);
-                        clip_dim.text(draw_x, base_y, &raw_line, fsz, W::Semibold, Color32::from_white_alpha(150), H::Left);
+                    let clip_lit = viewport.clipped(draw_x - 1.0, 1.0, lit_w + 1.0, BAR_H - 2.0);
+                    if has_sub {
+                        clip_lit.text(draw_x, base_y, &raw_line, fsz, W::Semibold, accent_hi, H::Left);
+                    } else {
+                        clip_lit.centered_text(draw_x, base_y, &raw_line, fsz, W::Semibold, accent_hi, H::Left);
                     }
+                    if lit_w < full_w {
+                        let clip_dim = viewport.clipped(draw_x + lit_w, 1.0, (full_w - lit_w) + 4.0, BAR_H - 2.0);
+                        if has_sub {
+                            clip_dim.text(draw_x, base_y, &raw_line, fsz, W::Semibold, Color32::from_white_alpha(150), H::Left);
+                        } else {
+                            clip_dim.centered_text(draw_x, base_y, &raw_line, fsz, W::Semibold, Color32::from_white_alpha(150), H::Left);
+                        }
+                    }
+                } else if has_sub {
+                    viewport.text(draw_x, base_y, &raw_line, fsz, W::Semibold, if is_lyric { accent_hi } else { theme::WHITE }, H::Left);
                 } else {
-                    viewport.text(draw_x, base_y, &raw_line, fsz, W::Semibold, theme::WHITE, H::Left);
+                    viewport.centered_text(draw_x, base_y, &raw_line, fsz, W::Semibold, if is_lyric { accent_hi } else { theme::WHITE }, H::Left);
+                }
+                if let Some(sub) = sub_line {
+                    let fit_sub = viewport.fit(&sub, 8.6, W::Regular, slot_w);
+                    viewport.centered_text(slot_x + slot_w * 0.5, center_y + 7.5 + slide_dy, &fit_sub, 8.6, W::Regular, Color32::from_white_alpha(175), H::Center);
                 }
                 if self.media.playing {
                     c.ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
                 }
             }
-            paint::playback_bars(&c,left+content_width-21.0,center_y,self.t,self.media.playing,theme::WHITE);
-            if !cfg!(test) && c.hit(left, 0.0, content_width, BAR_H, "island-lyric-capsule-hit").clicked() {
+            paint::playback_bars(&c,left+live_content_w-24.0,center_y,self.t,self.media.playing,theme::WHITE);
+            if !cfg!(test) && !ai_clicked_lyric && c.hit(left, 0.0, live_content_w, BAR_H, "island-lyric-capsule-hit").clicked() {
                 let copy_win_ms = (crate::auralsle_ai_status::config::get().copy_auto_open_secs.clamp(1, 60) as i64) * 1000;
                 let prefer_clipboard = self.clip_copy_override
                     || self.copy_opened_session
@@ -5204,7 +6922,7 @@ impl App {
             }
         }
         if lyric_alpha>=0.997 {return;}
-        let glance_music_hide = if self.glance_music_island_active() {
+        let glance_music_hide = if self.glance_music_island_active() || self.auralsle_music_island_active() {
             1.0 - smoothstep(0.15, 0.55, p)
         } else {
             1.0
@@ -5247,7 +6965,7 @@ impl App {
         };
 
         if self.effective_minimal() && (self.minimal_time_pill_mode() || self.t>=self.notification_bell_until) && p < 0.02 {
-            let ai_shown = if cfg!(test) { None } else { crate::auralsle_ai_status::shown() };
+            let ai_list = if cfg!(test) { Vec::new() } else { crate::auralsle_ai_status::shown_list() };
             let draw_ai_lamp = |card: &Card, lx: f32, ly: f32, phase: crate::auralsle_ai_status::state::Phase, t_now: f64| {
                 let col = match phase {
                     crate::auralsle_ai_status::state::Phase::Waiting => Color32::from_rgb(251, 191, 36),
@@ -5272,10 +6990,16 @@ impl App {
                     let cur_h = self.h.pos.clamp(18.0, BAR_H);
                     let base_y = cur_h * 0.5 + 4.2;
                     let lamp_y = cur_h * 0.5;
-                    if let Some(s) = ai_shown.as_ref() {
-                        let clk_x = local_cx - cw * 0.5 - 6.0;
+                    if !ai_list.is_empty() {
+                        const LAMP_CLOCK_GAP: f32 = 10.5;
+                        const LAMP_STEP: f32 = 13.5;
+                        const LAMP_TAIL_PAD: f32 = 6.0;
+                        let lamps_w = LAMP_CLOCK_GAP + (ai_list.len().saturating_sub(1) as f32) * LAMP_STEP + LAMP_TAIL_PAD;
+                        let clk_x = local_cx - (cw + lamps_w) * 0.5;
                         paint::clock(&mc, clk_x, base_y, &clock, 11.0);
-                        draw_ai_lamp(&mc, clk_x + cw + 8.5, lamp_y, s.agent.phase, self.t);
+                        for (idx, s) in ai_list.iter().enumerate() {
+                            draw_ai_lamp(&mc, clk_x + cw + LAMP_CLOCK_GAP + (idx as f32) * LAMP_STEP, lamp_y, s.agent.phase, self.t);
+                        }
                     } else {
                         paint::clock(&mc, local_cx - cw * 0.5, base_y, &clock, 11.0);
                     }
@@ -5284,8 +7008,12 @@ impl App {
                     return;
                 }
             } else if !self.minimal_stage1 {
-                if let Some(s) = ai_shown {
-                    draw_ai_lamp(base, local_cx, 7.0, s.agent.phase, self.t);
+                if !ai_list.is_empty() {
+                    let n = ai_list.len();
+                    for (idx, s) in ai_list.iter().enumerate() {
+                        let lx = local_cx + (idx as f32 - (n as f32 - 1.0) * 0.5) * 13.5;
+                        draw_ai_lamp(base, lx, 7.0, s.agent.phase, self.t);
+                    }
                 }
                 return;
             }
@@ -5293,7 +7021,13 @@ impl App {
         // 电池：位置/大小连续插值
         let bk = lerp(1.0, 0.8, m);
         let bpos = (lerp(pb.0, hb.0, m), lerp(pb.1, hb.1, m));
-        if show_battery {paint::battery(&base.faded(lerp(layout.clearance(bar::BATTERY),1.0,m)), bpos.0, bpos.1, env.battery, env.charging, bk);}
+        if show_battery {
+            paint::battery(&base.faded(lerp(layout.clearance(bar::BATTERY),1.0,m)), bpos.0, bpos.1, env.battery, env.charging, bk);
+            if !cfg!(test) && !self.open && p < 0.12 && base.hit(bpos.0 - 15.0, 1.0, 30.0, BAR_H - 2.0, "pill-battery-jump").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                if self.is_page_currently_visible(13) { self.show_page(13); }
+                else if self.is_page_currently_visible(14) { self.show_page(14); }
+            }
+        }
         // [蓝牙与 2.4GHz 无线外设电量] 顶栏不再绘制胶囊；
         // 每枚设备药丸由 App::frame 用 ui::DevicePill 模板实例化，画在课程卡下方。
 
@@ -5307,6 +7041,12 @@ impl App {
         let a_head = smoothstep(0.35, 0.75, m);
         if a_pill > 0.0 {
             paint::clock(&base.faded(a_pill),cpos.0,cpos.1,&clock,size::PILL_CLOCK);
+            if !cfg!(test) && !self.open && p < 0.12 {
+                let cw_hit = paint::clock_width(base, &clock, size::PILL_CLOCK).max(42.0);
+                if base.hit(cpos.0 - 4.0, 1.0, cw_hit + 8.0, BAR_H - 2.0, "pill-clock-jump").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    if self.is_page_currently_visible(CALENDAR_PAGE) { self.show_page(CALENDAR_PAGE); }
+                }
+            }
         }
         if a_head > 0.0 {
             paint::clock(&base.faded(a_head),cpos.0,cpos.1-0.5,&clock,size::CLOCK);
@@ -5353,8 +7093,8 @@ impl App {
             let x=lerp(local_cx+layout.x[bar::MUSIC].unwrap_or(0.0),367.0,m);
             let y=lerp(15.0,18.0,m);
             paint::playback_bars(base,x,y,self.t,self.media.playing,theme::WHITE);
-            if self.open && reveal>0.6 && base.hit(x-13.0,y-14.0,26.0,28.0,"header-music")
-                .on_hover_text(if self.settings.visible_pages[0]{"返回音乐播放页"}else{"打开音乐设置"})
+            if ((self.open && reveal>0.6) || (!cfg!(test) && !self.open && p < 0.12)) && base.hit(x-13.0,y-14.0,26.0,28.0,"header-music")
+                .on_hover_text(if self.settings.visible_pages[0]{"打开音乐播放页"}else{"打开音乐设置"})
                 .on_hover_cursor(egui::CursorIcon::PointingHand).clicked(){self.show_page(0);}
         }
         let compact_alpha=1.0-smoothstep(0.0,0.22,p);
@@ -5372,9 +7112,20 @@ impl App {
             }
             if let Some(x)=layout.x[bar::WEATHER] { self.draw_pill_weather(&c,local_cx+x,&layout); }
         }
-        crate::auralsle_ai_status::ui::draw_compact(base,local_cx+crate::auralsle_ai_status::compact_x(&layout),compact_alpha);  // [ai-status-mod] 时间右侧
+        let ai_cx = local_cx + crate::auralsle_ai_status::compact_x(&layout);
+        crate::auralsle_ai_status::ui::draw_compact(base, ai_cx, compact_alpha);  // [ai-status-mod] 时间右侧
+        if !cfg!(test) && !self.open && compact_alpha > 0.5 && crate::auralsle_ai_status::shown().is_some() {
+            let ai_w = crate::auralsle_ai_status::compact_list_width().max(64.0);
+            if base.hit(ai_cx - 4.0, 1.0, ai_w + 8.0, BAR_H - 2.0, "pill-ai-jump").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                let target = if crate::auralsle_ai_status::config::get().ai_island_scheme == 2 { 6 } else { 8 };
+                self.show_page(target);
+            }
+        }
         if let (Some(fx), true) = (layout.x[bar::FOCUS], self.pomo.running && compact_alpha>0.004) {
             crate::focus_bar::draw(&base.faded(compact_alpha),local_cx+fx,15.0,self.t,&self.pomo,self.phase_secs(self.pomo.phase),false);
+            if !cfg!(test) && !self.open && compact_alpha > 0.5 && base.hit(local_cx + fx - 24.0, 1.0, 48.0, BAR_H - 2.0, "pill-focus-jump").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.show_page(1);
+            }
         }
     }
 
@@ -5419,7 +7170,7 @@ impl App {
     // 面板主体：页标题 + 页面（带切页过渡）+ 翻页箭头 + 页码豆
     // ---------------------------------------------------------------
     fn panel_body(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
-        {
+        if !self.auralsle_music_island_active() {
             let base_gx = if !cfg!(test) && self.glance_music_island_active() {
                 let cur_w = self.w.pos.clamp(380.0, 480.0);
                 (PW + cur_w) * 0.5 - 25.0
@@ -5436,8 +7187,17 @@ impl App {
             };
             let gx = base_gx + gear_mag.x;
             let gy = 18.0 + gear_mag.y;
-            c.circle(gx, gy, 13.0, Color32::from_white_alpha((hover*24.0) as u8));
-            paint::gear(&c.scaled(gx, gy, 0.8*(1.0-press*0.08)), gx, gy, paint::mix(theme::GRAY,theme::WHITE,hover));
+            if self.page == 0 && !cfg!(test) {
+                let dcfg = crate::auralsle_ai_status::config::get();
+                let (pal, _) = crate::auralsle_music::resolve_palette(&dcfg, self.music_artwork.as_ref().map(|(img, _)| img.as_ref()));
+                if hover > 0.01 {
+                    crate::auralsle_music::paint_music_trigger_circle(c, gx, gy, 13.0, pal.accent, hover, false);
+                }
+                paint::gear(&c.scaled(gx, gy, 0.8*(1.0-press*0.08)), gx, gy, paint::mix(pal.accent, theme::WHITE, hover * 0.45));
+            } else {
+                c.circle(gx, gy, 13.0, Color32::from_white_alpha((hover*24.0) as u8));
+                paint::gear(&c.scaled(gx, gy, 0.8*(1.0-press*0.08)), gx, gy, paint::mix(theme::GRAY,theme::WHITE,hover));
+            }
             if settings.clicked(){
                 self.settings_tab = if self.page < 10 {
                     [1,2,3,5,4,7,11,8,12,13][self.page]
@@ -5527,8 +7287,8 @@ impl App {
             let base_clip = c.painter.clip_rect();
             let cur_w = self.w.pos.max(PW);
             let left_off = ((PW - cur_w) * 0.5).min(0.0);
-            let safe_title_rect = c.rect(35.0, 2.0, if self.glance_music_island_active() { 165.0 } else { 118.0 }, 30.0).intersect(base_clip);
-            let safe_body_rect = c.rect(left_off + 30.0, 29.0, (cur_w - 60.0).max(200.0), (self.h.pos - 50.0).max(24.0)).intersect(base_clip);
+            let safe_title_rect = c.rect(left_off, 0.0, cur_w, 34.0).intersect(base_clip);
+            let safe_body_rect = c.rect(left_off, 0.0, cur_w, self.h.pos.max(24.0)).intersect(base_clip);
 
             let mut tx_base = c.clone();
             if safe_body_rect.is_positive() {
@@ -5612,7 +7372,7 @@ impl App {
             self.render_page(self.page, c, env, cmds);
         }
         self.nav(c);
-        if self.page==0 && c.live {
+        if self.page==0 && c.live && !self.auralsle_music_island_active() {
             let vc = if cfg!(test) { c.clone() } else { c.shifted(0.0, 14.0) };
             self.draw_music_volume(&vc, cmds);
         }
@@ -5655,7 +7415,7 @@ impl App {
         let base = 25.0;
         let col = self.page_accent_color(page);
         let (a, b) = match page {
-            0 => if cfg!(test) { return } else { ("音乐", "播放") },
+            0 => if cfg!(test) || crate::auralsle_ai_status::config::get().music_ui_style == 6 { return } else { ("音乐", "播放") },
             CALENDAR_PAGE => if cfg!(test) { return } else { ("日程", "安排") },
             1 => ("番茄", "专注"),
             // 运行时健康页标题统一在顶栏左上绘制，喝水/久坐切换条下移至次栏
@@ -5663,7 +7423,7 @@ impl App {
             // 运行时置物架与剪贴板已拆分为两个独立页面：第 3 页画「置物架」，第 12 页画「剪贴板」
             3 => if cfg!(test) { return } else { ("置物", "架") },
             4 => ("待办", "清单"),
-            5 => if !cfg!(test) && crate::auralsle_ai_status::config::get().msg_island_filter < 10 {
+            5 => if !cfg!(test) {
                 match crate::auralsle_ai_status::config::get().msg_island_filter % 3 {
                     0 => ("消息", "邮箱"),
                     1 => ("消息", "微信"),
@@ -5722,18 +7482,39 @@ impl App {
             self.active_page_order().into_iter().filter(|&p| self.is_page_currently_visible(p)).collect()
         };
         if pages.len()<2 { return; }
-        // [修复需求 1 图一 `image_2e6123.jpg`]：所有岛（含 Glance 音乐岛）左右切页按钮位置严格保持统一 (`y = 68.0`, `x = 21.0 / 398.0`)
-        let (left_hit_x, left_cx, right_hit_x, right_cx, arrow_y) = (8.0, 21.0, 385.0, 398.0, 68.0);
-        let l = c.hit(left_hit_x, arrow_y-13.0, 26.0, 26.0, "nav-l");
-        let r = c.hit(right_hit_x, arrow_y-13.0, 26.0, 26.0, "nav-r");
-        let (lh, lp) = c.hover_t(&l);
-        let (rh, rp) = c.hover_t(&r);
-        let l_mag = if cfg!(test) { Vec2::ZERO } else { crate::auralsle_ai_status::ui::magnet_offset(self.cursor_local, Pos2::new(left_cx, arrow_y), 24.0, 3.0) };
-        let r_mag = if cfg!(test) { Vec2::ZERO } else { crate::auralsle_ai_status::ui::magnet_offset(self.cursor_local, Pos2::new(right_cx, arrow_y), 24.0, 3.0) };
-        paint::chevron(c, left_cx + l_mag.x, arrow_y + l_mag.y, -1.0, lh, lp);
-        paint::chevron(c, right_cx + r_mag.x, arrow_y + r_mag.y, 1.0, rh, rp);
-        if l.clicked() { self.navigate_page(false); }
-        if r.clicked() { self.navigate_page(true); }
+        if cfg!(test) || !crate::auralsle_ai_status::config::get().hide_nav_arrows {
+            let (left_cx, right_cx, arrow_y) = (21.0, 398.0, 68.0);
+            let l_rect = c.rect(left_cx - 15.0, arrow_y - 17.0, 30.0, 34.0);
+            let r_rect = c.rect(right_cx - 15.0, arrow_y - 17.0, 30.0, 34.0);
+            let l = c.hit(left_cx - 15.0, arrow_y - 17.0, 30.0, 34.0, "nav-l").on_hover_cursor(egui::CursorIcon::PointingHand);
+            let r = c.hit(right_cx - 15.0, arrow_y - 17.0, 30.0, 34.0, "nav-r").on_hover_cursor(egui::CursorIcon::PointingHand);
+            let (lh, lp) = c.hover_t(&l);
+            let (rh, rp) = c.hover_t(&r);
+            let l_mag = if cfg!(test) { Vec2::ZERO } else { crate::auralsle_ai_status::ui::magnet_offset(self.cursor_local, Pos2::new(left_cx, arrow_y), 24.0, 3.0) };
+            let r_mag = if cfg!(test) { Vec2::ZERO } else { crate::auralsle_ai_status::ui::magnet_offset(self.cursor_local, Pos2::new(right_cx, arrow_y), 24.0, 3.0) };
+            let lc = c.clone();
+            let rc = c.clone();
+            let music_nav_accent = if self.page == 0 && !cfg!(test) {
+                let dcfg = crate::auralsle_ai_status::config::get();
+                Some(crate::auralsle_music::resolve_palette(&dcfg, self.music_artwork.as_ref().map(|(img, _)| img.as_ref())).0.accent)
+            } else {
+                None
+            };
+            paint::chevron_with_bg(&lc, left_cx + l_mag.x, arrow_y + l_mag.y, -1.0, lh, lp, music_nav_accent);
+            paint::chevron_with_bg(&rc, right_cx + r_mag.x, arrow_y + r_mag.y, 1.0, rh, rp, music_nav_accent);
+            let (ptr_clicked, ptr_pos) = c.ui.ctx().input(|i| {
+                (i.pointer.primary_clicked(), i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()))
+            });
+            let l_hit = l.clicked() || (c.live && ptr_clicked && ptr_pos.is_some_and(|pt| l_rect.contains(pt)));
+            let r_hit = r.clicked() || (c.live && ptr_clicked && ptr_pos.is_some_and(|pt| r_rect.contains(pt)));
+            if l_hit {
+                self.swipe_start_x = None;
+                self.navigate_page(false);
+            } else if r_hit {
+                self.swipe_start_x = None;
+                self.navigate_page(true);
+            }
+        }
 
         // 底部指示条双主题：
         // - 主题 1 (nav_bar_style == 1)：之前的经典默认小圆点/白色长条样式
@@ -5855,9 +7636,28 @@ impl App {
                 // 模式 1：底栏右侧与页面指示点同一水平高度的留白区
                 ((PW - bw - 14.0).max(x + 8.0).min(PW - bw - 8.0), (dot_y - bh * 0.5).clamp(4.0, self.h.pos - bh - 2.0))
             };
-            c.fill(rx, ry, bw, bh, 7.0, Color32::from_rgba_unmultiplied(28, 32, 40, 232));
-            c.stroke(rx, ry, bw, bh, 7.0, 0.8, Color32::from_white_alpha(36));
-            c.text(rx + bw * 0.5, ry + 10.2, label, 8.6, W::Bold, theme::WHITE, H::Center);
+            let badge_from = crate::skin_paint::shape_count(c.ui.ctx(), c.painter.layer_id());
+            let badge_rect = c.rect(rx, ry, bw, bh);
+            let host_rect = c.rect(0.0, 0.0, PW, self.h.pos);
+            let feather_b = 1.0 / c.ui.ctx().pixels_per_point().max(1.0);
+            if badge_pos == 0 {
+                // 「指示点上方」统一使用与展开岛内卡片（如图二 AI 会话卡容器）完全一致的底色、材质与描边，交由 recolor_layer 随当前主题统一着色
+                c.fill(rx, ry, bw, bh, 7.0, Color32::from_rgb(24, 26, 31));
+                c.stroke(rx, ry, bw, bh, 7.0, 1.0, Color32::from_rgb(46, 50, 59));
+                c.centered_text(rx + bw * 0.5, ry + bh * 0.5, label, 8.6, W::Bold, theme::WHITE, H::Center);
+            } else {
+                self.paint_card_body(&c.painter, badge_rect, 7.0 * c.s, feather_b, 1.0, host_rect);
+                let gf = self.glass_fill();
+                let lum = 0.299 * (gf.r() as f32) + 0.587 * (gf.g() as f32) + 0.114 * (gf.b() as f32);
+                let is_light_theme = matches!(self.settings.skin, model::Skin::Cream | model::Skin::GlassLight) || lum > 150.0;
+                let badge_rim = if is_light_theme { Color32::from_black_alpha(34) } else { Color32::from_white_alpha(52) };
+                let badge_fg = if is_light_theme { Color32::from_rgb(24, 28, 36) } else { Color32::WHITE };
+                c.stroke(rx, ry, bw, bh, 7.0, 0.8, badge_rim);
+                c.centered_text(rx + bw * 0.5, ry + bh * 0.5, label, 8.6, W::Bold, badge_fg, H::Center);
+                if !cfg!(test) {
+                    crate::skin_paint::tone_since(c.ui.ctx(), c.painter.layer_id(), badge_from, |col, _| col);
+                }
+            }
         }
 
         if let Some(i) = clicked {
@@ -5891,7 +7691,7 @@ impl App {
             14 => "app:render_page_14_brightness",
             _ => "app:render_page_other",
         });
-        let c_body = if cfg!(test) {
+        let c_body = if cfg!(test) || (page == 0 && crate::auralsle_ai_status::config::get().music_ui_style == 6) {
             c.clone()
         } else if matches!(page, 0 | 1 | 2) {
             c.shifted(0.0, 14.0)
@@ -6100,12 +7900,24 @@ impl App {
         let gap_y = 10.0_f32;
         let step_h = card_h + gap_y;
         let viewport_top = 38.0_f32;
-        let viewport_h = if devs.len() <= 1 { 88.0 } else { 184.0 };
-        let wheel_y = if !has_scroll && ptr_in_island {
-            c.ui.ctx().input(|i| i.raw_scroll_delta.y)
+        let viewport_h = if devs.len() <= 1 { 88.0 } else { 194.0 };
+        let active_slot_id = egui::Id::new("br_active_monitor_slot");
+        let mut active_slot = if self.open {
+            c.ui.ctx().data(|d| d.get_temp::<Option<usize>>(active_slot_id)).unwrap_or(None)
         } else {
-            0.0
+            None
         };
+        let (wheel_y, key_step, primary_clicked, ptr_pos) = c.ui.ctx().input(|i| {
+            let wy = if ptr_in_island { i.raw_scroll_delta.y } else { 0.0 };
+            let ks: i32 = if i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::ArrowUp) {
+                5
+            } else if i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::ArrowDown) {
+                -5
+            } else {
+                0
+            };
+            (wy, ks, i.pointer.primary_clicked(), i.pointer.interact_pos())
+        });
         let list_c = c.clipped(left_x - 2.0, viewport_top, card_w + 4.0, viewport_h);
 
         for (idx, m) in devs.iter().enumerate() {
@@ -6123,8 +7935,22 @@ impl App {
             let p = m.percent().clamp(0.0, 1.0);
             let pct_i = (p * 100.0).round() as i32;
 
-            rc.fill(left_x, y, card_w, card_h, 11.0, Color32::from_white_alpha(14));
-            rc.stroke(left_x, y, card_w, card_h, 11.0, 0.85, Color32::from_white_alpha(26));
+            let card_rect = rc.rect(left_x, y, card_w, card_h);
+            if primary_clicked && ptr_pos.is_some_and(|pt| card_rect.contains(pt)) {
+                active_slot = Some(m.slot);
+                c.ui.ctx().data_mut(|d| d.insert_temp(active_slot_id, active_slot));
+            }
+            let is_selected = active_slot == Some(m.slot);
+            rc.fill(left_x, y, card_w, card_h, 11.0, Color32::from_white_alpha(if is_selected { 20 } else { 14 }));
+            rc.stroke(
+                left_x,
+                y,
+                card_w,
+                card_h,
+                11.0,
+                if is_selected { 1.2 } else { 0.85 },
+                if is_selected { Color32::from_rgba_unmultiplied(251, 191, 36, 165) } else { Color32::from_white_alpha(26) },
+            );
 
             // 左侧太阳图标底座
             rc.fill(left_x + 12.0, y + 11.0, 28.0, 28.0, 8.0, Color32::from_rgba_unmultiplied(251, 191, 36, 36));
@@ -6201,6 +8027,8 @@ impl App {
             rc.circle(knob_x, bar_y + 3.0, 3.0, Color32::from_rgb(245, 158, 11));
 
             if sr.clicked() || sr.dragged() {
+                active_slot = Some(m.slot);
+                c.ui.ctx().data_mut(|d| d.insert_temp(active_slot_id, active_slot));
                 if let Some(pos) = sr.interact_pointer_pos() {
                     let tr = rc.rect(bar_x, bar_y, bar_w, 6.0);
                     let np = ((pos.x - tr.left()) / tr.width().max(1.0)).clamp(0.0, 1.0);
@@ -6226,10 +8054,15 @@ impl App {
                 crate::monitors::set_vcp(m.slot, m.brightness_vcp, m.value_from_percent(next_p) as u16);
             }
 
-            if wheel_y.abs() > 0.1 && rc.ui.rect_contains_pointer(rc.rect(left_x, y, card_w, card_h)) {
-                let step = if wheel_y > 0.0 { 5 } else { -5 };
-                let next_p = (pct_i + step).clamp(0, 100) as f32 / 100.0;
-                crate::monitors::set_vcp(m.slot, m.brightness_vcp, m.value_from_percent(next_p) as u16);
+            if is_selected {
+                let mut step = key_step;
+                if step == 0 && wheel_y.abs() > 0.1 && (!has_scroll || rc.ui.rect_contains_pointer(card_rect)) {
+                    step = if wheel_y > 0.0 { 5 } else { -5 };
+                }
+                if step != 0 {
+                    let next_p = (pct_i + step).clamp(0, 100) as f32 / 100.0;
+                    crate::monitors::set_vcp(m.slot, m.brightness_vcp, m.value_from_percent(next_p) as u16);
+                }
             }
         }
 
@@ -7036,6 +8869,197 @@ mod pill_orb_geometry_tests {
             assert!(g.badge_dx > 0.0 && g.badge_dy > 0.0, "角标在右下");
             assert!((g.badge_dx / d - 0.24).abs() < 1e-3, "d={d}: 角标横向偏移应恒为 0.24d");
             assert!((g.badge_dy / d - 0.22).abs() < 1e-3, "d={d}: 角标纵向偏移应恒为 0.22d");
+        }
+    }
+
+    #[test]
+    fn floating_orbs_never_overlap_notice_banner_or_expanded_island() {
+        use super::{App, CANVAS_W, PW, WIN_H};
+        let canvas = Rect::from_min_max(Pos2::ZERO, Pos2::new(CANVAS_W, WIN_H));
+        // 图1：宽横幅通知 (374x44) 右侧放 3 个悬浮球，不得向内夹紧遮挡通知右侧按钮
+        let banner = Rect::from_center_size(Pos2::new(470.0, 22.0), Vec2::new(374.0, 44.0));
+        let r_banner = App::compute_floating_orb_rect(banner, canvas, 144.0, 44.0, 8.0, banner.top(), false);
+        assert!(r_banner.left() >= banner.right() + 8.0, "banner overlap: {} vs {}", r_banner.left(), banner.right());
+        assert!(r_banner.right() <= canvas.right());
+
+        // 图2：展开态主岛 (PW=419) 右侧放 3~4 个悬浮球，不得与岛体右上角重叠
+        let expanded = Rect::from_min_size(Pos2::new(470.0 - PW * 0.5, 6.0), Vec2::new(PW, 240.0));
+        let r_expanded = App::compute_floating_orb_rect(expanded, canvas, 154.0, 34.0, 10.0, expanded.top(), false);
+        assert!(r_expanded.left() >= expanded.right() + 10.0, "expanded overlap: {} vs {}", r_expanded.left(), expanded.right());
+        assert!(r_expanded.right() <= canvas.right());
+
+        // 若岛体贴近物理屏幕最右缘，应整组翻转到岛体左侧而非压在面板上
+        let tight_right = Rect::from_min_max(Pos2::ZERO, Pos2::new(expanded.right() + 40.0, WIN_H));
+        let r_flipped = App::compute_floating_orb_rect(expanded, tight_right, 154.0, 34.0, 10.0, expanded.top(), false);
+        assert!(r_flipped.right() <= expanded.left() - 10.0, "flipped overlap: {} vs {}", r_flipped.right(), expanded.left());
+    }
+
+    #[test]
+    fn shelf_edge_drag_and_frozen_never_expand_island_unboundedly() {
+        use super::{App, Options, PW, WIN_W};
+        let ctx = eframe::egui::Context::default();
+        let mut app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
+        app.open = false;
+        app.drag_hot = true;
+        // 模拟高刷屏下连续多次被迫重置 open=false 同时 drag_hot=true 的边界震荡场景
+        for i in 0..240 {
+            app.open = false;
+            app.drag_hot = true;
+            app.morph(true, false, i as f64 * 0.007, 0.007);
+            assert!(
+                app.w.pos <= (PW * 1.12).min(WIN_W - 24.0) + 0.01,
+                "frame {i}: 宽度不应无限横向膨胀: w.pos={}",
+                app.w.pos
+            );
+        }
+    }
+
+    #[test]
+    fn oppo_orb_never_pinned_inside_expanding_panel() {
+        use super::{App, CANVAS_W, Options, PW, WIN_H};
+        let ctx = eframe::egui::Context::default();
+        let mut app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
+        app.oppo_drag_hot = true;
+        app.oppo_orb_a = 1.0;
+        let canvas = Rect::from_min_max(Pos2::ZERO, Pos2::new(CANVAS_W, WIN_H));
+        let win = Rect::from_min_size(Pos2::new(150.0, 0.0), Vec2::new(640.0, WIN_H));
+        let small_panel = Rect::from_center_size(Pos2::new(470.0, 21.0), Vec2::new(180.0, 30.0));
+        // 先在收起态让 OPPO 悬浮球出现在小药丸右侧（x ≈ 572..626）并完成弹出到位
+        let mut g1 = app.step_oppo_drop_orb_inner(canvas, win, small_panel, None, 0.016).expect("orb should appear");
+        for _ in 0..24 {
+            g1 = app.step_oppo_drop_orb_inner(canvas, win, small_panel, None, 0.016).expect("orb");
+        }
+        assert!(g1.0.left() >= small_panel.right() + 10.0, "settled g1={:?}", g1.0);
+
+        // 随后面板展开到 PW=419（panel.right() = 679.5），即使 pin=true 也绝不能把球留在展开面板里面
+        app.open = true;
+        app.oppo_orb_pin_pos = true;
+        let expanded_panel = Rect::from_min_size(Pos2::new(470.0 - PW * 0.5, 6.0), Vec2::new(PW, 240.0));
+        let g2 = app.step_oppo_drop_orb_inner(canvas, win, expanded_panel, None, 0.016).expect("orb should dodge panel");
+        assert!(
+            g2.0.left() >= expanded_panel.right() + 11.9,
+            "悬浮球不应被吞入展开面板内部: orb={:?}, panel={:?}",
+            g2.0,
+            expanded_panel
+        );
+    }
+
+    #[test]
+    fn oppo_orb_animation_never_clips_outside_screen() {
+        use super::{App, CANVAS_W, Options, WIN_H};
+        let ctx = eframe::egui::Context::default();
+        let mut app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
+        app.oppo_drag_hot = true;
+        app.oppo_orb_a = 1.0;
+        app.oppo_orb_hover_a = 1.0;
+        let canvas = Rect::from_min_max(Pos2::ZERO, Pos2::new(CANVAS_W, WIN_H));
+        let win = Rect::from_min_size(Pos2::new(150.0, 0.0), Vec2::new(640.0, WIN_H));
+        let pill_panel = Rect::from_center_size(Pos2::new(470.0, 21.0), Vec2::new(180.0, 30.0));
+        // 即使收起态居中 y=21 且悬停放大到 62px，球体 + 外发光环 (2.5px+stroke) 仍必须完整落在屏幕内部 (>= 6px)
+        for i in 0..30 {
+            let (orb, _) = app.step_oppo_drop_orb_inner(canvas, win, pill_panel, None, 0.016).expect("orb");
+            assert!(orb.top() >= win.top() + 8.0, "frame {i}: 悬浮球顶部越出屏幕上沿: orb={orb:?}");
+            assert!(orb.right() <= canvas.right() - 8.0, "frame {i}: 悬浮球右侧越出画布: orb={orb:?}");
+        }
+    }
+
+    #[test]
+    fn lyric_island_width_customizes_slot_width() {
+        use super::{App, Options};
+        let ctx = eframe::egui::Context::default();
+        let app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
+        let narrow = app.compute_lyric_slot_width(220.0, false, 0);
+        let wide = app.compute_lyric_slot_width(400.0, false, 0);
+        assert!((narrow - 220.0).abs() < 0.01);
+        assert!((wide - 400.0).abs() < 0.01);
+        assert!(wide > narrow + 150.0);
+    }
+
+    #[test]
+    fn time_capsule_and_device_pill_handoff_is_disjoint() {
+        use super::{App, BAR_H, Options, WIN_H, smoothstep};
+        let ctx = eframe::egui::Context::default();
+        let app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
+        let win = Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, WIN_H));
+        let panel = Rect::from_center_size(Pos2::new(320.0, 21.0), Vec2::new(220.0, BAR_H));
+        let mut prev_pill_p = 0.0_f32;
+        for step in 0..=20 {
+            let pc = step as f32 / 20.0;
+            let tc = app.lyric_time_capsule_geom(win, panel, pc, 1.0);
+            let tc_alpha = tc.map(|(_, a, _)| a).unwrap_or(0.0);
+            let clear_gate = 1.0 - smoothstep(0.01, 0.14, tc_alpha);
+            let pill_p = ((pc - 0.16) / 0.84).clamp(0.0, 1.0) * clear_gate;
+            assert!(
+                !(tc_alpha > 0.14 && pill_p > 0.001),
+                "step {step} (pc={pc}): 时间胶囊与设备药丸不能同时争抢同一过渡阶段: tc_alpha={tc_alpha}, pill_p={pill_p}"
+            );
+            assert!(pill_p >= prev_pill_p - 1e-4, "pill_p 应单调平滑递增: {prev_pill_p} -> {pill_p}");
+            prev_pill_p = pill_p;
+        }
+        assert!((prev_pill_p - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn time_capsule_hover_zone_bridges_gap_to_island() {
+        use super::{App, BAR_H, Options, WIN_H};
+        let ctx = eframe::egui::Context::default();
+        let app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
+        let win = Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, WIN_H));
+        let panel = Rect::from_center_size(Pos2::new(320.0, 21.0), Vec2::new(220.0, BAR_H));
+        let (tc_r, tc_a, _) = app.lyric_time_capsule_geom(win, panel, 0.0, 1.0).expect("time capsule visible at pc=0");
+        assert!(tc_a > 0.99);
+        assert!(tc_r.right() < panel.left());
+        let hover_zone = Rect::from_min_max(
+            Pos2::new(tc_r.left() - 2.0, tc_r.top() - 2.0),
+            Pos2::new(tc_r.right().max(panel.left() + 2.0), tc_r.bottom() + 2.0),
+        );
+        assert!(hover_zone.contains(tc_r.center()));
+        // 胶囊与主岛左缘之间的 7px 缝隙也必须落在悬停热区内
+        assert!(hover_zone.contains(Pos2::new((tc_r.right() + panel.left()) * 0.5, panel.center().y)));
+    }
+
+    #[test]
+    fn time_capsule_morphs_smoothly_into_device_pill_content() {
+        use super::App;
+        let tc_rect = Rect::from_min_size(Pos2::new(140.0, 6.0), Vec2::new(58.0, 30.0));
+        let dev_rect = Rect::from_min_size(Pos2::new(60.0, 6.0), Vec2::new(112.0, 30.0));
+        let (r_start, box0, tc0, dev0) = App::morph_tc_to_device_pill(tc_rect, dev_rect, 0.0, 1.0);
+        assert_eq!(r_start, tc_rect);
+        assert!((box0 - 1.0).abs() < 1e-4);
+        assert!((tc0 - 1.0).abs() < 1e-4);
+        assert!((dev0 - 0.0).abs() < 1e-4);
+
+        let (r_mid, box_m, tc_m, dev_m) = App::morph_tc_to_device_pill(tc_rect, dev_rect, 0.5, 0.4);
+        assert!(r_mid.width() > tc_rect.width() && r_mid.width() < dev_rect.width());
+        assert!((box_m - 1.0).abs() < 1e-4, "合体胶囊背景全程平滑不消失: {box_m}");
+        assert!(tc_m < 0.05 && dev_m > 0.25);
+
+        let (r_end, box1, tc1, dev1) = App::morph_tc_to_device_pill(tc_rect, dev_rect, 1.0, 0.0);
+        assert_eq!(r_end, dev_rect);
+        assert!((box1 - 1.0).abs() < 1e-4);
+        assert!((tc1 - 0.0).abs() < 1e-4);
+        assert!((dev1 - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn floating_orbs_use_theme_material_not_music_cover_override() {
+        use super::{App, Options};
+        use crate::model::Skin;
+        let ctx = eframe::egui::Context::default();
+        let mut app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
+        app.open = true;
+        app.media = crate::smtc::NowPlaying {
+            title: "Test Track".into(),
+            playing: true,
+            duration: 180.0,
+            ..Default::default()
+        };
+        for skin in [Skin::Fluid, Skin::LiquidGlass, Skin::GlassDark, Skin::GlassLight, Skin::Cream, Skin::Classic] {
+            app.settings.skin = skin;
+            let painter = ctx.layer_painter(eframe::egui::LayerId::background());
+            let r = Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(40.0, 40.0));
+            let host = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 240.0));
+            app.paint_card_body_themed(&painter, r, 20.0, 1.0, 1.0, host, true, false);
         }
     }
 }

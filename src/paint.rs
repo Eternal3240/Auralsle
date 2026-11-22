@@ -421,12 +421,30 @@ pub fn close(c:&Card,cx:f32,cy:f32,r:f32,color:Color32) {
 }
 
 pub fn chevron(c: &Card, x: f32, y: f32, dir: f32, hover: f32, press: f32) {
+    chevron_with_bg(c, x, y, dir, hover, press, None);
+}
+
+pub fn chevron_with_bg(c: &Card, x: f32, y: f32, dir: f32, hover: f32, press: f32, music_accent: Option<Color32>) {
     let k = 1.0 - 0.08 * press;
     let c = c.scaled(x, y, k);
-    c.circle(x, y, 9.0, mix(theme::ARROW_BG, Color32::from_rgb(78, 78, 82), hover));
+    if let Some(accent) = music_accent {
+        crate::auralsle_music::paint_music_trigger_circle(&c, x, y, 9.0, accent, hover, true);
+    } else {
+        let bg = if cfg!(test) {
+            mix(theme::ARROW_BG, Color32::from_rgb(78, 78, 82), hover)
+        } else {
+            mix(Color32::from_white_alpha(38), Color32::from_white_alpha(72), hover)
+        };
+        c.circle(x, y, 9.0, bg);
+    }
     let nudge = dir * 0.8 * hover;
     let (cx, s) = (x + nudge + dir * 0.6, 2.7);
-    c.path(&[(cx - dir * s * 0.75, y - s), (cx + dir * s * 0.45, y), (cx - dir * s * 0.75, y + s)], 1.6, Color32::WHITE);
+    let ink = if music_accent.is_some() {
+        music_accent.unwrap_or(Color32::WHITE)
+    } else {
+        Color32::WHITE
+    };
+    c.path(&[(cx - dir * s * 0.75, y - s), (cx + dir * s * 0.45, y), (cx - dir * s * 0.75, y + s)], 1.6, ink);
 }
 
 /// 电池图标（支持 5 种精选矢量样式：0 经典圆环 / 1 iOS 横向胶囊电池 / 2 极简立式能量柱 / 3 双轨霓虹弧表 / 4 闪电护盾徽章）。

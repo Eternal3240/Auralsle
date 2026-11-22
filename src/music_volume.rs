@@ -46,15 +46,29 @@ impl Reader {
     }
 }
 
-fn executable(source:&str)->Option<String> {
-    let source=source.to_lowercase();
+pub(crate) fn executable(source:&str)->Option<String> {
+    let source=source.trim().to_lowercase();
+    if source.is_empty() || source.contains('!') || source.contains(['\\','/']) {
+        return None;
+    }
     match source.as_str() {
-        "kugou"=>Some("kugou.exe".into()),
+        "kugou"|"kugoumusic"|"酷狗音乐"=>Some("kugou.exe".into()),
         // QQ 音乐 22.82 起系统媒体会话的身份名改为 Tencent.QQMusic。
-        "qqmusic"|"tencent.qqmusic"=>Some("qqmusic.exe".into()),
+        "qqmusic"|"tencent.qqmusic"|"qqmusic_desktop"|"qq音乐"=>Some("qqmusic.exe".into()),
+        "cloudmusic"|"neteasecloudmusic"|"netease.cloudmusic"|"网易云音乐"=>Some("cloudmusic.exe".into()),
+        "kuwo"|"kwmusic"|"酷我音乐"=>Some("kwmusic.exe".into()),
         "spotify"=>Some("spotify.exe".into()),
-        "汽水音乐"=>Some("sodamusic.exe".into()),
-        _ if source.ends_with(".exe") && !source.contains(['\\','/'])=>Some(source),
+        "汽水音乐"|"sodamusic"|"com.soda.music"|"qishuimusic"=>Some("sodamusic.exe".into()),
+        "saltplayer"|"salt"|"椒盐音乐"=>Some("saltplayer.exe".into()),
+        "yesplaymusic"=>Some("yesplaymusic.exe".into()),
+        "lxmusic"|"lx-music-desktop"|"落雪音乐"=>Some("lx-music-desktop.exe".into()),
+        "foobar2000"=>Some("foobar2000.exe".into()),
+        "aimp"=>Some("aimp.exe".into()),
+        "musicbee"=>Some("musicbee.exe".into()),
+        "applemusic"=>Some("applemusic.exe".into()),
+        "msedge"|"microsoft.msedge"=>Some("msedge.exe".into()),
+        "chrome"|"google.chrome"=>Some("chrome.exe".into()),
+        _ if source.ends_with(".exe")=>Some(source),
         _=>None,
     }
 }
@@ -158,7 +172,16 @@ mod tests {
     use super::*;
     #[test]
     fn player_names_require_an_exact_executable_or_packaged_identity(){
-        for (source,exe) in [("QQMusic.exe","qqmusic.exe"),("Tencent.QQMusic","qqmusic.exe"),("kugou","kugou.exe"),("汽水音乐","sodamusic.exe")]{assert_eq!(executable(source).as_deref(),Some(exe));}
+        for (source,exe) in [
+            ("QQMusic.exe","qqmusic.exe"),
+            ("Tencent.QQMusic","qqmusic.exe"),
+            ("kugou","kugou.exe"),
+            ("汽水音乐","sodamusic.exe"),
+            ("cloudmusic","cloudmusic.exe"),
+            ("网易云音乐","cloudmusic.exe"),
+            ("saltplayer","saltplayer.exe"),
+            ("kuwo","kwmusic.exe"),
+        ]{assert_eq!(executable(source).as_deref(),Some(exe));}
         for source in ["","music","QQMusic.exe.bak",r"C:\QQMusic.exe","SpotifyAB.SpotifyMusic_123!Spotify"]{assert_eq!(executable(source),None);}
     }
     #[test]

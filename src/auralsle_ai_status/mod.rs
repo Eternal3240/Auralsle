@@ -49,6 +49,8 @@ pub const GAP: f32 = 14.0;
 /// 图标与它自己的文字之间留多少：比 `GAP` 小，读起来是一整块；
 /// 块与块之间仍然按 `GAP` 排，所以项目间距不变。
 pub const ICON_TEXT_GAP: f32 = 6.0;
+/// 主岛并排展示多个 AI 状态时的块间间距。
+pub const COMPACT_ITEM_GAP: f32 = 10.0;
 /// 岛外元素与岛体边缘的间距（课程卡、任务结束提示共用）。
 pub const OUT_GAP: f32 = 8.0;
 /// 岛外未读消息图标的基准边长。
@@ -124,16 +126,25 @@ pub(crate) fn needs_return(p: state::Phase) -> bool {
     matches!(p, state::Phase::Done | state::Phase::Waiting | state::Phase::Error)
 }
 
-/// 主界面当前展示的助手：优先活跃，其次仍在保留窗口内的「已完成」。
-/// 没有可展示的就返回 `None` —— 岛屿随之收回，不会一直挂着。
-pub(crate) fn shown() -> Option<Shown> {
+/// 主界面当前展示的助手列表（最多 N 个）：优先活跃，其次仍在保留窗口内的「已完成」。
+/// 没有可展示的就返回空 —— 岛屿随之收回，不会一直挂着。
+pub(crate) fn shown_list() -> Vec<Shown> {
     let cfg = config::get();
     if !cfg.enabled || !cfg.compact {
-        return None;
+        return Vec::new();
     }
+    let limit = cfg.compact_max_count.clamp(1, 5) as usize;
     let (agents, _) = state::snapshot();
-    let agent = agents.into_iter().next()?;
-    Some(Shown { agent })
+    agents
+        .into_iter()
+        .take(limit)
+        .map(|agent| Shown { agent })
+        .collect()
+}
+
+/// 主界面当前展示的主助手（兼容单条读取点）。
+pub(crate) fn shown() -> Option<Shown> {
+    shown_list().into_iter().next()
 }
 
 /// 状态字号：比药丸时钟小两号（15.5 → 13.5）。
@@ -156,6 +167,23 @@ pub(crate) fn text_width(t: &str) -> f32 {
 /// 「回到 AI」由任务结束提示卡片提供，不再占用岛体宽度。
 pub(crate) fn compact_width(label: &str) -> f32 {
     ICON + ICON_TEXT_GAP + text_width(label)
+}
+
+/// 多个紧凑状态并排占用的总宽度。
+pub(crate) fn compact_list_width_for(items: &[Shown]) -> f32 {
+    if items.is_empty() {
+        return 0.0;
+    }
+    let sum: f32 = items
+        .iter()
+        .map(|s| compact_width(s.agent.phase.label()))
+        .sum();
+    sum + COMPACT_ITEM_GAP * (items.len().saturating_sub(1) as f32)
+}
+
+pub(crate) fn compact_list_width() -> f32 {
+    let items = shown_list();
+    compact_list_width_for(&items)
 }
 
 /// 本帧所有独立卡片的矩形（绝对坐标）：课程卡（若有）+ 每一枚设备药丸。
@@ -231,10 +259,13 @@ pub fn is_course_island_editing() -> bool {
 pub(crate) fn extend_layout(layout: &mut crate::bar_layout::Layout) {
     let tail = compact_tail();
     let cfg = config::get();
-    let ai_extra = if cfg.enabled && cfg.compact {
-        shown()
-            .map(|s| compact_width(s.agent.phase.label()) + GAP + course_slot_width())
-            .unwrap_or(0.0)
+    let ai_w = if cfg.enabled && cfg.compact {
+        compact_list_width()
+    } else {
+        0.0
+    };
+    let ai_extra = if ai_w > 0.0 {
+        ai_w + GAP + course_slot_width()
     } else {
         0.0
     };
@@ -252,9 +283,7 @@ pub(crate) fn extend_layout(layout: &mut crate::bar_layout::Layout) {
 
 /// 紧凑状态的左端 x（药丸局部坐标，右端对齐 `RIGHT_PAD`）。
 pub(crate) fn compact_x(layout: &crate::bar_layout::Layout) -> f32 {
-    let w = shown()
-        .map(|s| compact_width(s.agent.phase.label()))
-        .unwrap_or(0.0);
+    let w = compact_list_width();
     layout.width / 2.0 - right_pad() - course_slot_width() - w
 }
 
@@ -403,5 +432,43 @@ mod tests {
         assert!(!pause_expired(None, 999.0, 10));
         assert!(!pause_expired(Some(0.0), 999.0, 0), "0 秒 = 永不回退");
         assert!(pause_expired(Some(0.0), 3.0, 3), "自定义 N 秒应生效");
+    }
+
+    #[test]
+    fn compact_list_width_accumulates_multiple_agents() {
+        let mk = |key: &str, phase: state::Phase| Shown {
+            agent: state::Agent {
+                key: key.to_owned(),
+                name: key.to_owned(),
+                phase,
+                message: String::new(),
+                detail: String::new(),
+                project: String::new(),
+                updated: 0,
+                age_secs: 0,
+                step: String::new(),
+                step_index: 0,
+                step_total: 0,
+                progress: -1.0,
+                elapsed: 0,
+                quiet: false,
+                provider_key: key.to_owned(),
+                title: String::new(),
+                model: String::new(),
+                effort: String::new(),
+                is_cli: false,
+                cwd: String::new(),
+            },
+        };
+        let one = vec![mk("codex", state::Phase::Working)];
+        let three = vec![
+            mk("codex", state::Phase::Working),
+            mk("claude", state::Phase::Waiting),
+            mk("gemini", state::Phase::Done),
+        ];
+        let w1 = compact_list_width_for(&one);
+        let w3 = compact_list_width_for(&three);
+        assert!(w3 > w1 * 2.5, "3 个状态宽度应明显大于单个: w1={w1}, w3={w3}");
+        assert_eq!(compact_list_width_for(&[]), 0.0);
     }
 }

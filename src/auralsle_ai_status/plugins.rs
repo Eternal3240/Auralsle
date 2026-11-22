@@ -4177,7 +4177,7 @@ pub fn draw_translate_island_page(c: &crate::paint::Card) {
     let total_w = 340.0_f32;
 
     let (mut tr_in, tr_out, tr_mode, _tr_status) = {
-        let g = translate_state().lock().unwrap();
+        let g = translate_state().lock().unwrap_or_else(|e| e.into_inner());
         (g.input.clone(), g.output.clone(), g.target_mode, g.status.clone())
     };
 
@@ -4928,7 +4928,7 @@ pub fn draw_translate_settings_page(ui: &mut egui::Ui) {
     settings_label(ui, "双语快捷翻译工作台");
     crate::extras::settings_card(ui, |ui| {
         let (mut tr_in, tr_out, mut tr_mode, tr_status) = {
-            let g = translate_state().lock().unwrap();
+            let g = translate_state().lock().unwrap_or_else(|e| e.into_inner());
             (g.input.clone(), g.output.clone(), g.target_mode, g.status.clone())
         };
         ui.horizontal_wrapped(|ui| {

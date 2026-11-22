@@ -1,7 +1,8 @@
 ﻿param(
     [string]$OutputDirectory = [Environment]::GetFolderPath('Desktop'),
     [string]$DataDirectory = $(if ($env:AURALSLE_DATA_DIR) { $env:AURALSLE_DATA_DIR } else { Join-Path $env:APPDATA 'Auralsle' }),
-    [switch]$RevealArchive
+    [switch]$RevealArchive,
+    [string]$DoneFile = ''
 )
 $ErrorActionPreference = 'Stop'
 $collectionRoot = Join-Path ([IO.Path]::GetTempPath()) ('auralsle-diagnostics-' + [guid]::NewGuid().ToString('N'))
@@ -156,12 +157,15 @@ public static class AuralsleDiagnosticWindows {
     New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
     $archive = Join-Path $OutputDirectory ('灵屿诊断-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.zip')
     Compress-Archive -Path (Join-Path $collectionRoot '*') -DestinationPath $archive
+    if ($DoneFile) {
+        try { [IO.File]::WriteAllText($DoneFile, $archive, $utf8) } catch {}
+    }
     Write-Output ('诊断包已保存：' + $archive)
     Write-Output '请将诊断包发给开发者，并说明异常出现时间、重启灵屿 AuraIsle能否恢复、是否发生在睡眠唤醒后。'
     Write-Output '音乐没有歌名、封面或歌词时，请在歌曲播放中运行诊断，并说明使用的播放模式（歌单、电台、FM、漫游等）。'
     Write-Output '诊断包含灵屿 AuraIsle 日志、功能开关、系统与显卡信息、消息窗口类型和播放器状态。音乐日志可能含有歌名和歌手。诊断包由你决定是否分享。'
     if ($RevealArchive) {
-        Read-Host '按回车键查看诊断包' | Out-Null
+        try { Read-Host '按回车键查看诊断包' | Out-Null } catch {}
         Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList ('/select,"' + $archive + '"')
     }
 } finally {

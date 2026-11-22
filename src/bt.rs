@@ -79,67 +79,241 @@ impl Drop for Service {
 }
 
 pub fn spawn() -> Service {
-    // [修复需求 7]：使用无界通道避免主线程休眠时 `sync_channel(1)` 满载丢弃新连接事件，并将扫描周期提速至 650ms！
+    // [修复需求 7 / v3.8.5+]：无界通道保留全部状态跳变，WinRT DeviceWatcher 事件驱动 + 快速发射拓扑变更，不等待慢速整机 HID/电量枚举。
     let (tx, rx) = std::sync::mpsc::channel();
     let (stop, stopped) = std::sync::mpsc::channel();
     std::thread::Builder::new().name("auralsle-bluetooth".into()).spawn(move || {
         #[cfg(windows)]
-        let mut cache = Cache::default();
-        loop {
-            if stopped.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) { return; }
-            #[cfg(windows)]
-            if let Ok(found) = query(&mut cache) {
-                if tx.send(found).is_err() { return; }
+        {
+            let (wake_tx, wake_rx) = std::sync::mpsc::sync_channel::<()>(1);
+            let watchers = start_bt_watchers(wake_tx);
+            let mut cache = Cache::default();
+            let mut bus_state = BusScanState::default();
+            let mut last_emitted: Option<Vec<Device>> = None;
+            loop {
+                if stopped.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) {
+                    stop_bt_watchers(watchers);
+                    return;
+                }
+                if let Some(fast) = query_fast(&mut bus_state, &cache) {
+                    let fast_topology_changed = last_emitted
+                        .as_ref()
+                        .is_none_or(|prev| !same_topology(prev, &fast));
+                    if fast_topology_changed {
+                        emit_devices(&tx, &fast, &mut last_emitted);
+                    }
+                    if let Ok(full) = query_full_with_batteries(&mut cache, fast) {
+                        if last_emitted.as_ref().is_none_or(|prev| *prev != full) {
+                            emit_devices(&tx, &full, &mut last_emitted);
+                        }
+                    }
+                }
+                // 优先响应 WinRT DeviceWatcher 的瞬时到达事件；收到首个事件后略微合并 35ms 再扫一次（避免双模耳机经典/BLE分两批触发抖动）
+                match wake_rx.recv_timeout(Duration::from_millis(450)) {
+                    Ok(()) => {
+                        if stopped.recv_timeout(Duration::from_millis(35))
+                            != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                        {
+                            stop_bt_watchers(watchers);
+                            return;
+                        }
+                        while wake_rx.try_recv().is_ok() {}
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        if stopped.recv_timeout(Duration::from_millis(450))
+                            != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                        {
+                            stop_bt_watchers(watchers);
+                            return;
+                        }
+                    }
+                }
             }
-            #[cfg(not(windows))]
+        }
+        #[cfg(not(windows))]
+        loop {
             let _ = &tx;
-            if stopped.recv_timeout(Duration::from_millis(650)) != Err(std::sync::mpsc::RecvTimeoutError::Timeout) { return; }
+            if stopped.recv_timeout(Duration::from_millis(650)) != Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                return;
+            }
         }
     }).ok();
     Service { rx, stop }
 }
 
 #[cfg(windows)]
-fn query(cache:&mut Cache) -> Result<Vec<Device>, ()> {
-    use windows::Devices::Bluetooth::{BluetoothConnectionStatus, BluetoothDevice, BluetoothLEDevice};
-    use windows::Devices::Enumeration::DeviceInformation;
-    let selectors = [
-        (true, BluetoothDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected).map_err(|_| ())?),
-        (false, BluetoothLEDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected).map_err(|_| ())?),
-    ];
-    let mut devices = Vec::new();
-    for (classic, selector) in selectors {
-        let selector = windows::core::HSTRING::from(format!("({selector}) AND System.Devices.Aep.IsConnected:=System.StructuredQueryType.Boolean#True"));
-        let found = DeviceInformation::FindAllAsyncAqsFilter(&selector).map_err(|_| ())?.get().map_err(|_| ())?;
-        for info in found {
-            let Ok(id) = info.Id() else { continue };
-            let Ok(name) = info.Name() else { continue };
-            let name = name.to_string();
-            if name.trim().is_empty() { continue; }
-            let address = id.to_string().rsplit('-').next().unwrap_or_default().replace(':', "").to_ascii_uppercase();
-            if devices.iter().any(|d: &Device| d.id == address) { continue; }
-            let kind=if let Some(old)=cache.devices.iter().find(|old|old.id==address && old.name==name){old.kind}else{
-                let class=if classic {
-                    BluetoothDevice::FromIdAsync(&id).ok().and_then(|a|a.get().ok()).and_then(|d|{
-                        let class=d.ClassOfDevice().ok().and_then(|c|c.RawValue().ok());let _=d.Close();class
-                    })
-                }else{
-                    BluetoothLEDevice::FromIdAsync(&id).ok().and_then(|a|a.get().ok()).and_then(|d|{
-                        let class=d.Appearance().ok().and_then(|c|c.RawValue().ok()).map(u32::from);let _=d.Close();class
-                    })
-                };
-                device_kind(&name,classic,class)
-            };
-            devices.push(Device { id: address, kind, name, battery: None });
+fn same_topology(a: &[Device], b: &[Device]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.id == y.id && x.name == y.name)
+}
+
+#[cfg(windows)]
+fn emit_devices(
+    tx: &std::sync::mpsc::Sender<Vec<Device>>,
+    devices: &[Device],
+    last_emitted: &mut Option<Vec<Device>>,
+) {
+    let mut snap = devices.to_vec();
+    for d in connected_peripherals() {
+        if d.id.starts_with("VOLTIDE_DEMO_") && !snap.iter().any(|x| x.id == d.id) {
+            snap.push(d);
         }
     }
-    // [sdparklab/Voltide] 扫描上报电量的 2.4GHz 无线 HID 外设（带 2.4s 缓存，避免阻塞 650ms 高频蓝牙连接检测）
+    set_connected_peripherals(snap);
+    let list = devices.to_vec();
+    *last_emitted = Some(list.clone());
+    let _ = tx.send(list);
+    wake_ui();
+}
+
+#[cfg(windows)]
+fn start_bt_watchers(wake_tx: std::sync::mpsc::SyncSender<()>) -> Vec<windows::Devices::Enumeration::DeviceWatcher> {
+    use windows::Devices::Bluetooth::{BluetoothConnectionStatus, BluetoothDevice, BluetoothLEDevice};
+    use windows::Devices::Enumeration::{DeviceInformation, DeviceInformationUpdate, DeviceWatcher};
+    use windows::Foundation::TypedEventHandler;
+
+    let mut out = Vec::new();
+    let selectors = [
+        BluetoothDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected).ok(),
+        BluetoothLEDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected).ok(),
+    ];
+    for sel in selectors.into_iter().flatten() {
+        let Ok(watcher) = DeviceInformation::CreateWatcherAqsFilter(&sel) else {
+            continue;
+        };
+        let tx_add = wake_tx.clone();
+        let _ = watcher.Added(&TypedEventHandler::<DeviceWatcher, DeviceInformation>::new(move |_, _| {
+            let _ = tx_add.try_send(());
+            Ok(())
+        }));
+        let tx_upd = wake_tx.clone();
+        let _ = watcher.Updated(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(move |_, _| {
+            let _ = tx_upd.try_send(());
+            Ok(())
+        }));
+        let tx_rem = wake_tx.clone();
+        let _ = watcher.Removed(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(move |_, _| {
+            let _ = tx_rem.try_send(());
+            Ok(())
+        }));
+        if watcher.Start().is_ok() {
+            out.push(watcher);
+        }
+    }
+    out
+}
+
+#[cfg(windows)]
+fn stop_bt_watchers(watchers: Vec<windows::Devices::Enumeration::DeviceWatcher>) {
+    for w in watchers {
+        let _ = w.Stop();
+    }
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct BusScanState {
+    classic: Vec<Device>,
+    le: Vec<Device>,
+}
+
+#[cfg(windows)]
+fn voltide_cache() -> &'static std::sync::Mutex<(Vec<Device>, Option<Instant>)> {
+    static VOLTIDE_CACHE: std::sync::OnceLock<std::sync::Mutex<(Vec<Device>, Option<Instant>)>> =
+        std::sync::OnceLock::new();
+    VOLTIDE_CACHE.get_or_init(|| std::sync::Mutex::new((Vec::new(), None)))
+}
+
+#[cfg(windows)]
+fn scan_bus(classic: bool, cache: &Cache) -> Result<Vec<Device>, ()> {
+    use windows::Devices::Bluetooth::{BluetoothConnectionStatus, BluetoothDevice, BluetoothLEDevice};
+    use windows::Devices::Enumeration::DeviceInformation;
+    let selector = if classic {
+        BluetoothDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected)
+    } else {
+        BluetoothLEDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected)
+    }
+    .map_err(|_| ())?;
+    let found = DeviceInformation::FindAllAsyncAqsFilter(&selector)
+        .map_err(|_| ())?
+        .get()
+        .map_err(|_| ())?;
+    let mut out = Vec::new();
+    for info in found {
+        let Ok(id) = info.Id() else { continue };
+        let Ok(name) = info.Name() else { continue };
+        let name = name.to_string();
+        if name.trim().is_empty() { continue; }
+        let address = id.to_string().rsplit('-').next().unwrap_or_default().replace(':', "").to_ascii_uppercase();
+        if out.iter().any(|d: &Device| d.id == address) { continue; }
+        let cached = cache.devices.iter().find(|old| old.id == address && old.name == name);
+        let kind = if let Some(old) = cached {
+            old.kind
+        } else {
+            let class = if classic {
+                BluetoothDevice::FromIdAsync(&id).ok().and_then(|a| a.get().ok()).and_then(|d| {
+                    let class = d.ClassOfDevice().ok().and_then(|c| c.RawValue().ok());
+                    let _ = d.Close();
+                    class
+                })
+            } else {
+                BluetoothLEDevice::FromIdAsync(&id).ok().and_then(|a| a.get().ok()).and_then(|d| {
+                    let class = d.Appearance().ok().and_then(|c| c.RawValue().ok()).map(u32::from);
+                    let _ = d.Close();
+                    class
+                })
+            };
+            device_kind(&name, classic, class)
+        };
+        let battery = cached.and_then(|old| old.battery);
+        out.push(Device { id: address, kind, name, battery });
+    }
+    Ok(out)
+}
+
+#[cfg(windows)]
+fn merge_voltide_devices(devices: &mut Vec<Device>, voltide_devs: Vec<Device>) {
+    for vd in voltide_devs {
+        if !devices.iter().any(|d| d.id == vd.id || d.name == vd.name) {
+            devices.push(vd);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn query_fast(bus: &mut BusScanState, cache: &Cache) -> Option<Vec<Device>> {
+    let c_res = scan_bus(true, cache);
+    let l_res = scan_bus(false, cache);
+    if c_res.is_err() && l_res.is_err() {
+        return None;
+    }
+    if let Ok(c) = c_res {
+        bus.classic = c;
+    }
+    if let Ok(l) = l_res {
+        bus.le = l;
+    }
+    let mut devices = Vec::with_capacity(bus.classic.len() + bus.le.len());
+    for d in bus.classic.iter().chain(bus.le.iter()) {
+        if !devices.iter().any(|x: &Device| x.id == d.id) {
+            devices.push(d.clone());
+        }
+    }
     if !cfg!(test) && crate::auralsle_ai_status::config::get().voltide_enabled {
-        static VOLTIDE_CACHE: std::sync::OnceLock<std::sync::Mutex<(Vec<Device>, Option<Instant>)>> = std::sync::OnceLock::new();
+        let cached_v = voltide_cache().lock().unwrap_or_else(|e| e.into_inner()).0.clone();
+        merge_voltide_devices(&mut devices, cached_v);
+    }
+    devices.sort_by(|a, b| a.id.cmp(&b.id));
+    Some(devices)
+}
+
+#[cfg(windows)]
+fn query_full_with_batteries(cache: &mut Cache, mut devices: Vec<Device>) -> Result<Vec<Device>, ()> {
+    if !cfg!(test) && crate::auralsle_ai_status::config::get().voltide_enabled {
         let voltide_devs = {
-            let mtx = VOLTIDE_CACHE.get_or_init(|| std::sync::Mutex::new((Vec::new(), None)));
-            let mut guard = mtx.lock().unwrap();
-            let need_rescan = guard.1.is_none_or(|t| t.elapsed() >= Duration::from_millis(2400));
+            let mtx = voltide_cache();
+            let mut guard = mtx.lock().unwrap_or_else(|e| e.into_inner());
+            let need_rescan = guard.1.is_none_or(|t| t.elapsed() >= Duration::from_millis(1600));
             if need_rescan {
                 if let Ok(v) = scan_voltide_hid_peripherals(&devices) {
                     guard.0 = v;
@@ -148,23 +322,10 @@ fn query(cache:&mut Cache) -> Result<Vec<Device>, ()> {
             }
             guard.0.clone()
         };
-        for vd in voltide_devs {
-            if !devices.iter().any(|d| d.id == vd.id || d.name == vd.name) {
-                devices.push(vd);
-            }
-        }
+        merge_voltide_devices(&mut devices, voltide_devs);
     }
-    devices.sort_by(|a,b|a.id.cmp(&b.id));
-    let updated = cache.update(devices,Instant::now(),read_batteries);
-    // 保留可能开启的演示设备并同步到全局快照
-    let mut snap = updated.clone();
-    for d in connected_peripherals() {
-        if d.id.starts_with("VOLTIDE_DEMO_") && !snap.iter().any(|x| x.id == d.id) {
-            snap.push(d);
-        }
-    }
-    set_connected_peripherals(snap);
-    Ok(updated)
+    devices.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(cache.update(devices, Instant::now(), read_batteries))
 }
 
 /// [sdparklab/Voltide] 枚举本机通过 2.4GHz 接收器或 HID 电池协议上报电量的无线外设（鼠标、键盘、耳机、手柄）。
@@ -374,6 +535,18 @@ pub fn connected_peripherals() -> Vec<Device> {
         .lock()
         .map(|g| g.clone())
         .unwrap_or_default()
+}
+
+/// 主动唤醒主界面重绘（用于在收到蓝牙拓扑跳变时立即解除主循环休眠）。
+#[cfg(windows)]
+fn wake_ui() {
+    if let Some(mtx) = BT_UI_CTX.get() {
+        if let Ok(guard) = mtx.lock() {
+            if let Some(ref ctx) = *guard {
+                ctx.request_repaint();
+            }
+        }
+    }
 }
 
 /// 更新全局已连接外设快照，若连接状态或电量发生变化则立即唤醒主界面重绘！

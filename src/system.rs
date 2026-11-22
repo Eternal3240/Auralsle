@@ -358,11 +358,64 @@ fn notification_identity(n:&UserNotification,number:u32,created:i64,known:Option
     let id=info.as_ref().and_then(|app|app.AppUserModelId().ok()).map(|id|id.to_string()).unwrap_or_default();
     let client=if !id.is_empty(){Messenger::from_notification_id(&id)}
         else{known.or_else(||toast_source::sender(number,created).and_then(|id|Messenger::from_notification_id(&id)))};
-    if let Some(client)=client{return (client.name().into(),client.adapter().notification_id.into());}
+    if let Some(client)=client{
+        let canonical_id = client.adapter().notification_id;
+        capture_app_logo(n, canonical_id);
+        return (client.name().into(), canonical_id.into());
+    }
     let name=info.and_then(|app|app.DisplayInfo().ok()).and_then(|display|display.DisplayName().ok())
         .map(|name|name.to_string()).filter(|name|!name.trim().is_empty()).unwrap_or_else(||"Windows 通知".into());
     let id=if id.is_empty(){name.clone()}else{id};
+    capture_app_logo(n, &id);
     (name,id)
+}
+
+/// 运行时优先从 Windows 通知 `AppInfo.DisplayInfo.GetLogo` 提取来源应用 Logo 并写入 `%APPDATA%\Auralsle\icon-cache`。
+fn capture_app_logo(n: &UserNotification, app_id: &str) {
+    let clean_id = app_id.trim();
+    if clean_id.is_empty() || crate::icons::is_excluded_oppo_app(clean_id, "") {
+        return;
+    }
+    static CAPTURED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let cache = CAPTURED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let key = clean_id.to_ascii_lowercase();
+    if let Ok(guard) = cache.lock() {
+        if guard.contains(&key) {
+            return;
+        }
+    }
+    let read_bytes = || -> Result<Vec<u8>> {
+        let info = n.AppInfo()?;
+        let display = info.DisplayInfo()?;
+        let logo = display.GetLogo(windows::Foundation::Size {
+            Width: 64.0,
+            Height: 64.0,
+        })?;
+        let stream = logo.OpenReadAsync()?.get()?;
+        let sz = stream.Size()?;
+        if sz == 0 || sz > 512 * 1024 {
+            return Ok(Vec::new());
+        }
+        let input = stream.GetInputStreamAt(0)?;
+        let reader = windows::Storage::Streams::DataReader::CreateDataReader(&input)?;
+        let loaded = reader.LoadAsync(sz as u32)?.get()?;
+        if loaded == 0 {
+            return Ok(Vec::new());
+        }
+        let mut buf = vec![0u8; loaded as usize];
+        reader.ReadBytes(&mut buf)?;
+        let _ = reader.Close();
+        Ok(buf)
+    };
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(key);
+    }
+    if let Ok(bytes) = read_bytes() {
+        if bytes.len() >= 8 {
+            crate::icons::register_runtime_logo(clean_id, &bytes);
+        }
+    }
 }
 fn notification_body(n: &UserNotification) -> Result<String> {
     let binding = n
@@ -526,9 +579,17 @@ fn connect_inner(ctx:eframe::egui::Context,filter:crate::messenger::Notification
                         || app.eq_ignore_ascii_case("weixin")
                         || id.to_ascii_lowercase().contains("wechat")
                         || id.to_ascii_lowercase().contains("weixin");
-                    let is_oppo = crate::extras::is_oppo_connect_toast(&app, &id, body_preview);
-                    // [修复需求 9]：只要检测到 OPPO 互传/跨屏互联通知或微信通知，即使未开启全局读取通知或电脑未登录微信，也一律放行并追踪正文变化！
-                    let enhanced_wx_oppo = is_wx || is_oppo || body_preview.contains("微信") || body_preview.contains("互传") || body_preview.contains("互联");
+                    let is_oppo = !mcfg.oppo_notify_mirror_enabled
+                        && crate::extras::is_oppo_connect_toast(&app, &id, body_preview);
+                    // 当「手机通知镜像」已启用时，OPPO 互联手机通知由 `oppo_notify` 走 `ovmsocketlog.log` 专道接入，
+                    // 不再从 Windows Toast listener 重复拦截。
+                    let enhanced_wx_oppo = is_wx || is_oppo;
+                    if mcfg.oppo_notify_mirror_enabled
+                        && crate::extras::is_oppo_connect_toast(&app, &id, body_preview)
+                    {
+                        current.insert(number, ToastVersion::new(created, client, None));
+                        continue;
+                    }
                     if !enhanced_wx_oppo && (!filter.allows(&id) || crate::messenger::suppresses_toast(&app,&id,worker_mask.load(std::sync::atomic::Ordering::Relaxed))){
                         current.insert(number,ToastVersion::new(created,client,None));
                         continue;

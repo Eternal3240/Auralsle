@@ -252,11 +252,34 @@ pub fn build_fonts_with_custom(_custom_path: &str)->FontDefinitions {
         find(&[("malgun.ttf", 0), ("NotoSansKR-Regular.otf", 0), ("NotoSansCJK-Regular.ttc", 1)], &dirs),
     ];
 
-    // 多语种零乱码回退（均采用只读文件映射不占私有堆内存）：泰语/老挝语/高棉语、南亚/印度语系、阿拉伯/希伯来/欧洲拓展、UI/数学符号、Emoji
+    // 多语种零乱码回退（均采用只读文件映射不占私有堆内存）：
+    // 藏文(Himalaya)、蒙古文(Baiti)、缅甸文(Myanmar Text)、彝文(Yi)、印加/加拿大原住民/切罗基(Gadugi)、
+    // 非洲/埃塞俄比亚语系(Ebrima)、爪哇(Javanese)、傣文(Tai Le / New Tai Lue)、八思巴文(PhagsPa)、
+    // 格鲁吉亚/亚美尼亚(Sylfaen)、塔纳(MV Boli)、泰/老挝/高棉(LeelawUI)、南亚印度(Nirmala)、
+    // 阿拉伯/希伯来/西里尔/希腊/越南(Tahoma / Arial / Lucida Sans Unicode)、生僻汉字 Ext-B/Ext-G(SimSun-ExtB/G/PMingLiU)、符号与 Emoji
     let fallbacks = [
         find(&[("LeelawUI.ttf", 0)], &dirs),
         find(&[("Nirmala.ttc", 0)], &dirs),
         find(&[("tahoma.ttf", 0)], &dirs),
+        find(&[("arial.ttf", 0)], &dirs),
+        find(&[("himalaya.ttf", 0)], &dirs),
+        find(&[("mmrtext.ttf", 0)], &dirs),
+        find(&[("monbaiti.ttf", 0)], &dirs),
+        find(&[("msyi.ttf", 0)], &dirs),
+        find(&[("gadugi.ttf", 0)], &dirs),
+        find(&[("ebrima.ttf", 0)], &dirs),
+        find(&[("javatext.ttf", 0)], &dirs),
+        find(&[("taile.ttf", 0)], &dirs),
+        find(&[("ntailu.ttf", 0)], &dirs),
+        find(&[("phagspa.ttf", 0)], &dirs),
+        find(&[("sylfaen.ttf", 0)], &dirs),
+        find(&[("mvboli.ttf", 0)], &dirs),
+        find(&[("l_10646.ttf", 0)], &dirs),
+        find(&[("seguihis.ttf", 0)], &dirs),
+        find(&[("simsun.ttc", 0)], &dirs),
+        find(&[("simsunb.ttf", 0)], &dirs),
+        find(&[("SimsunExtG.ttf", 0)], &dirs),
+        find(&[("mingliub.ttc", 0)], &dirs),
         find(&[("seguisym.ttf", 0)], &dirs),
         find(&[("seguiemj.ttf", 0)], &dirs),
     ];
@@ -328,6 +351,23 @@ pub fn app_icon()->std::sync::Arc<eframe::egui::IconData>{
     }).clone()
 }
 
+/// 缓存并返回灵屿自有品牌 Logo 纹理（用于灵屿自身发出的通知身份图标）。
+pub fn logo_texture(ctx: &eframe::egui::Context) -> eframe::egui::TextureHandle {
+    let key = eframe::egui::Id::new("auralsle_self_logo_tex_v1");
+    if let Some(tex) = ctx.data(|d| d.get_temp::<eframe::egui::TextureHandle>(key)) {
+        return tex;
+    }
+    let icon = app_icon();
+    let img = eframe::egui::ColorImage::from_rgba_unmultiplied(
+        [icon.width as usize, icon.height as usize],
+        &icon.rgba,
+    );
+    let tex = ctx.load_texture("auralsle_self_logo", img, eframe::egui::TextureOptions::LINEAR);
+    crate::skin_paint::mark_colored(tex.id());
+    ctx.data_mut(|d| d.insert_temp(key, tex.clone()));
+    tex
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
@@ -340,6 +380,29 @@ mod tests {
                 let font=super::font(14.0,weight);
                 for ch in "눈, 코, 입 향기로운 숨을 담은 너의 코 사랑해 眼鼻嘴 TAEYANG ㄱㄴㅏ".chars().filter(|c|!c.is_whitespace()){
                     assert!(ctx.fonts(|f|f.has_glyph(&font,ch)),"缺少字形：{ch}，字体：{font:?}");
+                }
+            }
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn world_scripts_have_glyphs_without_tofu(){
+        let ctx=eframe::egui::Context::default();
+        super::load_fonts(&ctx);
+        let samples = [
+            // 藏文（实际反馈图二歌词）
+            "འགྲོ་ཡ། རྩྭ་ཐང་སྟེང་ལ་འགྲོ། གངས་རི་བསྐོར་བར་འགྲོ",
+            // 日文 / 韩文 / 泰文 / 缅甸文 / 蒙古文 / 阿拉伯文 / 希伯来文 / 越南文 / 俄文 / 希腊文 / 印地文 / 生僻字 Ext-B
+            "さくらんぼ 日本語 한국어 สวัสดี မြန်မာ العربية שלום Tiếng Việt Привет Ελλάδα नमस्ते 𠮷",
+        ];
+        let _=ctx.run(Default::default(),|ctx|{
+            for weight in [super::W::Regular,super::W::Semibold,super::W::Bold]{
+                let font=super::font(14.0,weight);
+                for text in samples {
+                    for ch in text.chars().filter(|c|!c.is_whitespace()){
+                        assert!(ctx.fonts(|f|f.has_glyph(&font,ch)),"缺少字形：{ch} (U+{:04X})，字体：{font:?}", ch as u32);
+                    }
                 }
             }
         });

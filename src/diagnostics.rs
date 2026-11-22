@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-fn write_report(directory: &Path, title: &str, details: &str) -> std::io::Result<PathBuf> {
+pub fn write_report(directory: &Path, title: &str, details: &str) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(directory)?;
     let path = directory.join("last-error.log");
     let timestamp = std::time::SystemTime::now()
@@ -57,7 +57,7 @@ pub fn graphics(cc:&eframe::CreationContext<'_>) {
 
 static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
-fn diagnostics_dir() -> PathBuf { auralsle::model::config_dir().join("diagnostics") }
+pub fn diagnostics_dir() -> PathBuf { auralsle::model::config_dir().join("diagnostics") }
 
 /// 自动重启的频率限制：本次至少运行 30 秒（避免启动即崩的死循环），且一小时内最多 3 次。
 fn restart_allowed(history: &str, now: u64, uptime: std::time::Duration) -> bool {
@@ -77,7 +77,7 @@ pub fn spawn_replacement() -> bool {
 }
 
 /// 异常退出后自动重新拉起（受频率限制）；返回是否已安排重启。
-fn relaunch_after_failure(reason: &str) -> bool {
+pub fn relaunch_after_failure(reason: &str) -> bool {
     let uptime = STARTED.get().map(|at| at.elapsed()).unwrap_or_default();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let path = diagnostics_dir().join("auto-restart.log");
@@ -176,15 +176,19 @@ pub fn install() {
     { native_crash::install(); native_crash::test_crash_hook(); }
     std::panic::set_hook(Box::new(|info| {
         // 不写入 panic 的数据载荷，避免把邮件、凭据或登录信息带进日志。
+        let thread = std::thread::current().name().unwrap_or("unnamed").to_owned();
         let location = info.location().map(|p| format!("{}:{}:{}", p.file(), p.line(), p.column()))
             .unwrap_or_else(|| "未知".into());
-        let details = format!("代码位置：{location}\n调用栈：\n{}", std::backtrace::Backtrace::force_capture());
-        // 主线程出错会让整个岛仔退出：记下原因后直接自动重启，不弹窗打断。后台线程出错不影响主界面，仍按原样提示。
-        if std::thread::current().name() == Some("main") && relaunch_after_failure("程序异常") {
+        let details = format!("线程：{thread}\n代码位置：{location}\n调用栈：\n{}", std::backtrace::Backtrace::force_capture());
+        let _ = write_report(&diagnostics_dir(), "灵屿 AuraIsle 发生异常。", &details);
+        // release 使用 panic = "abort"，任何线程 panic 都会终止整个进程；非主动退出时统一尝试自动重启。
+        if !auralsle::resources::is_root_exit_allowed() && relaunch_after_failure(&format!("程序异常（{thread}）")) {
             let _ = write_report(&diagnostics_dir(), "灵屿 AuraIsle 发生异常，已自动重新启动。", &details);
             return;
         }
-        report("灵屿 AuraIsle 发生异常，请重新启动。", &details);
+        if thread == "main" {
+            report("灵屿 AuraIsle 发生异常，请重新启动。", &details);
+        }
     }));
 }
 

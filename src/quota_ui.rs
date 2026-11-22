@@ -810,8 +810,9 @@ impl App {
             self.open_settings();
         }
 
-        // ── 2. 下方：多会话状态列表 (`y = 35..224`) ──
-        crate::auralsle_ai_status::ui::draw_fly_island_sessions_list(c, 35.0, 189.0);
+        // ── 2. 下方：多会话状态列表（按展开高度自适应短岛 / 长岛并滚动） ──
+        let list_h = (self.h.pos - 89.0).clamp(88.0, 240.0);
+        crate::auralsle_ai_status::ui::draw_fly_island_sessions_list(c, 35.0, list_h);
     }
 
     pub(crate) fn page_quota(&mut self,c:&Card){

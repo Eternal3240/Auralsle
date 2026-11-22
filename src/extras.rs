@@ -39,6 +39,8 @@ pub(crate) struct Alert {
     pub title: String,
     pub source: AlertSource,
     pub body: String,
+    /// 未打码/未隐藏前的完整消息正文；开启隐私隐藏时按快捷键显隐切换展示。
+    pub full_body: Option<String>,
     pub page: usize,
     pub at: f64,
     pub duration: f64,
@@ -46,6 +48,32 @@ pub(crate) struct Alert {
     pub meeting: Option<(crate::mail::Meeting, String)>,
     pub unread: Option<crate::app::Unread>,
     pub oppo_badge: bool,
+    pub verification_code: Option<String>,
+    pub verification_copied: bool,
+    pub icon_png: Option<std::sync::Arc<Vec<u8>>>,
+    pub dedupe_key: Option<String>,
+}
+
+/// 解码并按内容哈希缓存手机通知来源 App 的真实图标纹理（标为彩色，避免被浅色皮肤换色层染黑）。
+pub(crate) fn oppo_icon_texture(ctx: &egui::Context, png: &[u8]) -> Option<egui::TextureHandle> {
+    if png.len() < 8 {
+        return None;
+    }
+    let hash = crate::oppo_notify::mirror::fnv1a(png);
+    let cache_id = egui::Id::new(("oppo-mirror-icon-tex", hash));
+    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(cache_id)) {
+        return Some(tex);
+    }
+    let img = image::load_from_memory(png).ok()?.to_rgba8();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let ci = egui::ColorImage::from_rgba_unmultiplied([w, h], img.as_raw());
+    let tex = ctx.load_texture(format!("oppo-mirror-icon:{hash:016x}"), ci, egui::TextureOptions::LINEAR);
+    crate::skin_paint::mark_colored(tex.id());
+    ctx.data_mut(|d| d.insert_temp(cache_id, tex.clone()));
+    Some(tex)
 }
 impl Alert {
     pub(crate) fn health(&self)->Option<HealthReminder> {
@@ -341,6 +369,7 @@ impl App {
             source: AlertSource::Internal,
             title,
             body: body.into(),
+            full_body: None,
             page,
             at: self.t,
             duration,
@@ -348,15 +377,69 @@ impl App {
             meeting: None,
             unread: None,
             oppo_badge: false,
+            verification_code: None,
+            verification_copied: false,
+            icon_png: None,
+            dedupe_key: None,
         };
         self.enqueue_alert(a, system);
+    }
+    pub(crate) fn push_verification_code(&mut self, source: String, code: String) {
+        if !crate::auralsle_otp::valid_code(&code) {
+            return;
+        }
+        let dup = self
+            .history
+            .iter()
+            .any(|a| a.verification_code.as_deref() == Some(code.as_str()) && self.t - a.at < 90.0)
+            || self.notice.as_ref().is_some_and(|a| {
+                a.verification_code.as_deref() == Some(code.as_str()) && self.t - a.at < 90.0
+            });
+        if dup {
+            return;
+        }
+        let src_title = if source.trim().is_empty() {
+            "验证码".to_owned()
+        } else {
+            source
+        };
+        let a = Alert {
+            source: AlertSource::Internal,
+            title: src_title,
+            body: "点击复制验证码".to_owned(),
+            full_body: None,
+            page: usize::MAX,
+            at: self.t,
+            duration: 12.0,
+            bluetooth: None,
+            meeting: None,
+            unread: None,
+            oppo_badge: false,
+            verification_code: Some(code),
+            verification_copied: false,
+            icon_png: None,
+            dedupe_key: None,
+        };
+        self.history.push_front(a.clone());
+        self.history.truncate(50);
+        self.alerts.retain(|old| old.verification_code != a.verification_code);
+        if self.notice.as_ref().is_some_and(|cur| cur.verification_code.is_some()) {
+            self.alerts.push_front(a);
+        } else {
+            self.notice = Some(a);
+        }
     }
     pub(crate) fn meeting_alert(&mut self, meeting: crate::mail::Meeting, source: String, page: usize) {
         self.enqueue_alert(Alert {
             source: AlertSource::Internal,
             title: if source=="课表"{"上课提醒".into()}else{"会议提醒".into()},  // [ai-status-mod] 课程用上课提醒
             body: format!("{} · {} · {}", meeting.title, meeting.at, source),
+            full_body: None,
             page, at: self.t, duration: 12.0, bluetooth: None, meeting: Some((meeting, source)), unread: None, oppo_badge: false,
+            verification_code: None,
+            verification_copied: false,
+            icon_png: None,
+            dedupe_key: None,
         }, true);
     }
 
@@ -513,11 +596,16 @@ impl App {
             source: AlertSource::Internal,
             title: "蓝牙设备".into(),
             body: if connected { device.summary() } else { format!("{} · 已断开", device.name) },
+            full_body: None,
             page: 5, at: self.t, duration: 2.5,
             bluetooth: Some((device.kind, connected)),
             meeting: None,
             unread: None,
             oppo_badge: false,
+            verification_code: None,
+            verification_copied: false,
+            icon_png: None,
+            dedupe_key: None,
         };
         self.enqueue_alert(a, false);
     }
@@ -551,11 +639,17 @@ impl App {
         self.pending_messengers.retain(|u|u.source!=source);
         self.clear_messenger_notices(source);
     }
-    /// 只清已查看的账号；无法确认账号的 QQ 提醒由用户明确关闭。
+    /// 只清已查看的账号；无法确认账号的 QQ 提醒由用户明确关闭；手机镜像的未读（pid=0 且带 oppo 标记）不受电脑端切窗误清。
     pub fn viewed_client(&mut self,source:crate::app::Messenger,pid:u32){
-        self.pending_messengers.retain(|u|!u.viewed_by(source,pid));
+        let keep_oppo_unidentified = !cfg!(test) && pid != 0 && self.has_oppo_messenger(source);
+        self.pending_messengers.retain(|u|{
+            if keep_oppo_unidentified && u.source == source && u.pid == 0 {
+                return true;
+            }
+            !u.viewed_by(source,pid)
+        });
         if pid!=0{self.clear_account_notices(source,pid);}
-        if !source.adapter().keep_unidentified{self.clear_account_notices(source,0);}
+        if !source.adapter().keep_unidentified && !keep_oppo_unidentified{self.clear_account_notices(source,0);}
         if !self.pending_messengers.iter().any(|u|u.source==source){self.clear_messenger_notices(source);}
     }
     pub fn confirm_messenger_open(&mut self,unread:crate::app::Unread,foreground:Option<(crate::app::Messenger,u32)>)->bool{
@@ -636,8 +730,13 @@ impl App {
         } else {
             "有新消息 · 请到微信查看".into()
         };
+        let full_body = if mcfg.wechat_read_content {
+            Some(body_text.clone())
+        } else {
+            None
+        };
         let _sender = read_local_wechat_sender();
-        self.enqueue_alert(Alert{source:AlertSource::Messenger(crate::app::Messenger::Wechat),title:"微信".to_owned(),body:body_text,page:usize::MAX,at:self.t,duration:dur,bluetooth:None,meeting:None,unread:Some(unread),oppo_badge:false},false);
+        self.enqueue_alert(Alert{source:AlertSource::Messenger(crate::app::Messenger::Wechat),title:"微信".to_owned(),body:body_text,full_body,page:usize::MAX,at:self.t,duration:dur,bluetooth:None,meeting:None,unread:Some(unread),oppo_badge:false,verification_code:None,verification_copied:false,icon_png:None,dedupe_key:None},false);
     }
     pub fn receive_messenger_reminder(&mut self,unread:crate::app::Unread){
         let client=unread.source;
@@ -650,15 +749,330 @@ impl App {
         self.clear_oppo_messenger(client);
         self.mark_messenger(client,unread.pid,unread.window);
         if pending{return;}
+        reset_wechat_fingerprint_lock();
         let dur = self.preview_duration();
         self.notification_bell_at=self.t;self.notification_bell_until=self.t+dur;
-        self.enqueue_alert(Alert{source:AlertSource::Messenger(client),title:client.name().into(),body:format!("有新消息 · 请到{}查看",client.name()),page:usize::MAX,at:self.t,duration:dur,bluetooth:None,meeting:None,unread:Some(unread),oppo_badge:false},false);
+        self.enqueue_alert(Alert{source:AlertSource::Messenger(client),title:client.name().into(),body:format!("有新消息 · 请到{}查看",client.name()),full_body:None,page:usize::MAX,at:self.t,duration:dur,bluetooth:None,meeting:None,unread:Some(unread),oppo_badge:false,verification_code:None,verification_copied:false,icon_png:None,dedupe_key:None},false);
     }
     pub fn set_messenger_status(&mut self,client:crate::app::Messenger,status:String){self.messenger_statuses.insert(client,status);}
     pub fn messenger_status(&self,client:crate::app::Messenger)->&str{self.messenger_statuses.get(&client).map(String::as_str).unwrap_or("")}
     pub fn receive_notification(&mut self, app:String, id:String, body:String){
         self.receive_notification_from(app,id,body,None);
     }
+    /// 接收来自 `oppo_notify` 镜像模块的手机原生通知事件：
+    /// 携带运行时来源 App 图标、精确包名、完整富文本与 `key` 去重语义。
+    pub fn receive_oppo_mirrored_notification(
+        &mut self,
+        n: crate::oppo_notify::Notification,
+        _is_update: bool,
+        icon_png: Option<std::sync::Arc<Vec<u8>>>,
+    ) {
+        let mcfg = crate::auralsle_ai_status::config::get();
+        if !mcfg.mod_oppo_connect_enabled || !mcfg.oppo_notify_mirror_enabled || !self.settings.notifications {
+            return;
+        }
+        let icon_png = if n.pkg_name.trim().eq_ignore_ascii_case(crate::oppo_notify::OPPO_AUMID) {
+            None
+        } else {
+            icon_png.or_else(|| crate::oppo_notify::cached_icon_png(&n.pkg_name).map(std::sync::Arc::new))
+        };
+        let dkey = n.dedupe_key();
+        let raw_title = crate::theme::sanitize_notification_text(
+            &n.title().chars().filter(|c| !c.is_control()).take(100).collect::<String>(),
+        );
+        let raw_body = crate::theme::sanitize_notification_text(
+            &n.body().chars().filter(|c| !c.is_control()).take(320).collect::<String>(),
+        );
+
+        if n.is_wechat() {
+            if mcfg.oppo_wechat_dedup
+                && crate::oppo_account_policy::should_suppress("com.tencent.mm", n.user_identifier)
+            {
+                return;
+            }
+            let sender = if raw_title == "微信" { String::new() } else { raw_title.clone() };
+            let full_preview = if !sender.is_empty() && sender != raw_body {
+                format!("{sender}: {raw_body}")
+            } else {
+                raw_body.clone()
+            };
+            store_local_wechat_sender_and_msg(&sender, &full_preview);
+            reset_wechat_fingerprint_lock();
+            LAST_WECHAT_ALERT_MS.store(chrono::Utc::now().timestamp_millis(), std::sync::atomic::Ordering::SeqCst);
+
+            // O+ 镜像本身就是通知源，账号未命中 PC 同槽位屏蔽时应直接上岛上球
+            if !self.settings.notifications {
+                return;
+            }
+            crate::auralsle_ai_status::aora_face::trigger_mascot_event(20, 6.5);
+            let dur = self.preview_duration();
+            self.notification_bell_at = self.t;
+            self.notification_bell_until = self.t + dur;
+            let unread = crate::app::Unread {
+                source: crate::app::Messenger::Wechat,
+                pid: 0,
+                window: 0,
+            };
+            self.mark_oppo_messenger(crate::app::Messenger::Wechat);
+            if let Some(ref png) = icon_png {
+                self.oppo_messenger_icons.insert(crate::app::Messenger::Wechat, png.clone());
+            }
+            self.mark_messenger(crate::app::Messenger::Wechat, 0, 0);
+
+            let is_clone = n.user_identifier != 0;
+            let alert_title = "微信".to_owned();
+            let log_title = if !sender.is_empty() {
+                sender
+            } else if is_clone {
+                "微信分身".to_owned()
+            } else {
+                "微信".to_owned()
+            };
+            let actual_body = if !full_preview.trim().is_empty() {
+                full_preview.clone()
+            } else {
+                "收到手机微信新消息".to_owned()
+            };
+            let new_body = if !self.settings.notification_preview {
+                "收到新消息 · 内容已隐藏".to_owned()
+            } else {
+                actual_body.clone()
+            };
+            let wx_alert = Alert {
+                source: AlertSource::Messenger(crate::app::Messenger::Wechat),
+                title: alert_title.clone(),
+                body: new_body.clone(),
+                full_body: Some(actual_body.clone()),
+                page: usize::MAX,
+                at: self.t,
+                duration: dur,
+                bluetooth: None,
+                meeting: None,
+                unread: Some(unread),
+                oppo_badge: true,
+                verification_code: None,
+                verification_copied: false,
+                icon_png: icon_png.clone(),
+                dedupe_key: Some(dkey.clone()),
+            };
+            self.alerts.retain(|old| old.dedupe_key.as_deref() != Some(dkey.as_str()));
+            let mut updated_in_place = false;
+            if let Some(ref mut cur) = self.notice {
+                if cur.dedupe_key.as_deref() == Some(dkey.as_str())
+                    || cur.source == AlertSource::Messenger(crate::app::Messenger::Wechat)
+                    || cur.is_hud()
+                {
+                    *cur = wx_alert.clone();
+                    updated_in_place = true;
+                }
+            }
+            if let Some(ref mut hud) = self.hud_notice {
+                if hud.source == AlertSource::Messenger(crate::app::Messenger::Wechat) {
+                    hud.title = alert_title.clone();
+                    hud.body = new_body.clone();
+                    hud.full_body = Some(actual_body);
+                }
+            }
+            if !updated_in_place {
+                if self.notice.is_none() {
+                    self.notice = Some(wx_alert);
+                } else {
+                    self.alerts.push_front(wx_alert);
+                }
+            }
+            self.notification_log.push(crate::model::NotificationRecord {
+                app_id: if is_clone {
+                    format!("oppo-mirror:{}#u{}", n.pkg_name, n.user_identifier)
+                } else {
+                    format!("oppo-mirror:{}", n.pkg_name)
+                },
+                app_name: if is_clone { "微信分身".to_owned() } else { "微信".to_owned() },
+                title: log_title,
+                body: if !full_preview.trim().is_empty() { full_preview } else { "收到手机微信新消息".to_owned() },
+                at: chrono::Utc::now().timestamp(),
+            });
+            return;
+        }
+
+        if n.is_qq() {
+            if mcfg.oppo_wechat_dedup
+                && crate::oppo_account_policy::should_suppress("com.tencent.mobileqq", n.user_identifier)
+            {
+                return;
+            }
+            // O+ 镜像本身就是通知源，不应依赖 Windows toast 的 read_notifications 开关；
+            // 否则关闭系统通知读取后，QQ 镜像会被整类吞掉。
+            if !self.settings.notifications {
+                return;
+            }
+            crate::auralsle_ai_status::aora_face::trigger_mascot_event(20, 6.0);
+            reset_wechat_fingerprint_lock();
+            let dur = self.preview_duration();
+            self.notification_bell_at = self.t;
+            self.notification_bell_until = self.t + dur;
+            let unread = crate::app::Unread {
+                source: crate::app::Messenger::Qq,
+                pid: 0,
+                window: 0,
+            };
+            self.mark_oppo_messenger(crate::app::Messenger::Qq);
+            if let Some(ref png) = icon_png {
+                self.oppo_messenger_icons.insert(crate::app::Messenger::Qq, png.clone());
+            }
+            self.mark_messenger(crate::app::Messenger::Qq, 0, 0);
+
+            let is_clone = n.user_identifier != 0;
+            let sender = if raw_title == "QQ" { String::new() } else { raw_title.clone() };
+            let alert_title = "QQ".to_owned();
+            let log_title = if !sender.is_empty() {
+                sender
+            } else if is_clone {
+                "QQ分身".to_owned()
+            } else {
+                "QQ".to_owned()
+            };
+            let actual_qq = if !raw_body.trim().is_empty() {
+                raw_body.clone()
+            } else {
+                "收到手机 QQ 新消息".to_owned()
+            };
+            let shown_body = if !self.settings.notification_preview {
+                "收到新消息 · 内容已隐藏".to_owned()
+            } else {
+                actual_qq.clone()
+            };
+            let qq_alert = Alert {
+                source: AlertSource::Messenger(crate::app::Messenger::Qq),
+                title: alert_title,
+                body: shown_body,
+                full_body: Some(actual_qq),
+                page: usize::MAX,
+                at: self.t,
+                duration: dur,
+                bluetooth: None,
+                meeting: None,
+                unread: Some(unread),
+                oppo_badge: true,
+                verification_code: None,
+                verification_copied: false,
+                icon_png: icon_png.clone(),
+                dedupe_key: Some(dkey.clone()),
+            };
+            self.alerts.retain(|old| old.dedupe_key.as_deref() != Some(dkey.as_str()));
+            let mut updated_in_place = false;
+            if let Some(ref mut cur) = self.notice {
+                if cur.dedupe_key.as_deref() == Some(dkey.as_str())
+                    || cur.source == AlertSource::Messenger(crate::app::Messenger::Qq)
+                    || cur.is_hud()
+                {
+                    *cur = qq_alert.clone();
+                    updated_in_place = true;
+                }
+            }
+            if !updated_in_place {
+                if self.notice.is_none() {
+                    self.notice = Some(qq_alert);
+                } else {
+                    self.alerts.push_front(qq_alert);
+                }
+            }
+            self.notification_log.push(crate::model::NotificationRecord {
+                app_id: if is_clone {
+                    format!("oppo-mirror:{}#u{}", n.pkg_name, n.user_identifier)
+                } else {
+                    format!("oppo-mirror:{}", n.pkg_name)
+                },
+                app_name: if is_clone { "QQ分身".to_owned() } else { "QQ".to_owned() },
+                title: log_title,
+                body: if !raw_body.trim().is_empty() { raw_body } else { "收到手机 QQ 新消息".to_owned() },
+                at: chrono::Utc::now().timestamp(),
+            });
+            return;
+        }
+
+        // 其他手机应用通知：横幅只显示来源应用名称，消息历史保留明细标题；真图标 + GUID 同 key 替换
+        let app_name = n.app_display_name();
+        let clean_title = if !raw_title.is_empty() && raw_title != app_name {
+            format!("{app_name} · {raw_title}")
+        } else {
+            app_name.clone()
+        };
+        if mcfg.auralsle_otp_capsule {
+            let otp_hit = crate::auralsle_otp::extract(&clean_title, &raw_body).or_else(|| {
+                if n.is_verification {
+                    crate::otp::extract(&clean_title, &raw_body, &[]).map(|c| c.text)
+                } else {
+                    None
+                }
+            });
+            if let Some(code) = otp_hit {
+                let masked = crate::mail_privacy::mask(&raw_body, &code);
+                self.push_verification_code(app_name.clone(), code);
+                self.notification_log.push(crate::model::NotificationRecord {
+                    app_id: format!("oppo-mirror:{}", n.pkg_name),
+                    app_name,
+                    title: clean_title,
+                    body: masked,
+                    at: chrono::Utc::now().timestamp(),
+                });
+                return;
+            }
+        }
+
+        crate::auralsle_ai_status::aora_face::trigger_mascot_event(20, 5.5);
+        reset_wechat_fingerprint_lock();
+        self.upsert_oppo_orb(n.pkg_name.clone(), app_name.clone(), app_name.clone(), icon_png.clone());
+        let dur = self.preview_duration();
+        self.notification_bell_at = self.t;
+        self.notification_bell_until = self.t + dur;
+        let mut log_body = raw_body.clone();
+        if let Some(code) = crate::otp::extract("", &log_body, &[]) {
+            log_body = crate::mail_privacy::mask(&log_body, &code.text);
+        }
+        let shown_body = if self.settings.notification_preview {
+            log_body.clone()
+        } else {
+            "收到新消息 · 内容已隐藏".to_owned()
+        };
+        let alert = Alert {
+            source: AlertSource::External(format!("oppo-mirror:{}", n.pkg_name)),
+            title: app_name.clone(),
+            body: shown_body,
+            full_body: (!log_body.trim().is_empty()).then(|| log_body.clone()),
+            page: usize::MAX,
+            at: self.t,
+            duration: dur,
+            bluetooth: None,
+            meeting: None,
+            unread: None,
+            oppo_badge: true,
+            verification_code: None,
+            verification_copied: false,
+            icon_png,
+            dedupe_key: Some(dkey.clone()),
+        };
+        // 原生同 key 语义：先清旧条再弹新条
+        self.alerts.retain(|old| old.dedupe_key.as_deref() != Some(dkey.as_str()));
+        if self.notice.is_none()
+            || self.notice.as_ref().is_some_and(|cur| {
+                cur.dedupe_key.as_deref() == Some(dkey.as_str())
+                    || cur.is_hud()
+                    || matches!(cur.source, AlertSource::External(_))
+            })
+        {
+            self.notice = Some(alert);
+        } else {
+            self.alerts.push_front(alert);
+        }
+        self.notification_log.push(crate::model::NotificationRecord {
+            app_id: format!("oppo-mirror:{}", n.pkg_name),
+            app_name,
+            title: clean_title,
+            body: log_body,
+            at: chrono::Utc::now().timestamp(),
+        });
+    }
+
     pub fn receive_notification_from(&mut self,app:String,id:String,body:String,unread:Option<crate::app::Unread>){
         let low_id = id.to_ascii_lowercase();
         let low_app = app.to_ascii_lowercase();
@@ -676,207 +1090,8 @@ impl App {
                     && (low_app.contains("互传") || low_app.contains("互联") || low_app.contains("oppo") || low_id.contains("oppo") || low_id.contains("heytap"))));
 
         if is_oppo_connect {
-            let mcfg = crate::auralsle_ai_status::config::get();
-            let (sub_app, sender, msg_body, is_wx, is_qq) = parse_oppo_connect_notification(&body);
-            if is_wx {
-                // 检测到电脑端微信已登录且开启去重：OPPO 互联转发的微信通知不再重复展示
-                if mcfg.oppo_wechat_dedup && crate::wechat::is_pc_wechat_logged_in() {
-                    return;
-                }
-                let full_preview = if !sender.is_empty() && sender != msg_body {
-                    format!("{sender}: {msg_body}")
-                } else {
-                    msg_body.clone()
-                };
-                store_local_wechat_sender_and_msg(&sender, &full_preview);
-                reset_wechat_fingerprint_lock();
-
-                let now_ms = chrono::Utc::now().timestamp_millis();
-                LAST_WECHAT_ALERT_MS.store(now_ms, std::sync::atomic::Ordering::SeqCst);
-
-                if !self.settings.notifications || !self.settings.wechat_notifications {
-                    return;
-                }
-                crate::auralsle_ai_status::aora_face::trigger_mascot_event(20, 6.5);
-                let dur = self.preview_duration();
-                self.notification_bell_at = self.t;
-                self.notification_bell_until = self.t + dur;
-                let unread = crate::app::Unread {
-                    source: crate::app::Messenger::Wechat,
-                    pid: 0,
-                    window: 0,
-                };
-                self.mark_oppo_messenger(crate::app::Messenger::Wechat);
-                self.mark_messenger(crate::app::Messenger::Wechat, 0, 0);
-
-                let new_title = if sender.is_empty() {
-                    "微信".to_owned()
-                } else {
-                    format!("微信 · {sender}")
-                };
-                let new_body = if !self.settings.notification_preview {
-                    "收到新消息 · 内容已隐藏".to_owned()
-                } else if !full_preview.trim().is_empty() {
-                    full_preview.clone()
-                } else {
-                    "收到 OPPO 互传转发的微信新消息".to_owned()
-                };
-                let wx_alert = Alert {
-                    source: AlertSource::Messenger(crate::app::Messenger::Wechat),
-                    title: new_title.clone(),
-                    body: new_body.clone(),
-                    page: usize::MAX,
-                    at: self.t,
-                    duration: dur,
-                    bluetooth: None,
-                    meeting: None,
-                    unread: Some(unread),
-                    oppo_badge: true,
-                };
-
-                let mut updated_in_place = false;
-                if let Some(ref mut cur) = self.notice {
-                    if cur.source == AlertSource::Messenger(crate::app::Messenger::Wechat) || cur.is_hud() {
-                        *cur = wx_alert.clone();
-                        updated_in_place = true;
-                    }
-                }
-                if let Some(ref mut hud) = self.hud_notice {
-                    if hud.source == AlertSource::Messenger(crate::app::Messenger::Wechat) {
-                        hud.title = new_title.clone();
-                        hud.body = new_body.clone();
-                    }
-                }
-                if !updated_in_place {
-                    if self.notice.is_none() {
-                        self.notice = Some(wx_alert);
-                    } else {
-                        self.alerts.push_front(wx_alert);
-                    }
-                }
-                self.notification_log.push(crate::model::NotificationRecord {
-                    app_id: "wechat".into(),
-                    app_name: "微信".into(),
-                    title: if sender.is_empty() { new_title } else { format!("微信 · {sender}") },
-                    body: new_body,
-                    at: chrono::Utc::now().timestamp(),
-                });
-                return;
-            } else if is_qq {
-                // 检测到电脑端 QQ 已登录且开启去重：OPPO 互联转发的 QQ 通知不再展示
-                if mcfg.oppo_wechat_dedup && crate::messenger::qq::is_pc_qq_logged_in() {
-                    return;
-                }
-                if !self.settings.notifications || !crate::app::Messenger::Qq.enabled(&self.settings) {
-                    return;
-                }
-                crate::auralsle_ai_status::aora_face::trigger_mascot_event(20, 6.0);
-                let dur = self.preview_duration();
-                self.notification_bell_at = self.t;
-                self.notification_bell_until = self.t + dur;
-                let unread = crate::app::Unread {
-                    source: crate::app::Messenger::Qq,
-                    pid: 0,
-                    window: 0,
-                };
-                self.mark_oppo_messenger(crate::app::Messenger::Qq);
-                self.mark_messenger(crate::app::Messenger::Qq, 0, 0);
-
-                let new_title = if sender.is_empty() {
-                    "QQ".to_owned()
-                } else {
-                    format!("QQ · {sender}")
-                };
-                let shown_body = if !self.settings.notification_preview {
-                    "收到新消息 · 内容已隐藏".to_owned()
-                } else if !msg_body.trim().is_empty() {
-                    msg_body.clone()
-                } else {
-                    "收到 OPPO 互传转发的 QQ 新消息".to_owned()
-                };
-                let qq_alert = Alert {
-                    source: AlertSource::Messenger(crate::app::Messenger::Qq),
-                    title: new_title.clone(),
-                    body: shown_body.clone(),
-                    page: usize::MAX,
-                    at: self.t,
-                    duration: dur,
-                    bluetooth: None,
-                    meeting: None,
-                    unread: Some(unread),
-                    oppo_badge: true,
-                };
-                let mut updated_in_place = false;
-                if let Some(ref mut cur) = self.notice {
-                    if cur.source == AlertSource::Messenger(crate::app::Messenger::Qq) || cur.is_hud() {
-                        *cur = qq_alert.clone();
-                        updated_in_place = true;
-                    }
-                }
-                if !updated_in_place {
-                    if self.notice.is_none() {
-                        self.notice = Some(qq_alert);
-                    } else {
-                        self.alerts.push_front(qq_alert);
-                    }
-                }
-                self.notification_log.push(crate::model::NotificationRecord {
-                    app_id: "qq".into(),
-                    app_name: "QQ".into(),
-                    title: new_title,
-                    body: shown_body,
-                    at: chrono::Utc::now().timestamp(),
-                });
-                return;
-            } else {
-                // OPPO 互联转发的其他手机应用通知（如抖音、天气、短信等）：剥离“OPPO 互联”外壳，立即上岛显示真实应用与发送者
-                if !self.settings.notifications {
-                    return;
-                }
-                crate::auralsle_ai_status::aora_face::trigger_mascot_event(20, 5.5);
-                let dur = self.preview_duration();
-                self.notification_bell_at = self.t;
-                self.notification_bell_until = self.t + dur;
-                let clean_title = if !sender.is_empty() && sender != msg_body {
-                    format!("{sub_app} · {sender}")
-                } else {
-                    sub_app.clone()
-                };
-                let shown_body = if self.settings.notification_preview {
-                    msg_body.clone()
-                } else {
-                    "收到新消息 · 内容已隐藏".into()
-                };
-                let oppo_alert = Alert {
-                    source: AlertSource::External(format!("oppo:{}", sub_app.to_lowercase())),
-                    title: clean_title.clone(),
-                    body: shown_body.clone(),
-                    page: usize::MAX,
-                    at: self.t,
-                    duration: dur,
-                    bluetooth: None,
-                    meeting: None,
-                    unread: None,
-                    oppo_badge: true,
-                };
-                if self.notice.is_none()
-                    || self.notice.as_ref().is_some_and(|cur| {
-                        cur.is_hud() || matches!(cur.source, AlertSource::External(_))
-                    })
-                {
-                    self.notice = Some(oppo_alert);
-                } else {
-                    self.alerts.push_front(oppo_alert);
-                }
-                self.notification_log.push(crate::model::NotificationRecord {
-                    app_id: sub_app.to_lowercase(),
-                    app_name: sub_app,
-                    title: clean_title,
-                    body: shown_body,
-                    at: chrono::Utc::now().timestamp(),
-                });
-                return;
-            }
+            // 新方案下 OPPO 互联通知全部走 `oppo_notify` 日志镜像通道（自带来源 App 真实图标与 key 去重），避免与系统 Toast 通道重复处理
+            return;
         }
 
         if !cfg!(test) && (low_id.contains("wechat") || low_id.contains("weixin") || app.contains("微信") || low_app.contains("wechat")) {
@@ -892,9 +1107,15 @@ impl App {
                 let preview = if !sender.is_empty() {
                     format!("{sender}: {msg_only}")
                 } else {
-                    clean_msg
+                    clean_msg.clone()
                 };
                 store_local_wechat_sender_and_msg(&sender, &preview);
+            }
+            if crate::auralsle_ai_status::config::get().auralsle_otp_capsule {
+                if let Some(code) = crate::auralsle_otp::extract("微信", &clean_msg) {
+                    self.push_verification_code("微信".to_owned(), code);
+                    return;
+                }
             }
             if self.settings.wechat_notifications && self.settings.notifications {
                 // 若任务栏闪动已提前 100ms 弹出了微信横幅，立即将刚刚拿到的真实发送者与消息正文原地更新进当前横幅
@@ -905,13 +1126,15 @@ impl App {
                     if cur.source == AlertSource::Messenger(crate::app::Messenger::Wechat) {
                         cur.title = "微信".to_owned();
                         cur.body = msg_now.clone();
+                        cur.full_body = Some(msg_now.clone());
                         updated_existing = true;
                     }
                 }
                 if let Some(ref mut hud) = self.hud_notice {
                     if hud.source == AlertSource::Messenger(crate::app::Messenger::Wechat) {
                         hud.title = "微信".to_owned();
-                        hud.body = msg_now;
+                        hud.body = msg_now.clone();
+                        hud.full_body = Some(msg_now);
                     }
                 }
                 if !updated_existing && crate::auralsle_ai_status::config::get().wechat_read_content {
@@ -937,20 +1160,77 @@ impl App {
         self.notification_bell_until=self.t+dur;
         let raw_title:String=app.chars().filter(|c|!c.is_control()).take(80).collect();
         let title = if cfg!(test) { raw_title } else { crate::theme::sanitize_notification_text(&raw_title) };
-        let body=if self.settings.notification_preview {
-            let mut text=body.chars().filter(|c|!c.is_control()).take(300).collect::<String>();
-            if !cfg!(test) { text = crate::theme::sanitize_notification_text(&text); }
-            if let Some(code)=crate::otp::extract("",&text,&[]) {text=crate::mail_privacy::mask(&text,&code.text);}
-            text
-        }else{"收到新通知 · 内容已隐藏".into()};
-        self.enqueue_alert(Alert{source:AlertSource::External(id.clone()),title:title.clone(),body:body.clone(),page:usize::MAX,at:self.t,duration:dur,bluetooth:None,meeting:None,unread,oppo_badge:false},false);
-        // [ai-status-mod] 通知历史：按软件记录，正文沿用上面的隐私处理。
+        let raw_text_clean: String = {
+            let t = body.chars().filter(|c| !c.is_control()).take(300).collect::<String>();
+            if cfg!(test) { t } else { crate::theme::sanitize_notification_text(&t) }
+        };
+        if !cfg!(test) && crate::auralsle_ai_status::config::get().auralsle_otp_capsule {
+            let otp_hit = crate::auralsle_otp::extract(&title, &raw_text_clean)
+                .or_else(|| crate::otp::extract(&title, &raw_text_clean, &[]).map(|c| c.text));
+            if let Some(code) = otp_hit {
+                let masked = crate::mail_privacy::mask(&raw_text_clean, &code);
+                self.push_verification_code(title.clone(), code);
+                self.notification_log.push(crate::model::NotificationRecord {
+                    app_id: id,
+                    app_name: app,
+                    title,
+                    body: masked,
+                    at: chrono::Utc::now().timestamp(),
+                });
+                return;
+            }
+        }
+        let mut log_body = raw_text_clean.clone();
+        if let Some(code) = crate::otp::extract("", &log_body, &[]) {
+            log_body = crate::mail_privacy::mask(&log_body, &code.text);
+        }
+        reset_wechat_fingerprint_lock();
+        let body = if self.settings.notification_preview {
+            log_body.clone()
+        } else {
+            "收到新通知 · 内容已隐藏".into()
+        };
+        self.enqueue_alert(Alert{source:AlertSource::External(id.clone()),title:title.clone(),body:body.clone(),full_body:(!log_body.trim().is_empty()).then(|| log_body.clone()),page:usize::MAX,at:self.t,duration:dur,bluetooth:None,meeting:None,unread,oppo_badge:false,verification_code:None,verification_copied:false,icon_png:None,dedupe_key:None},false);
+        // 通知历史保留完整正文（仅对验证码脱敏），不受桌面弹窗隐私预览开关遮挡。
         self.notification_log.push(crate::model::NotificationRecord{
             app_id:id,
             app_name:app,
             title,
-            body,
+            body: log_body,
             at:chrono::Utc::now().timestamp(),
+        });
+    }
+    /// 发送一条通用测试通知到灵动岛横幅，便于在任意设置下验证「快捷键显示/收起消息正文」。
+    pub fn push_test_reveal_notification(&mut self) {
+        reset_wechat_fingerprint_lock();
+        let dur = self.preview_duration().max(6.0);
+        self.notification_bell_at = self.t;
+        self.notification_bell_until = self.t + dur;
+        let full = format!(
+            "测试消息 ({}) · 按快捷键可切换显示/收起当前通知正文",
+            chrono::Local::now().format("%H:%M:%S")
+        );
+        let body = if self.settings.notification_preview {
+            full.clone()
+        } else {
+            "收到新通知 · 内容已隐藏".to_owned()
+        };
+        self.notice = Some(Alert {
+            source: AlertSource::External("auralsle.test.reveal".to_owned()),
+            title: "测试通知".to_owned(),
+            body,
+            full_body: Some(full),
+            page: usize::MAX,
+            at: self.t,
+            duration: dur,
+            bluetooth: None,
+            meeting: None,
+            unread: None,
+            oppo_badge: false,
+            verification_code: None,
+            verification_copied: false,
+            icon_png: None,
+            dedupe_key: Some("auralsle.test.reveal".to_owned()),
         });
     }
     pub fn reveal_messenger_notice(&mut self,unread:crate::app::Unread){
@@ -959,16 +1239,62 @@ impl App {
         let source=if unread.source.adapter().capture==crate::messenger::Capture::Taskbar{AlertSource::Messenger(unread.source)}else{AlertSource::External(unread.source.adapter().notification_id.into())};
         let dur = self.preview_duration();
         let oppo_badge = !cfg!(test) && unread.pid == 0 && self.has_oppo_messenger(unread.source);
-        self.notice=Some(Alert{source,title:unread.source.name().into(),body:body.into(),page:usize::MAX,at:self.t,duration:dur,bluetooth:None,meeting:None,unread:Some(unread),oppo_badge});
+        self.notice=Some(Alert{source,title:unread.source.name().into(),body:body.into(),full_body:None,page:usize::MAX,at:self.t,duration:dur,bluetooth:None,meeting:None,unread:Some(unread),oppo_badge,verification_code:None,verification_copied:false,icon_png:None,dedupe_key:None});
         self.notification_bell_at=self.t;self.notification_bell_until=self.t+dur;
     }
     pub(crate) fn tick_alerts(&mut self) {
-        self.pending_messengers.retain(|u|u.source.enabled(&self.settings) && (u.source.adapter().capture!=crate::messenger::Capture::SystemToast
-            || self.notification_apps.items.iter().any(|(key,_,on)|key==u.source.adapter().notification_id && *on)));
-        let allowed=|a:&Alert|match &a.source {
-            AlertSource::Internal=>!self.fullscreen_hidden || a.health().is_none(),
-            AlertSource::Messenger(client)=>client.enabled(&self.settings),
-            AlertSource::External(id)=>self.settings.read_notifications && crate::messenger::NotificationFilter::for_settings(&self.settings).allows(id) && self.settings.notifications && !crate::messenger::suppresses_toast(&a.title,id,crate::messenger::toast_suppression(&self.settings)) && self.notification_apps.items.iter().any(|(key,_,on)|key==id && *on),
+        let mcfg_o = crate::auralsle_ai_status::config::get();
+        let oppo_mirror_on = mcfg_o.mod_oppo_connect_enabled && mcfg_o.oppo_notify_mirror_enabled;
+        if !oppo_mirror_on || !self.settings.notifications {
+            self.pending_oppo_orbs.clear();
+        }
+        let has_oppo_wx = self.has_oppo_messenger(crate::app::Messenger::Wechat);
+        let has_oppo_qq = self.has_oppo_messenger(crate::app::Messenger::Qq);
+        self.pending_messengers.retain(|u| {
+            let keep_oppo = u.pid == 0
+                && oppo_mirror_on
+                && self.settings.notifications
+                && ((u.source == crate::app::Messenger::Qq && has_oppo_qq)
+                    || (u.source == crate::app::Messenger::Wechat && has_oppo_wx));
+            if keep_oppo {
+                return true;
+            }
+            u.source.enabled(&self.settings)
+                && (u.source.adapter().capture != crate::messenger::Capture::SystemToast
+                    || self.notification_apps.items.iter().any(|(key, _, on)| {
+                        key == u.source.adapter().notification_id && *on
+                    }))
+        });
+        let allowed = |a: &Alert| match &a.source {
+            AlertSource::Internal => !self.fullscreen_hidden || a.health().is_none(),
+            AlertSource::Messenger(client) => {
+                if a.oppo_badge
+                    && matches!(
+                        *client,
+                        crate::app::Messenger::Qq | crate::app::Messenger::Wechat
+                    )
+                {
+                    oppo_mirror_on && self.settings.notifications
+                } else {
+                    client.enabled(&self.settings)
+                }
+            }
+            AlertSource::External(id) => {
+                if id.starts_with("oppo-mirror:") || (a.oppo_badge && (id == "QQ" || id == "WeChat")) {
+                    oppo_mirror_on && self.settings.notifications
+                } else {
+                    self.settings.read_notifications
+                        && crate::messenger::NotificationFilter::for_settings(&self.settings)
+                            .allows(id)
+                        && self.settings.notifications
+                        && !crate::messenger::suppresses_toast(
+                            &a.title,
+                            id,
+                            crate::messenger::toast_suppression(&self.settings),
+                        )
+                        && self.notification_apps.items.iter().any(|(key, _, on)| key == id && *on)
+                }
+            }
         };
         self.alerts.retain(&allowed);
         if self.notice.as_ref().is_some_and(|a|!allowed(a)){self.notice=None;}
@@ -979,6 +1305,16 @@ impl App {
         if !self.settings.notification_preview {
             for a in self.alerts.iter_mut().chain(self.notice.iter_mut()).chain(self.hud_notice.iter_mut()) {
                 if matches!(&a.source,AlertSource::External(_)){a.body="收到新通知 · 内容已隐藏".into();}
+            }
+        } else {
+            for a in self.alerts.iter_mut().chain(self.notice.iter_mut()).chain(self.hud_notice.iter_mut()) {
+                if matches!(&a.source, AlertSource::External(_))
+                    && (a.body == "收到新通知 · 内容已隐藏" || a.body == "收到新消息 · 内容已隐藏")
+                {
+                    if let Some(ref full) = a.full_body {
+                        a.body = full.clone();
+                    }
+                }
             }
         }
         if self
@@ -995,114 +1331,283 @@ impl App {
             }
         }
     }
-    pub(crate) fn draw_notice(&mut self, c:&Card,panel:Rect,a:&Alert,_cmds:&mut Vec<Cmd>){
-        let nc=c.clipped(0.0,0.0,panel.width(),panel.height());
-        if let Some(source)=a.messenger(){
-            messenger_icon(&nc,22.0,22.0,source);
-            nc.circle(31.0,14.0,2.6,Color32::from_rgb(255,72,72));
-            if !cfg!(test) && (a.oppo_badge || (a.unread.is_none() && self.has_oppo_messenger(source))) {
-                oppo_corner_badge(&nc, 29.5, 29.0, 4.8);
-            }
-            if !cfg!(test) && source == crate::app::Messenger::Wechat {
-                let mcfg = crate::auralsle_ai_status::config::get();
-                if mcfg.wechat_read_content {
-                    let hk = if mcfg.wechat_reveal_hotkey.trim().is_empty() {
-                        "Alt+W"
-                    } else {
-                        mcfg.wechat_reveal_hotkey.trim()
-                    };
-                    // 快捷键一次按下：未显示 → 显示正文；已显示 → 收起（再按恢复隐藏）。
-                    // 仅对当前这条通知有效；下一条新消息到达时在 receive_wechat_reminder_from 自动重置为未显示。
-                    if check_wechat_reveal_hotkey_edge(nc.ui.ctx(), hk) {
-                        if is_wechat_fingerprint_unlocked() {
-                            reset_wechat_fingerprint_lock();
-                        } else {
-                            trigger_local_fingerprint_verify();
-                        }
-                        if let Some(ref mut cur_n) = self.notice {
-                            cur_n.duration = (self.t - cur_n.at) + 8.0;
-                        }
-                    }
-                    let revealed = is_wechat_fingerprint_unlocked();
-                    let title_str = "微信";
-                    let live_body = if a.body == "有新消息 · 请到微信查看" {
+    /// 通知横幅标题统一仅保留应用名称（剥离 `· 联系人/账号/附加信息`）。
+    pub(crate) fn banner_app_name(title: &str) -> &str {
+        title
+            .split(" · ")
+            .next()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(title)
+    }
+
+    /// 计算当前通知横幅的正文显隐展示内容（供单元测试与运行时共用）。
+    pub(crate) fn compute_notice_reveal_state(
+        hidden_by_default: bool,
+        unlocked: bool,
+        hk: &str,
+        actual: &str,
+    ) -> (String, bool) {
+        let revealed = if hidden_by_default { unlocked } else { !unlocked };
+        if revealed {
+            (actual.to_owned(), true)
+        } else {
+            (format!("按 [{hk}] 显示当前消息内容"), false)
+        }
+    }
+
+    fn resolve_notice_reveal(
+        &mut self,
+        ctx: &egui::Context,
+        a: &Alert,
+        allow_wechat_ram: bool,
+    ) -> (String, Color32, Option<String>) {
+        if cfg!(test) {
+            return (a.body.clone(), theme::GRAY, None);
+        }
+        let mcfg = crate::auralsle_ai_status::config::get();
+        let raw_actual: Option<String> = if allow_wechat_ram && mcfg.wechat_read_content {
+            let live = a
+                .full_body
+                .as_deref()
+                .filter(|s| !s.trim().is_empty() && *s != "有新消息 · 请到微信查看")
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    if a.body == "有新消息 · 请到微信查看" {
                         read_local_wechat_message_in_ram(0, 0)
                     } else {
                         a.body.clone()
-                    };
-                    let (shown_body, body_col) = if revealed {
-                        (live_body, theme::WHITE)
-                    } else {
-                        (
-                            format!("按 [{hk}] 显示当前消息内容"),
-                            Color32::from_rgb(125, 211, 252),
-                        )
-                    };
+                    }
+                });
+            Some(live)
+        } else {
+            a.full_body
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    let s = a.body.trim();
+                    (!s.is_empty()
+                        && s != "收到新通知 · 内容已隐藏"
+                        && s != "收到新消息 · 内容已隐藏")
+                        .then(|| a.body.clone())
+                })
+        };
+        let Some(actual) = raw_actual else {
+            return (a.body.clone(), theme::GRAY, None);
+        };
+        let hk = if mcfg.wechat_reveal_hotkey.trim().is_empty() {
+            "Alt+W"
+        } else {
+            mcfg.wechat_reveal_hotkey.trim()
+        };
+        if check_wechat_reveal_hotkey_edge(ctx, hk) {
+            if is_wechat_fingerprint_unlocked() {
+                reset_wechat_fingerprint_lock();
+            } else {
+                trigger_local_fingerprint_verify();
+            }
+            if let Some(ref mut cur_n) = self.notice {
+                cur_n.duration = (self.t - cur_n.at) + 8.0;
+            }
+        }
+        let hidden_by_default = !self.settings.notification_preview || (allow_wechat_ram && mcfg.wechat_read_content);
+        let (shown, revealed) = Self::compute_notice_reveal_state(
+            hidden_by_default,
+            is_wechat_fingerprint_unlocked(),
+            hk,
+            &actual,
+        );
+        if revealed {
+            (shown, theme::WHITE, Some(format!("再按 {hk} 收起")))
+        } else {
+            (shown, Color32::from_rgb(125, 211, 252), None)
+        }
+    }
 
-                    nc.centered_text(44.0, 14.0, &nc.fit(title_str, 11.0, W::Semibold, 100.0), 11.0, W::Semibold, theme::WHITE, H::Left);
-                    if revealed {
-                        nc.centered_text(
-                            198.0,
-                            14.0,
-                            &format!("再按 {hk} 收起"),
-                            8.0,
-                            W::Regular,
-                            Color32::from_white_alpha(130),
-                            H::Right,
-                        );
+    pub(crate) fn draw_notice(&mut self, c:&Card,panel:Rect,a:&Alert,_cmds:&mut Vec<Cmd>){
+        let nc=c.clipped(0.0,0.0,panel.width(),panel.height());
+        if let Some(code) = a.verification_code.as_deref() {
+            match crate::auralsle_otp::draw_capsule(
+                &nc,
+                panel.width(),
+                panel.height(),
+                if self.settings.island_shape == crate::model::IslandShape::Pill { 22.0 } else { 12.5 },
+                &a.title,
+                code,
+                a.verification_copied,
+            ) {
+                crate::auralsle_otp::CapsuleAction::Copy => {
+                    let _ = crate::auralsle_otp::copy_code(code);
+                    _cmds.push(Cmd::Copy(code.to_owned()));
+                    if let Some(cur) = &mut self.notice {
+                        cur.verification_copied = true;
+                        cur.at = self.t;
+                        cur.duration = 1.6;
                     }
-                    let max_body_w = 154.0;
-                    nc.centered_text(
-                        44.0,
-                        30.0,
-                        &nc.fit(&shown_body, 10.2, W::Regular, max_body_w),
-                        10.2,
-                        W::Regular,
-                        body_col,
-                        H::Left,
-                    );
-                    if !revealed {
-                        // 「显示」按钮已移除：按 [Alt+W] 热键即可显示正文。
-                        if notice_button(&nc, 206.0, 12.0, 52.0, "查看", "messenger-view") {
-                            _cmds.push(Cmd::ViewMessenger(self.latest_unread(source)));
-                        }
-                        if notice_button(&nc, 265.0, 12.0, 52.0, "关闭", "messenger-dismiss") {
-                            reset_wechat_fingerprint_lock();
-                            self.notice = None;
-                            self.notification_bell_until = 0.0;
-                        }
-                    } else {
-                        if notice_button(&nc, 206.0, 12.0, 52.0, "查看", "messenger-view") {
-                            _cmds.push(Cmd::ViewMessenger(self.latest_unread(source)));
-                        }
-                        if notice_button(&nc, 265.0, 12.0, 52.0, "关闭", "messenger-dismiss") {
-                            reset_wechat_fingerprint_lock();
-                            self.notice = None;
-                            self.notification_bell_until = 0.0;
-                        }
+                    if let Some(hud) = &mut self.hud_notice {
+                        hud.verification_copied = true;
                     }
-                    return;
+                    self.code_copied(code);
+                    self.pet.react(PetState::Happy);
+                }
+                crate::auralsle_otp::CapsuleAction::Dismiss => {
+                    self.notice = None;
+                    self.notification_bell_until = 0.0;
+                }
+                crate::auralsle_otp::CapsuleAction::None => {}
+            }
+            return;
+        }
+        if let Some(source)=a.messenger(){
+            let oppo_native_tex = if !cfg!(test) && a.oppo_badge {
+                a.icon_png
+                    .as_deref()
+                    .map(Vec::as_slice)
+                    .or_else(|| self.oppo_messenger_icons.get(&source).map(|v| v.as_slice()))
+                    .and_then(|png| oppo_icon_texture(nc.ui.ctx(), png))
+            } else {
+                None
+            };
+            if let Some(tex) = oppo_native_tex {
+                let icon_rect = nc.rect(10.0, 10.0, 24.0, 24.0);
+                nc.painter.add(
+                    egui::epaint::RectShape::filled(icon_rect, egui::CornerRadius::same(6), Color32::WHITE)
+                        .with_texture(tex.id(), Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0))),
+                );
+                nc.circle(32.5, 12.5, 2.6, Color32::from_rgb(255, 72, 72));
+                oppo_corner_badge(&nc, 32.5, 31.5, 4.8);
+            } else {
+                messenger_icon(&nc,22.0,22.0,source);
+                nc.circle(31.0,14.0,2.6,Color32::from_rgb(255,72,72));
+                if !cfg!(test) && (a.oppo_badge || (a.unread.is_none() && self.has_oppo_messenger(source))) {
+                    oppo_corner_badge(&nc, 29.5, 29.0, 4.8);
                 }
             }
-            nc.centered_text(44.0,14.0,&a.title,11.0,W::Semibold,theme::WHITE,H::Left);
-            nc.centered_text(44.0,30.0,&nc.fit(&a.body,10.5,W::Regular,154.0),10.5,W::Regular,theme::GRAY,H::Left);
-            if notice_button(&nc,206.0,12.0,52.0,"查看","messenger-view"){_cmds.push(Cmd::ViewMessenger(a.unread.unwrap_or_else(||self.latest_unread(source))));}
-            if notice_button(&nc,265.0,12.0,52.0,"关闭","messenger-dismiss"){
-                if source.adapter().dismiss_unread{if let Some(unread)=a.unread{self.discard_unread(unread);}}
-                self.notice=None;self.notification_bell_until=0.0;
+            let (shown_body, body_col, right_hint) =
+                self.resolve_notice_reveal(nc.ui.ctx(), a, !a.oppo_badge && source == crate::app::Messenger::Wechat);
+            let title_str = if !cfg!(test) {
+                source.name()
+            } else {
+                a.title.as_str()
+            };
+            let title_w = if right_hint.is_some() { 104.0 } else { 154.0 };
+            nc.centered_text(44.0, 14.0, &nc.fit(title_str, 11.0, W::Semibold, title_w), 11.0, W::Semibold, theme::WHITE, H::Left);
+            if let Some(hint) = right_hint {
+                nc.centered_text(198.0, 14.0, &hint, 8.0, W::Regular, Color32::from_white_alpha(130), H::Right);
+            }
+            nc.centered_text(44.0, 30.0, &nc.fit(&shown_body, 10.2, W::Regular, 154.0), 10.2, W::Regular, body_col, H::Left);
+            if notice_button(&nc, 206.0, 12.0, 52.0, "查看", "messenger-view") {
+                reset_wechat_fingerprint_lock();
+                if a.oppo_badge {
+                    if let Some(unread) = a.unread {
+                        self.discard_unread(unread);
+                    }
+                    self.notice = None;
+                    self.notification_bell_until = 0.0;
+                    self.show_page(5);
+                } else {
+                    _cmds.push(Cmd::ViewMessenger(a.unread.unwrap_or_else(|| self.latest_unread(source))));
+                }
+            }
+            if notice_button(&nc, 265.0, 12.0, 52.0, "关闭", "messenger-dismiss") {
+                reset_wechat_fingerprint_lock();
+                if source.adapter().dismiss_unread || a.oppo_badge {
+                    if let Some(unread) = a.unread {
+                        self.discard_unread(unread);
+                    }
+                }
+                self.notice = None;
+                self.notification_bell_until = 0.0;
             }
             return;
         }
         if a.source!=AlertSource::Internal {
-            crate::paint::bell(&nc,310.0,22.0,theme::GRAY,crate::paint::bell_swing(self.t-a.at));
-            nc.circle(314.0,17.5,2.0,Color32::from_rgb(255,72,72));
-            let clean_t = if cfg!(test) { a.title.clone() } else { crate::theme::sanitize_notification_text(&a.title) };
-            let clean_b = if cfg!(test) { a.body.clone() } else { crate::theme::sanitize_notification_text(&a.body) };
-            nc.centered_text(16.0,14.0,&nc.fit(&clean_t,11.0,W::Semibold,198.0),11.0,W::Semibold,theme::WHITE,H::Left);
-            nc.centered_text(16.0,30.0,&nc.fit(&clean_b,10.5,W::Regular,198.0),10.5,W::Regular,theme::GRAY,H::Left);
-            if notice_button(&nc,226.0,12.0,60.0,"关闭","external-dismiss"){
-                self.notice=None;
-                self.notification_bell_until=0.0;
+            let clean_t = if cfg!(test) {
+                a.title.clone()
+            } else {
+                crate::theme::sanitize_notification_text(Self::banner_app_name(&a.title))
+            };
+            let (shown_b, body_col, right_hint) = self.resolve_notice_reveal(nc.ui.ctx(), a, false);
+            let clean_b = if cfg!(test) { shown_b } else { crate::theme::sanitize_notification_text(&shown_b) };
+            let (ext_id, oppo_pkg) = match &a.source {
+                AlertSource::External(id) => (
+                    id.as_str(),
+                    id.strip_prefix("oppo-mirror:")
+                        .filter(|p| !p.trim().eq_ignore_ascii_case(crate::oppo_notify::OPPO_AUMID))
+                        .map(str::to_owned),
+                ),
+                _ => ("", None),
+            };
+            let cached_png = if !cfg!(test) && a.icon_png.is_none() {
+                oppo_pkg.as_deref().and_then(crate::oppo_notify::cached_icon_png)
+            } else {
+                None
+            };
+            let tex = if cfg!(test) {
+                None
+            } else {
+                a.icon_png
+                    .as_deref()
+                    .filter(|_| oppo_pkg.is_some() || !crate::icons::is_excluded_oppo_app(ext_id, &clean_t))
+                    .map(Vec::as_slice)
+                    .or(cached_png.as_deref())
+                    .and_then(|png| oppo_icon_texture(nc.ui.ctx(), png))
+                    .or_else(|| crate::icons::extract_app_icon_texture(nc.ui.ctx(), ext_id, &clean_t))
+            };
+            if let Some(tex) = tex {
+                let icon_rect = nc.rect(10.0, 10.0, 24.0, 24.0);
+                nc.painter.add(
+                    egui::epaint::RectShape::filled(icon_rect, egui::CornerRadius::same(6), Color32::WHITE)
+                        .with_texture(tex.id(), Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0))),
+                );
+                nc.circle(32.5, 12.5, 2.6, Color32::from_rgb(255, 72, 72));
+                if a.oppo_badge {
+                    oppo_corner_badge(&nc, 32.5, 31.5, 4.8);
+                }
+            } else {
+                let icon_rect = nc.rect(10.0, 10.0, 24.0, 24.0);
+                if let Some((letter, bg)) = fallback_badge_info(ext_id, "", &clean_t, Color32::from_rgb(64, 132, 244)) {
+                    let r = ((6.0 * nc.s).round()).max(3.0) as u8;
+                    nc.painter.rect_filled(icon_rect, egui::CornerRadius::same(r), bg);
+                    let badge_card = nc.shifted(0.0, 0.0);
+                    badge_card.centered_text(22.0, 22.0, &letter, 12.5, W::Bold, Color32::WHITE, H::Center);
+                } else {
+                    crate::paint::bell(&nc, 22.0, 22.0, theme::WHITE, crate::paint::bell_swing(self.t - a.at));
+                }
+                nc.circle(31.0, 14.0, 2.6, Color32::from_rgb(255, 72, 72));
+                if a.oppo_badge {
+                    oppo_corner_badge(&nc, 29.5, 29.0, 4.8);
+                }
+            }
+            let title_w = if right_hint.is_some() { 104.0 } else { 154.0 };
+            nc.centered_text(44.0, 14.0, &nc.fit(&clean_t, 11.0, W::Semibold, title_w), 11.0, W::Semibold, theme::WHITE, H::Left);
+            if let Some(hint) = right_hint {
+                nc.centered_text(198.0, 14.0, &hint, 8.0, W::Regular, Color32::from_white_alpha(130), H::Right);
+            }
+            nc.centered_text(44.0, 30.0, &nc.fit(&clean_b, 10.2, W::Regular, 154.0), 10.2, W::Regular, body_col, H::Left);
+            if notice_button(&nc, 206.0, 12.0, 52.0, "查看", "external-view") {
+                reset_wechat_fingerprint_lock();
+                if let Some(ref pkg) = oppo_pkg {
+                    self.dismiss_oppo_orb(pkg);
+                }
+                self.notice = None;
+                self.notification_bell_until = 0.0;
+                if oppo_pkg.is_some() {
+                    self.show_page(5);
+                } else if a.page < 6 {
+                    self.show_page(a.page);
+                } else {
+                    self.show_page(5);
+                }
+            }
+            if notice_button(&nc, 265.0, 12.0, 52.0, "关闭", "external-dismiss") {
+                reset_wechat_fingerprint_lock();
+                if let Some(ref pkg) = oppo_pkg {
+                    self.dismiss_oppo_orb(pkg);
+                }
+                self.notice = None;
+                self.notification_bell_until = 0.0;
             }
             return;
         }
@@ -1188,19 +1693,26 @@ impl App {
         } else {
             let is_sit=a.health()==Some(HealthReminder::Sit);let is_water=a.health()==Some(HealthReminder::Water);let is_focus=a.page==1;let is_power=a.title=="电量偏低";
             notice_icon(&nc,22.0,22.0,a);
-            let max=if is_water||is_sit{125.0}else{195.0};
-            nc.centered_text(43.0,14.0,&nc.fit(&a.title,11.0,W::Semibold,max),11.0,W::Semibold,theme::WHITE,H::Left);
-            nc.centered_text(43.0,30.0,&nc.fit(&a.body,10.5,W::Regular,max),10.5,W::Regular,theme::GRAY,H::Left);
-            if is_sit {
-                if notice_button(&nc,181.0,12.0,62.0,"知道了","sit-confirm-read"){self.confirm_health_reminder(HealthReminder::Sit);}
-                if notice_button(&nc,250.0,12.0,68.0,"起身了","sit-confirm"){self.notice=None;self.stood_up();}
-            }else if is_water {
-                if notice_button(&nc,181.0,12.0,62.0,"知道了","water-confirm-read"){self.confirm_health_reminder(HealthReminder::Water);}
-                if notice_button(&nc,250.0,12.0,68.0,"喝一口","water-confirm"){self.notice=None;self.drink_water();}
-            }else{
+            if is_sit || is_water {
+                let max = 125.0;
+                nc.centered_text(43.0,14.0,&nc.fit(&a.title,11.0,W::Semibold,max),11.0,W::Semibold,theme::WHITE,H::Left);
+                nc.centered_text(43.0,30.0,&nc.fit(&a.body,10.5,W::Regular,max),10.5,W::Regular,theme::GRAY,H::Left);
+                if is_sit {
+                    if notice_button(&nc,181.0,12.0,62.0,"知道了","sit-confirm-read"){self.confirm_health_reminder(HealthReminder::Sit);}
+                    if notice_button(&nc,250.0,12.0,68.0,"起身了","sit-confirm"){self.notice=None;self.stood_up();}
+                } else {
+                    if notice_button(&nc,181.0,12.0,62.0,"知道了","water-confirm-read"){self.confirm_health_reminder(HealthReminder::Water);}
+                    if notice_button(&nc,250.0,12.0,68.0,"喝一口","water-confirm"){self.notice=None;self.drink_water();}
+                }
+            } else {
+                if !is_focus && !is_power {
+                    nc.circle(31.0, 14.0, 2.6, Color32::from_rgb(255, 72, 72));
+                }
+                nc.centered_text(44.0,14.0,&nc.fit(&a.title,11.0,W::Semibold,154.0),11.0,W::Semibold,theme::WHITE,H::Left);
+                nc.centered_text(44.0,30.0,&nc.fit(&a.body,10.5,W::Regular,154.0),10.5,W::Regular,theme::GRAY,H::Left);
                 let label=if is_focus{"开始"}else if is_power{"知道了"}else{"查看"};
-                if notice_button(&nc,257.0,12.0,60.0,label,"notice-action"){
-                    self.notice=None;if is_power{return;}if is_focus{self.pomo.running=true;}else if a.page<6{
+                if notice_button(&nc,206.0,12.0,52.0,label,"notice-action"){
+                    self.notice=None;self.notification_bell_until=0.0;if is_power{return;}if is_focus{self.pomo.running=true;}else if a.page<6{
                         self.show_page(a.page);
                         if a.page==4 {
                             let order=self.todos.display_order(&self.today);
@@ -1209,6 +1721,10 @@ impl App {
                             }
                         }
                     }else{self.settings_tab=6;self.open_settings();}
+                }
+                if notice_button(&nc,265.0,12.0,52.0,"关闭","notice-dismiss"){
+                    self.notice=None;
+                    self.notification_bell_until=0.0;
                 }
             }
             if let Some(kind)=a.health() {
@@ -1752,7 +2268,155 @@ impl App {
     }
 }
 
-fn switch(ui:&mut egui::Ui,value:&mut bool)->bool {
+/// Auralsle 外观模式三卡片可视化选择器（跟随系统双分屏 / 浅色 / 深色）。
+fn draw_auralsle_appearance_cards(
+    ui: &mut egui::Ui,
+    theme: &mut crate::settings_theme::SettingsTheme,
+) {
+    use crate::settings_theme::SettingsTheme;
+    let ctx = ui.ctx().clone();
+    let dark_ui = ctx.style().visuals.dark_mode;
+    let skin_t = current_settings_skin_theme(&ctx);
+    let blue = Color32::from_rgb(10, 132, 255);
+    settings_card(ui, |ui| {
+        let avail = ui.available_width().max(260.0);
+        ui.label(
+            egui::RichText::new("外观模式")
+                .size(14.0)
+                .strong()
+                .color(settings_color(&ctx, Color32::WHITE, Color32::from_rgb(24, 24, 28))),
+        );
+        ui.add_space(8.0);
+
+        let gap = 12.0;
+        let cw = ((avail - gap * 2.0) / 3.0).max(80.0);
+        let ch = 150.0;
+        let items = [
+            (SettingsTheme::System, "跟随系统"),
+            (SettingsTheme::Light, "浅色"),
+            (SettingsTheme::Dark, "深色"),
+        ];
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (i, (variant, label)) in items.into_iter().enumerate() {
+                let on = *theme == variant;
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(cw, ch), egui::Sense::click());
+                let card_bg = if on {
+                    crate::paint::mix(skin_t.bg_ctrl, blue, if dark_ui { 0.10 } else { 0.06 })
+                } else if resp.hovered() {
+                    crate::paint::mix(skin_t.bg_ctrl, if dark_ui { Color32::WHITE } else { Color32::BLACK }, 0.05)
+                } else {
+                    skin_t.bg_ctrl
+                };
+                let border = if on {
+                    egui::Stroke::new(2.0, blue)
+                } else if resp.hovered() {
+                    egui::Stroke::new(1.2, Color32::from_gray(if dark_ui { 95 } else { 175 }))
+                } else {
+                    egui::Stroke::new(1.0, skin_t.border)
+                };
+                ui.painter().rect_filled(rect, 12.0, card_bg);
+                ui.painter().rect_stroke(rect, 12.0, border, egui::StrokeKind::Inside);
+
+            // 内部微型窗口线框预览区 (top 12..110)
+            let prev = egui::Rect::from_min_max(
+                rect.min + egui::vec2(10.0, 10.0),
+                egui::pos2(rect.right() - 10.0, rect.top() + 110.0),
+            );
+            let p_clip = ui.painter().with_clip_rect(prev);
+            let parts = if i == 0 { 2 } else { 1 };
+            let pw = prev.width() / parts as f32;
+            for part in 0..parts {
+                let is_dark = i == 2 || (i == 0 && part == 1);
+                let px0 = prev.left() + part as f32 * pw;
+                let part_rect = egui::Rect::from_min_size(egui::pos2(px0, prev.top()), egui::vec2(pw, prev.height()));
+                let (surf, side_bg, ink_bar, muted_bar, card_c) = if is_dark {
+                    (
+                        Color32::from_rgb(13, 14, 17),
+                        Color32::from_rgb(27, 29, 34),
+                        Color32::from_rgb(245, 246, 248),
+                        Color32::from_rgb(122, 126, 134),
+                        Color32::from_rgb(22, 24, 28),
+                    )
+                } else {
+                    (
+                        Color32::from_rgb(243, 244, 247),
+                        Color32::from_rgb(229, 232, 238),
+                        Color32::from_rgb(28, 31, 36),
+                        Color32::from_rgb(142, 148, 158),
+                        Color32::from_rgb(255, 255, 255),
+                    )
+                };
+                let part_cr = if parts == 1 {
+                    egui::CornerRadius::same(10)
+                } else if part == 0 {
+                    egui::CornerRadius { nw: 10, sw: 10, ne: 0, se: 0 }
+                } else {
+                    egui::CornerRadius { nw: 0, sw: 0, ne: 10, se: 10 }
+                };
+                p_clip.rect_filled(part_rect, part_cr, surf);
+                let side_w = pw * 0.25;
+                let side_r = egui::Rect::from_min_size(egui::pos2(px0, prev.top()), egui::vec2(side_w, prev.height()));
+                let side_cr = if part == 0 {
+                    egui::CornerRadius { nw: 10, sw: 10, ne: 0, se: 0 }
+                } else {
+                    egui::CornerRadius::ZERO
+                };
+                p_clip.rect_filled(side_r, side_cr, side_bg);
+                for row in 0..3 {
+                    let bw = (side_w - 10.0).max(6.0);
+                    p_clip.rect_filled(
+                        egui::Rect::from_min_size(egui::pos2(px0 + 5.0, prev.top() + 18.0 + row as f32 * 14.0), egui::vec2(bw, 3.5)),
+                        1.75,
+                        muted_bar,
+                    );
+                }
+                let main_x = px0 + side_w + 7.0;
+                p_clip.rect_filled(
+                    egui::Rect::from_min_size(egui::pos2(main_x, prev.top() + 13.0), egui::vec2((pw * 0.52).max(16.0), 4.5)),
+                    2.0,
+                    ink_bar,
+                );
+                let card_w = (pw - side_w - 14.0).max(16.0);
+                for row in 0..2 {
+                    p_clip.rect_filled(
+                        egui::Rect::from_min_size(egui::pos2(main_x, prev.top() + 28.0 + row as f32 * 30.0), egui::vec2(card_w, 24.0)),
+                        5.0,
+                        card_c,
+                    );
+                }
+            }
+            // 圆角外框覆盖接缝使四角圆滑一致
+            ui.painter().rect_stroke(
+                prev,
+                10.0,
+                egui::Stroke::new(2.0, card_bg),
+                egui::StrokeKind::Outside,
+            );
+
+            // 底部文字 + 蓝色对号
+            let lbl_col = settings_color(&ctx, Color32::WHITE, Color32::from_rgb(24, 24, 28));
+            ui.painter().text(
+                egui::pos2(rect.left() + 14.0, rect.bottom() - 22.0),
+                egui::Align2::LEFT_CENTER,
+                label,
+                egui::FontId::proportional(13.0),
+                lbl_col,
+            );
+            if on {
+                let c_card = Card::new(ui, rect.min, rect);
+                crate::paint::check(&c_card, cw - 20.0, ch - 22.0, 12.0, 1.0, 2.0, blue);
+            }
+            if resp.clicked() {
+                *theme = variant;
+            }
+        }
+        });
+    });
+}
+
+pub(crate) fn switch(ui:&mut egui::Ui,value:&mut bool)->bool {
     // [Twinkle Tray 1.17.2 `body[data-is-win11=true] input[type=checkbox]`]
     // 像素级对齐真机截图（图二 `image_93848d.jpg` `y=586..604`）：
     // - 轨道：44×20 全圆角药丸，未选中时透明底 + 1.5px 亮灰描边 `RGB(198,198,198)`（对应 `--input-border: rgba(255,255,255,0.77)`）；
@@ -3202,7 +3866,7 @@ pub(crate) fn settings_control_row(ui:&mut egui::Ui,title:&str,label_width:f32,c
         content
     }).inner
 }
-fn setting_number<N:egui::emath::Numeric>(ui:&mut egui::Ui,title:&str,value:&mut N,min:N,max:N,suffix:&str,speed:f64)->bool{
+pub(crate) fn setting_number<N:egui::emath::Numeric>(ui:&mut egui::Ui,title:&str,value:&mut N,min:N,max:N,suffix:&str,speed:f64)->bool{
     let mut changed=false;
     twinkle_parent_panel(ui, title, "", 148.0, 30.0, |ui| {
         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -3522,6 +4186,37 @@ fn is_oppo_wrapper_label(s: &str) -> bool {
     ) || low == "oppo connect" || low == "o+ connect"
 }
 
+/// 判断是否为 OPPO 互联 / 跨屏互联自身的设备连接/断开/系统状态通知（绝不应误识别为微信或 QQ 聊天消息）。
+fn is_oppo_connection_status_text(s: &str) -> bool {
+    const STATUS_KEYS: &[&str] = &[
+        "已连接",
+        "连接成功",
+        "手机已连接",
+        "设备已连接",
+        "建立连接",
+        "已断开",
+        "断开连接",
+        "连接已断开",
+        "正在连接",
+        "重新连接",
+        "配对成功",
+        "跨屏互联",
+        "随身工作台",
+        "镜像投屏",
+        "开始投屏",
+        "停止投屏",
+        "共享剪贴板",
+        "剪贴板已同步",
+        "通知同步已开启",
+        "已开启通知同步",
+        "连接至电脑",
+        "连接到电脑",
+        "连接到此电脑",
+        "手机互联",
+    ];
+    STATUS_KEYS.iter().any(|k| s.contains(k))
+}
+
 /// 解析「OPPO 互联 / 跨屏互联 / O+互联」通知文本，剥离外壳，提取 `(真实应用名, 发送者/子标题, 消息正文, 是否微信, 是否QQ)`。
 fn parse_oppo_connect_notification(raw_body: &str) -> (String, String, String, bool, bool) {
     let cleaned: String = raw_body
@@ -3540,12 +4235,18 @@ fn parse_oppo_connect_notification(raw_body: &str) -> (String, String, String, b
     }
 
     let check_wx = |s: &str| -> bool {
-        let low = s.to_ascii_lowercase();
-        s.contains("微信") || low.contains("wechat") || low.contains("weixin")
+        let t = s.trim();
+        let low = t.to_ascii_lowercase();
+        (t == "微信" || t == "手机微信" || low == "wechat" || low == "weixin"
+            || ((t.contains("微信") || low.contains("wechat") || low.contains("weixin")) && t.chars().count() <= 10))
+            && !is_oppo_connection_status_text(t)
     };
     let check_qq = |s: &str| -> bool {
-        let low = s.to_ascii_lowercase();
-        low.contains("qq") || s.contains("TIM") || low == "tim"
+        let t = s.trim();
+        let low = t.to_ascii_lowercase();
+        (low == "qq" || t == "手机QQ" || t == "TIM" || low == "tim"
+            || ((low.contains("qq") || t.contains("TIM")) && t.chars().count() <= 10))
+            && !is_oppo_connection_status_text(t)
     };
     let normalize_app = |s: &str| -> String {
         let stripped = s
@@ -3563,6 +4264,13 @@ fn parse_oppo_connect_notification(raw_body: &str) -> (String, String, String, b
             stripped.to_owned()
         }
     };
+
+    if is_oppo_connection_status_text(trimmed)
+        && !trimmed.contains('|')
+        && !trimmed.contains('｜')
+    {
+        return ("OPPO 互联".to_owned(), String::new(), trimmed.to_owned(), false, false);
+    }
 
     if let Some((left_app, rest)) = trimmed.split_once('|').or_else(|| trimmed.split_once('｜')) {
         let sub_app = normalize_app(left_app);
@@ -3647,13 +4355,15 @@ fn parse_oppo_connect_notification(raw_body: &str) -> (String, String, String, b
             }
             return (final_app, String::new(), seg1.to_owned(), is_wx, is_qq);
         }
-        let is_wx = check_wx(trimmed);
-        let is_qq = !is_wx && check_qq(trimmed);
+        let is_wx = check_wx(seg0);
+        let is_qq = !is_wx && check_qq(seg0);
         return (
             if is_wx {
                 "微信".to_owned()
             } else if is_qq {
                 "QQ".to_owned()
+            } else if is_oppo_connection_status_text(trimmed) {
+                "OPPO 互联".to_owned()
             } else {
                 "手机通知".to_owned()
             },
@@ -3664,12 +4374,15 @@ fn parse_oppo_connect_notification(raw_body: &str) -> (String, String, String, b
         );
     }
 
-    let is_wx = check_wx(trimmed);
-    let is_qq = !is_wx && check_qq(trimmed);
+    let is_status = is_oppo_connection_status_text(trimmed);
+    let is_wx = !is_status && check_wx(trimmed);
+    let is_qq = !is_status && !is_wx && check_qq(trimmed);
     let def_app = if is_wx {
         "微信".to_owned()
     } else if is_qq {
         "QQ".to_owned()
+    } else if is_status {
+        "OPPO 互联".to_owned()
     } else {
         "手机通知".to_owned()
     };
@@ -3878,7 +4591,53 @@ pub fn probe_local_privacy_hardware() -> (String, String) {
         .clone()
 }
 
-/// 在通知历史的分组标题与通知卡片中直接读取并绘制本机软件真实图标（通过 `icons::extract_app_icon_texture` 提取本机进程/注册表/快捷方式真实图标，内嵌官方 SVG 保底，绝不渲染缺字方块 `□`）。
+/// 从来源应用信息中提取首字与兜底底色（无内置第三方图标时回退为文字首字母或通用图标）。
+pub(crate) fn fallback_badge_info(
+    app_id: &str,
+    app_name: &str,
+    title: &str,
+    default_bg: Color32,
+) -> Option<(String, Color32)> {
+    let low_id = app_id.trim().to_ascii_lowercase();
+    let low_name = app_name.trim().to_ascii_lowercase();
+    if app_name.contains("微信")
+        || low_name.contains("wechat")
+        || low_id.contains("wechat")
+        || low_id.contains("weixin")
+        || low_id.contains("com.tencent.mm")
+    {
+        return Some(("微".to_owned(), Color32::from_rgb(7, 193, 96)));
+    }
+    if low_name == "qq"
+        || app_name.contains("QQ")
+        || low_id == "qq"
+        || low_id.contains("mobileqq")
+        || low_id.contains("tencent.tim")
+        || low_id.contains("qqlite")
+    {
+        return Some(("Q".to_owned(), Color32::from_rgb(18, 183, 245)));
+    }
+    if crate::icons::is_excluded_oppo_app(app_id, app_name) {
+        return None;
+    }
+    let clean_name = app_name.trim();
+    let src = if !clean_name.is_empty() {
+        clean_name
+    } else {
+        title.split(" · ").next().unwrap_or(title).trim()
+    };
+    let ch = src
+        .chars()
+        .find(|c| c.is_alphanumeric() || ('\u{4e00}'..='\u{9fff}').contains(c))?;
+    let label = if ch.is_ascii_alphabetic() {
+        ch.to_ascii_uppercase().to_string()
+    } else {
+        ch.to_string()
+    };
+    Some((label, default_bg))
+}
+
+/// 绘制通知来源应用图标：仅在运行时获取，不内置任何第三方应用图标；失败回退为首字徽标或灵屿通用图标。
 fn draw_notif_app_icon(
     ui: &mut egui::Ui,
     rect: Rect,
@@ -3888,7 +4647,40 @@ fn draw_notif_app_icon(
     acc: Color32,
 ) {
     let r_corner = (rect.width() * 0.24).clamp(4.0, 7.5);
-    // 1. 直接绘制本机软件真实图标纹理（同时结合 app_id、app_name 与通知标题智能匹配本机程序或内置高清多色矢量图标）
+    let r_u8 = r_corner.round() as u8;
+
+    // 0. 灵屿自己发出的通知：使用灵屿自有品牌图标
+    let low_id = app_id.trim().to_ascii_lowercase();
+    let low_name = app_name.trim().to_ascii_lowercase();
+    if low_id.contains("auralsle") || low_name.contains("auralsle") || app_name.contains("灵屿") {
+        let tex = crate::theme::logo_texture(ui.ctx());
+        ui.painter().add(
+            egui::epaint::RectShape::filled(rect, egui::CornerRadius::same(r_u8), Color32::WHITE)
+                .with_texture(tex.id(), Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0))),
+        );
+        return;
+    }
+
+    // 1. 若是手机通知镜像且 `%APPDATA%\Auralsle\icon-cache` 缓存了手机侧应用图标（排除 OPPO 官方自身包名）
+    if let Some(pkg) = app_id.strip_prefix("oppo-mirror:") {
+        if let Some(png) = crate::oppo_notify::cached_icon_png(pkg) {
+            if let Some(tex) = oppo_icon_texture(ui.ctx(), &png) {
+                ui.painter().add(
+                    egui::epaint::RectShape::filled(
+                        rect,
+                        egui::CornerRadius::same(r_u8),
+                        Color32::WHITE,
+                    )
+                    .with_texture(tex.id(), Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0))),
+                );
+                let c = Card::new(ui, rect.min, rect).ghost();
+                oppo_corner_badge(&c, rect.width() - 3.5, rect.height() - 3.5, (rect.width() * 0.16).clamp(3.2, 4.8));
+                return;
+            }
+        }
+    }
+
+    // 2. 运行时读取来源图标（优先 Windows 通知 AppInfo/DisplayInfo/Logo，其次本机已安装软件）
     if let Some(tex) = crate::icons::extract_app_icon_texture(ui.ctx(), app_id, app_name)
         .or_else(|| crate::icons::extract_app_icon_texture(ui.ctx(), app_name, title))
     {
@@ -3901,52 +4693,29 @@ fn draw_notif_app_icon(
         return;
     }
 
-    let low_name = app_name.to_ascii_lowercase();
-    let low_id = app_id.to_ascii_lowercase();
-    let is_wechat = app_name.contains("微信") || low_name.contains("wechat") || low_id.contains("wechat") || title.contains("微信");
-    let is_douyin = title.contains("抖音") || app_name.contains("抖音") || low_name.contains("douyin") || low_name.contains("tiktok");
-    let is_oppo = app_name.contains("OPPO") || low_name.contains("oppo") || low_id.contains("oppo");
+    // 3. 回退为文字首字母（如微信→微、QQ→Q）或灵屿自有通用图标
+    if let Some((letter, bg)) = fallback_badge_info(app_id, app_name, title, acc) {
+        ui.painter().rect_filled(rect, r_corner, bg);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &letter,
+            crate::theme::font((rect.width() * 0.52).clamp(10.0, 16.0), W::Bold),
+            Color32::WHITE,
+        );
+        return;
+    }
 
-    if is_wechat {
-        ui.painter().rect_filled(rect, r_corner, Color32::from_rgb(7, 193, 96));
-        let c = Card::new(ui, rect.min, rect).ghost();
-        let k = (rect.width() / 26.0).clamp(0.55, 1.25);
-        messenger_icon(&c.scaled(rect.width() * 0.5, rect.height() * 0.5, k), rect.width() * 0.5, rect.height() * 0.5, crate::app::Messenger::Wechat);
-        return;
-    }
-    if is_douyin {
-        ui.painter().rect_filled(rect, r_corner, Color32::from_rgb(20, 20, 26));
-        // 纯矢量绘制音符（无外圈白色描边遮罩），避免特殊字符缺字
-        let center = rect.center();
-        let r_note = (rect.width() * 0.14).max(2.2);
-        for (offset, col) in [
-            (egui::vec2(0.9, 0.7), Color32::from_rgb(254, 44, 85)),
-            (egui::vec2(-0.9, -0.7), Color32::from_rgb(37, 244, 238)),
-            (egui::Vec2::ZERO, Color32::WHITE),
-        ] {
-            let p = center + offset;
-            ui.painter().circle_filled(p + egui::vec2(-1.6, 2.6), r_note, col);
-            ui.painter().line_segment([p + egui::vec2(r_note - 1.6, 2.6), p + egui::vec2(r_note - 1.6, -4.2)], egui::Stroke::new(1.6, col));
-            ui.painter().line_segment([p + egui::vec2(r_note - 1.6, -4.2), p + egui::vec2(r_note + 2.4, -2.5)], egui::Stroke::new(1.6, col));
-        }
-        return;
-    }
-    if is_oppo {
-        ui.painter().rect_filled(rect, r_corner, Color32::from_rgb(4, 168, 108));
-        let r1 = (rect.width() * 0.23).max(3.2);
-        ui.painter().circle_stroke(rect.center() - egui::vec2(r1 * 0.42, 0.0), r1, egui::Stroke::new(1.7, Color32::WHITE));
-        ui.painter().circle_stroke(rect.center() + egui::vec2(r1 * 0.42, 0.0), r1, egui::Stroke::new(1.7, Color32::from_rgb(185, 255, 225)));
-        return;
-    }
-    // 未知自定义应用的高质感矢量应用图标兜底（圆角底板 + 顶部窗口栏与消息波纹矢量图形，告别简陋单字蓝块）
+    let c = Card::new(ui, rect.min, rect).ghost();
     ui.painter().rect_filled(rect, r_corner, acc);
-    let inner = rect.shrink((rect.width() * 0.22).max(3.2));
-    ui.painter().rect_stroke(inner, 2.2, egui::Stroke::new(1.35, Color32::WHITE), egui::StrokeKind::Inside);
-    ui.painter().line_segment(
-        [egui::pos2(inner.left() + 2.0, inner.top() + 3.2), egui::pos2(inner.right() - 2.0, inner.top() + 3.2)],
-        egui::Stroke::new(1.2, Color32::from_white_alpha(210)),
+    let scale = (rect.width() / 24.0).clamp(0.65, 1.35);
+    crate::paint::bell(
+        &c.scaled(rect.width() * 0.5, rect.height() * 0.5, scale),
+        rect.width() * 0.5,
+        rect.height() * 0.5,
+        Color32::WHITE,
+        0.0,
     );
-    ui.painter().circle_filled(inner.center() + egui::vec2(0.0, 1.4), (inner.width() * 0.16).max(1.5), Color32::WHITE);
 }
 
 const SETTINGS_GROUPS: [(&str,usize,usize);17] = [
@@ -4277,7 +5046,7 @@ impl App {
                     i.viewport().minimized.unwrap_or(false)
                         || i.viewport().inner_rect.is_some_and(|r| r.width() < 240.0 || r.height() < 120.0)
                 });
-            if is_minimized_now {
+            if is_minimized_now && !focus_requested {
                 return;
             }
             {
@@ -4318,8 +5087,16 @@ impl App {
                 crate::settings_theme::SettingsTheme::Light => false,
                 crate::settings_theme::SettingsTheme::Dark => true,
             };
-            // [第 10 批 · 图七 + 图八] 在首次显示前先完成 Win32 样式净化、WndProc Subclass（拦截 WM_NCCALCSIZE/NCPAINT/ERASEBKGND）与圆角裁剪
-            apply_settings_round_corners(ctx, dark);
+            // [性能优化] 仅在首次初始化、明暗切换或最大化状态变更时执行 Win32/DWM 属性同步，缩放拖拽期间零系统调用
+            let is_max_now = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            let dwm_sync_key: u8 = (dark as u8) | ((is_max_now as u8) << 1);
+            let prev_dwm_key = ctx.data(|d| d.get_temp::<u8>(egui::Id::new("auralsle_dwm_sync_key")));
+            if !settings_sizing_now() && (prev_dwm_key != Some(dwm_sync_key) || !ctx.data(|d| d.get_temp::<bool>(egui::Id::new("auralsle_settings_hwnd_ready")).unwrap_or(false))) {
+                apply_settings_round_corners(ctx, dark);
+                if ctx.data(|d| d.get_temp::<bool>(egui::Id::new("auralsle_settings_hwnd_ready")).unwrap_or(false)) {
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("auralsle_dwm_sync_key"), dwm_sync_key));
+                }
+            }
 
             let _legacy_skin = match self.settings.skin {
                 crate::model::Skin::Cream => SettingsSkinTheme {
@@ -4514,6 +5291,7 @@ impl App {
                         root_ctx_ref.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         root_ctx_ref.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                         root_ctx_ref.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        bring_settings_window_to_front();
                         root_ctx_ref.data_mut(|d| {
                             d.insert_temp(egui::Id::new("auralsle_settings_show_pending"), false);
                             d.insert_temp(egui::Id::new("auralsle_round_corners_done"), false);
@@ -5499,7 +6277,7 @@ impl App {
                     21=>{
                         ctx.request_repaint_after(std::time::Duration::from_millis(1500));
                         let mut mcfg = crate::auralsle_ai_status::config::get();
-                        let before_m = mcfg.clone();
+                        let mut before_m = mcfg.clone();
                         let acc = crate::auralsle_ai_status::plugins::active_accent_color();
                         let title_col = settings_color(ctx, Color32::from_rgb(240, 240, 240), Color32::from_rgb(24, 24, 26));
                         let desc_col = settings_color(ctx, Color32::from_rgb(182, 182, 182), Color32::from_rgb(90, 92, 98));
@@ -5552,8 +6330,9 @@ impl App {
                             mcfg.mod_translate_enabled,
                             mcfg.mod_display_brightness_enabled,
                             mcfg.mod_bt_devices_enabled,
+                            mcfg.mod_oppo_connect_enabled,
                         ].into_iter().filter(|&v| v).count();
-                        const TOTAL_MODS: usize = 15;
+                        const TOTAL_MODS: usize = 16;
 
                         settings_label(ui, "内存与资源实时占用");
                         settings_card(ui, |ui| {
@@ -5646,6 +6425,7 @@ impl App {
                                     mcfg.mod_translate_enabled = false;
                                     mcfg.mod_display_brightness_enabled = false;
                                     mcfg.mod_bt_devices_enabled = false;
+                                    mcfg.mod_oppo_connect_enabled = false;
                                     self.music_artwork = None;
                                     self.mail.recent.clear();
                                     self.mail.reading = None;
@@ -5671,6 +6451,7 @@ impl App {
                                     mcfg.mod_translate_enabled = true;
                                     mcfg.mod_display_brightness_enabled = true;
                                     mcfg.mod_bt_devices_enabled = true;
+                                    mcfg.mod_oppo_connect_enabled = true;
                                     ui.data_mut(|d| {
                                         d.insert_temp(msg_id, format!("已恢复全部 {TOTAL_MODS} 个功能模块"));
                                     });
@@ -5686,7 +6467,7 @@ impl App {
                         settings_label(ui, &format!("功能模块总开关（已启用 {enabled_count}/{TOTAL_MODS}）"));
                         settings_hint(ui, "每个功能均可独立启停：停用后立即隐藏对应灵动岛分页、暂停后台采样与网络轮询，并主动回收缓存内存；随时可重新开启，配置不会丢失。");
                         settings_card(ui, |ui| {
-                            let rows: [(&str, &str, &mut bool); 15] = [
+                            let rows: [(&str, &str, &mut bool); 16] = [
                                 ("音乐与歌词", "SMTC 媒体监听、专辑封面取色与桌面/岛内歌词抓取；关闭后立即停止媒体与歌词轮询", &mut mcfg.mod_music_enabled),
                                 ("番茄专注", "番茄钟专注计时与专注状态指示", &mut mcfg.mod_focus_enabled),
                                 ("饮水与久坐健康", "每日饮水记录与久坐起身健康提醒", &mut mcfg.mod_health_enabled),
@@ -5702,6 +6483,7 @@ impl App {
                                 ("快捷翻译", "多语种快捷文本翻译与一键复制", &mut mcfg.mod_translate_enabled),
                                 ("显示器亮度", "外接显示器 DDC/CI 与内置 LCD 亮度控制", &mut mcfg.mod_display_brightness_enabled),
                                 ("蓝牙与无线外设", "蓝牙耳机及 2.4GHz 无线外设电量监听与设备上下线提醒", &mut mcfg.mod_bt_devices_enabled),
+                                ("OPPO 互联适配", "统一控制 OPPO 互联分身适配、拖拽传文件悬浮球、手机通知镜像与原生通知静默；关闭后立即停止全部 OPPO 互联后台联动", &mut mcfg.mod_oppo_connect_enabled),
                             ];
                             let n_rows = rows.len();
                             for (i, (lbl, desc, flag)) in rows.into_iter().enumerate() {
@@ -5712,6 +6494,216 @@ impl App {
                             }
                             let _ = n_rows;
                         });
+
+                        if !cfg!(test) {
+                            ui.add_space(8.0);
+                            settings_label(ui, "OPPO 互联适配");
+                            settings_card(ui, |ui| {
+                                let oppo_master_on = mcfg.mod_oppo_connect_enabled;
+                                if !oppo_master_on {
+                                    settings_hint(ui, "当前「OPPO 互联适配」总开关已关闭，请先在上方开启后再配置子功能。");
+                                    twinkle_card_break(ui);
+                                }
+                                ui.add_enabled_ui(oppo_master_on, |ui| {
+                                    setting_row(
+                                        ui,
+                                        "拖放文件到 OPPO 互联悬浮球",
+                                        "拖动文件靠近灵屿时弹出 OPPO 互联悬浮球，支持连接状态指示、纯后台静默传输与环形进度展示",
+                                        &mut mcfg.oppo_drag_transfer_enabled,
+                                    );
+                                    twinkle_card_break(ui);
+                                    setting_row(
+                                        ui,
+                                        "开启 OPPO 互联「手机通知镜像」",
+                                        "读取 OPPO 互联的本机通知日志，将手机通知同步到灵屿；显示来源应用标识与完整内容，同一条通知只显示一次。来源图标仅在运行时读取，不随安装包分发。",
+                                        &mut mcfg.oppo_notify_mirror_enabled,
+                                    );
+                                    if !self.settings.notifications && mcfg.oppo_notify_mirror_enabled {
+                                        settings_hint(ui, "注意：需同时开启「通知、邮箱与日程 -> 允许读取通知」总开关，手机镜像通知才会弹出。");
+                                    }
+                                    if mcfg.oppo_notify_mirror_enabled {
+                                        twinkle_card_break(ui);
+                                        let prev_suppress = mcfg.oppo_suppress_native;
+                                        setting_row(
+                                            ui,
+                                            "关闭 OPPO 互联原生通知",
+                                            "避免 O+ 与灵屿重复弹窗。关闭上方开关后，可点“恢复 OPPO 原生通知”还原；正常退出灵屿时也会恢复。",
+                                            &mut mcfg.oppo_suppress_native,
+                                        );
+                                        let restore_fb_id = egui::Id::new("oppo_native_restore_feedback_v1");
+                                        if prev_suppress && !mcfg.oppo_suppress_native {
+                                            let saved = mcfg.clone();
+                                            crate::auralsle_ai_status::config::update(|c| *c = saved);
+                                            before_m = mcfg.clone();
+                                            let msg = match crate::oppo_notify::restore_oppo_native_now() {
+                                                Ok(s) => s,
+                                                Err(e) => format!("恢复失败：{e}"),
+                                            };
+                                            ctx.data_mut(|d| d.insert_temp(restore_fb_id, msg));
+                                        }
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui.small_button("恢复 OPPO 原生通知").clicked() {
+                                                mcfg.oppo_suppress_native = false;
+                                                before_m.oppo_suppress_native = false;
+                                                let saved = mcfg.clone();
+                                                crate::auralsle_ai_status::config::update(|c| *c = saved);
+                                                let msg = match crate::oppo_notify::restore_oppo_native_now() {
+                                                    Ok(s) => s,
+                                                    Err(e) => format!("恢复失败：{e}"),
+                                                };
+                                                ctx.data_mut(|d| d.insert_temp(restore_fb_id, msg));
+                                            }
+                                            if ui.small_button("打开系统通知设置").clicked() {
+                                                crate::oppo_notify::open_system_notification_settings();
+                                            }
+                                        });
+                                        if let Some(fb) = ctx.data(|d| d.get_temp::<String>(restore_fb_id)) {
+                                            if !fb.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new(fb)
+                                                        .size(11.0)
+                                                        .color(Color32::from_rgb(52, 211, 153)),
+                                                );
+                                            }
+                                        }
+                                        let mst = crate::oppo_notify::status_snapshot();
+                                        let conn_text = if mst.log_found {
+                                            "已连接 OPPO 互联通知日志"
+                                        } else if mst.active {
+                                            "等待 OPPO 互联启动"
+                                        } else {
+                                            "未启动"
+                                        };
+                                        let native_text = match mst.oppo_setting.as_str() {
+                                            "Enabled" => "已开启",
+                                            "" | "Unknown" => "检测中",
+                                            _ => "已关闭",
+                                        };
+                                        let status_col = settings_color(ctx, Color32::from_gray(165), Color32::from_gray(95));
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "镜像状态：{conn_text} · 本次已镜像 {} 条",
+                                                mst.mirrored_count
+                                            ))
+                                            .size(11.0)
+                                            .color(status_col),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!("OPPO 原生通知：{native_text}"))
+                                                .size(11.0)
+                                                .color(status_col),
+                                        );
+                                    }
+                                    twinkle_card_break(ui);
+                                    setting_row(
+                                        ui,
+                                        "电脑端登录账号去重",
+                                        "电脑端已登录的微信/QQ 账号，其手机通知不再镜像；手机主应用或分身中的其他账号继续镜像。",
+                                        &mut mcfg.oppo_wechat_dedup,
+                                    );
+                                    twinkle_card_break(ui);
+                                    crate::oppo_compat::ensure_initial_detect(ctx);
+                                    let cs = crate::oppo_compat::snapshot();
+                                    let status_col = match cs.report.status {
+                                        crate::oppo_compat::CompatStatus::Adapted => Color32::from_rgb(52, 211, 153),
+                                        crate::oppo_compat::CompatStatus::SupportedUnpatched => Color32::from_rgb(96, 165, 250),
+                                        crate::oppo_compat::CompatStatus::NeedsReadaptAfterUpdate => Color32::from_rgb(251, 191, 36),
+                                        crate::oppo_compat::CompatStatus::FailedRolledBack => Color32::from_rgb(248, 113, 113),
+                                        _ => settings_color(ctx, Color32::from_gray(165), Color32::from_gray(95)),
+                                    };
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(egui::RichText::new("适配状态：").size(12.0).strong());
+                                        ui.label(egui::RichText::new(cs.report.status.label()).size(12.0).strong().color(status_col));
+                                    });
+                                    let muted = settings_color(ctx, Color32::from_gray(170), Color32::from_gray(90));
+                                    let path_str = cs
+                                        .report
+                                        .exe_path
+                                        .as_ref()
+                                        .map(|p| p.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| "未检测到安装路径".to_owned());
+                                    let ver_str = if cs.report.version.is_empty() {
+                                        "未知".to_owned()
+                                    } else {
+                                        cs.report.version.clone()
+                                    };
+                                    let sha_str = if cs.report.current_sha256.is_empty() {
+                                        "无".to_owned()
+                                    } else {
+                                        cs.report.current_sha256.clone()
+                                    };
+                                    ui.label(egui::RichText::new(format!("O+ 路径：{path_str}")).size(11.0).color(muted));
+                                    ui.label(egui::RichText::new(format!("版本：{ver_str}")).size(11.0).color(muted));
+                                    ui.label(egui::RichText::new(format!("校验哈希：{sha_str}")).size(11.0).color(muted));
+                                    if !cs.last_error.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(&cs.last_error)
+                                                .size(11.0)
+                                                .color(Color32::from_rgb(248, 113, 113)),
+                                        );
+                                    } else {
+                                        let note = if !cs.last_message.is_empty() {
+                                            cs.last_message.as_str()
+                                        } else {
+                                            cs.report.detail.as_str()
+                                        };
+                                        if !note.is_empty() {
+                                            ui.label(egui::RichText::new(note).size(11.0).color(muted));
+                                        }
+                                    }
+                                    ui.add_space(4.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui.add_enabled(!cs.busy, egui::Button::new("自动检测").small()).clicked() {
+                                            crate::oppo_compat::trigger_detect(ctx.clone());
+                                        }
+                                        if ui
+                                            .add_enabled(cs.report.can_patch && !cs.busy, egui::Button::new("一键适配").small())
+                                            .clicked()
+                                        {
+                                            crate::oppo_compat::set_confirm_patch(true);
+                                        }
+                                        if ui
+                                            .add_enabled(cs.report.can_restore && !cs.busy, egui::Button::new("恢复官方文件").small())
+                                            .clicked()
+                                        {
+                                            crate::oppo_compat::set_confirm_restore(true);
+                                        }
+                                    });
+                                    if cs.confirm_patch && !cs.busy {
+                                        ui.add_space(4.0);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("确认关闭 OPPO 互联、备份官方文件并执行分身放行适配？")
+                                                    .size(11.0)
+                                                    .color(Color32::from_rgb(251, 191, 36)),
+                                            );
+                                            if ui.small_button("确认适配").clicked() {
+                                                crate::oppo_compat::trigger_adapt(ctx.clone());
+                                            }
+                                            if ui.small_button("取消").clicked() {
+                                                crate::oppo_compat::set_confirm_patch(false);
+                                            }
+                                        });
+                                    }
+                                    if cs.confirm_restore && !cs.busy {
+                                        ui.add_space(4.0);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("确认关闭 OPPO 互联并从备份还原官方文件？")
+                                                    .size(11.0)
+                                                    .color(Color32::from_rgb(251, 191, 36)),
+                                            );
+                                            if ui.small_button("确认恢复").clicked() {
+                                                crate::oppo_compat::trigger_restore(ctx.clone());
+                                            }
+                                            if ui.small_button("取消").clicked() {
+                                                crate::oppo_compat::set_confirm_restore(false);
+                                            }
+                                        });
+                                    }
+                                });
+                            });
+                        }
 
                         if mcfg != before_m {
                             mcfg.mod_focus_health_enabled = mcfg.mod_focus_enabled || mcfg.mod_health_enabled;
@@ -5732,7 +6724,8 @@ impl App {
                                 || (!mcfg.mod_weather_enabled && before_m.mod_weather_enabled)
                                 || (!mcfg.mod_translate_enabled && before_m.mod_translate_enabled)
                                 || (!mcfg.mod_display_brightness_enabled && before_m.mod_display_brightness_enabled)
-                                || (!mcfg.mod_bt_devices_enabled && before_m.mod_bt_devices_enabled);
+                                || (!mcfg.mod_bt_devices_enabled && before_m.mod_bt_devices_enabled)
+                                || (!mcfg.mod_oppo_connect_enabled && before_m.mod_oppo_connect_enabled);
                             if !mcfg.mod_music_enabled {
                                 self.music_artwork = None;
                             }
@@ -6203,7 +7196,7 @@ impl App {
                                     .map(|p| self.page_accent_color(p))
                                     .collect();
                                 let mut mcfg_nav = crate::auralsle_ai_status::config::get();
-                                let prev_nav = (mcfg_nav.nav_bar_style, mcfg_nav.nav_badge_pos);
+                                let prev_nav = (mcfg_nav.nav_bar_style, mcfg_nav.nav_badge_pos, mcfg_nav.hide_nav_arrows);
                                 settings_control_row_right(ui, "底部页面指示条主题", |ui| {
                                     settings_segmented(
                                         ui,
@@ -6228,6 +7221,8 @@ impl App {
                                     );
                                 });
                                 settings_hint(ui, "「指示点上方」会自动拉长展开岛底部 14pt 空间，避免悬浮标签遮挡按钮；「底栏右侧留白区」保持紧凑高度并显示在右下角留白处。");
+                                twinkle_card_break(ui);
+                                setting_row(ui, "隐藏左右切页按钮", "隐藏展开岛两侧的 < / > 切页箭头，仍可通过底部指示点、滚轮或方向键切换", &mut mcfg_nav.hide_nav_arrows);
                                 twinkle_card_break(ui);
                                 let avail_w = layout_avail_w(ui).max(200.0);
                                 let acc = crate::auralsle_ai_status::plugins::active_accent_color();
@@ -6346,12 +7341,14 @@ impl App {
                                         mcfg_nav.nav_bar_style = 2;
                                     }
                                 }
-                                if (mcfg_nav.nav_bar_style, mcfg_nav.nav_badge_pos) != prev_nav {
+                                if (mcfg_nav.nav_bar_style, mcfg_nav.nav_badge_pos, mcfg_nav.hide_nav_arrows) != prev_nav {
                                     let ns = mcfg_nav.nav_bar_style;
                                     let np = mcfg_nav.nav_badge_pos;
+                                    let ha = mcfg_nav.hide_nav_arrows;
                                     crate::auralsle_ai_status::config::update(|c| {
                                         c.nav_bar_style = ns;
                                         c.nav_badge_pos = np;
+                                        c.hide_nav_arrows = ha;
                                     });
                                 }
                             });
@@ -6593,26 +7590,55 @@ impl App {
                                 self.pending.push(Cmd::ToggleAutostart);
                             }
                         }
-                        {
-                            use crate::settings_theme::SettingsTheme;
-                            let current_label = match self.settings.settings_theme {
-                                SettingsTheme::System => "跟随系统",
-                                SettingsTheme::Light => "浅色",
-                                SettingsTheme::Dark => "深色",
-                            };
-                            setting_select_card(
+                        settings_card(ui, |ui| {
+                            let mut cfg_as = crate::auralsle_ai_status::config::get();
+                            let before_mode = cfg_as.autostart_mode;
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(egui::RichText::new("自启动方式").size(13.5).strong());
+                                    ui.label(
+                                        egui::RichText::new(match cfg_as.autostart_mode {
+                                            1 => "优先自启动：随系统首批拉起并提升初始化调度优先级",
+                                            2 => "滞后自启动：登录后延迟约 20 秒启动，避开开机桌面卡顿",
+                                            _ => "正常：随系统登录常规顺序启动（默认）",
+                                        })
+                                        .size(11.5)
+                                        .color(theme::GRAY),
+                                    );
+                                });
+                            });
+                            ui.add_space(6.0);
+                            let mut mode_idx = cfg_as.autostart_mode.min(2);
+                            settings_segmented(
                                 ui,
-                                "主题",
-                                "设置窗口的明暗配色主题（跟随系统、浅色或深色），只影响设置页，不动岛体皮肤。",
-                                "settings-theme",
-                                current_label,
-                                &mut self.settings.settings_theme,
+                                &mut mode_idx,
                                 &[
-                                    (SettingsTheme::System, "跟随系统"),
-                                    (SettingsTheme::Light, "浅色"),
-                                    (SettingsTheme::Dark, "深色"),
+                                    (1u8, "优先自启动"),
+                                    (0u8, "正常"),
+                                    (2u8, "滞后自启动"),
                                 ],
+                                92.0,
                             );
+                            if mode_idx != before_mode {
+                                cfg_as.autostart_mode = mode_idx;
+                                crate::auralsle_ai_status::config::update(|c| c.autostart_mode = mode_idx);
+                                #[cfg(windows)]
+                                if autostart {
+                                    let mode = crate::tray::AutostartMode::from_u8(mode_idx);
+                                    if let Err(e) = crate::tray::set_autostart_mode(true, mode) {
+                                        self.say(e);
+                                    } else {
+                                        self.say(match mode {
+                                            crate::tray::AutostartMode::Priority => "已切换为优先自启动",
+                                            crate::tray::AutostartMode::Delayed => "已切换为滞后自启动",
+                                            crate::tray::AutostartMode::Normal => "已切换为正常自启动",
+                                        });
+                                    }
+                                }
+                            }
+                        });
+                        {
+                            draw_auralsle_appearance_cards(ui, &mut self.settings.settings_theme);
                         }
                         settings_card(ui, |ui| {
                             let before = self.settings.render_compat;
@@ -7552,18 +8578,20 @@ impl App {
                         let mut mcfg = crate::auralsle_ai_status::config::get();
                         let prev_style = mcfg.music_ui_style;
                         let prev_glance_form = mcfg.glance_music_form;
+                        if matches!(mcfg.music_ui_style, 2 | 3) {
+                            mcfg.music_ui_style = 6;
+                            crate::auralsle_ai_status::config::update(|c| c.music_ui_style = 6);
+                        }
                         let style_lbl = match mcfg.music_ui_style {
+                            6 => "Auralsle 灵屿音乐岛（推荐）",
                             5 => "灵动自适应",
                             1 => "灵动频谱",
-                            2 => "黑胶唱机",
-                            3 => "声波画布",
                             _ => "经典分栏",
                         };
                         let style_desc = match mcfg.music_ui_style {
+                            6 => "灵屿全景音乐岛：多排版平滑切换 + 封面取色模糊背板 + 荧光发光歌词 + 8 款进度条 + 10 套播控 + 布局编辑器",
                             5 => "灵动自适应：岛体宽高随歌名、歌词与三形态（横条 / 卡片 / 舞台）实时弹性伸缩",
                             1 => "eIsland 灵动频谱：左侧高清圆角专辑封面与岛词胶囊 + 右侧 14 柱旋律频谱与一体式播控坞",
-                            2 => "黑胶唱机：左侧无遮罩旋转黑胶唱片 + 右侧逐字歌词与播控面板",
-                            3 => "声波画布：全宽 28 柱旋律动态声波进度轨 + 居中高亮实时歌词",
                             _ => "经典分栏：左侧圆角专辑封面 + 右侧双栏同步滚动歌词与播控条",
                         };
                         setting_select_card(
@@ -7574,11 +8602,10 @@ impl App {
                             style_lbl,
                             &mut mcfg.music_ui_style,
                             &[
+                                (6u8, "Auralsle 灵屿音乐岛（推荐）"),
                                 (5u8, "灵动自适应"),
                                 (0u8, "经典分栏"),
                                 (1u8, "灵动频谱"),
-                                (2u8, "黑胶唱机"),
-                                (3u8, "声波画布"),
                             ],
                         );
                         if mcfg.music_ui_style == 5 {
@@ -7618,6 +8645,22 @@ impl App {
                             self.page = 0;
                             self.dots_target();
                         }
+                        let music_sec_id = egui::Id::new("auralsle_music_settings_section");
+                        let mut music_sec = ctx.data(|d| d.get_temp::<usize>(music_sec_id)).unwrap_or(0);
+                        ui.add_space(4.0);
+                        if settings_segmented(
+                            ui,
+                            &mut music_sec,
+                            &[(0usize, "样式专属设置"), (1usize, "通用与歌词设置")],
+                            140.0,
+                        ) {
+                            ctx.data_mut(|d| d.insert_temp(music_sec_id, music_sec));
+                        }
+                        ui.add_space(8.0);
+                        if music_sec == 0 {
+                        if mcfg.music_ui_style == 6 {
+                            crate::auralsle_music_editor::show_auralsle_music_settings(ui, self, &mut mcfg);
+                        } else {
                         if mcfg.music_ui_style == 0 {
                             let mut c_tint = mcfg.classic_music_cover_tint;
                             setting_row_card(
@@ -7630,7 +8673,7 @@ impl App {
                                 crate::auralsle_ai_status::config::update(|c| c.classic_music_cover_tint = c_tint);
                             }
                         }
-                        if mcfg.music_ui_style == 2 || (mcfg.music_ui_style == 5 && mcfg.glance_music_form == 2) {
+                        if mcfg.music_ui_style == 5 && mcfg.glance_music_form == 2 {
                             let mut rot_art = mcfg.music_round_art_rotate;
                             setting_row_card(
                                 ui,
@@ -7642,19 +8685,6 @@ impl App {
                                 crate::auralsle_ai_status::config::update(|c| c.music_round_art_rotate = rot_art);
                             }
                         }
-                        let mut mh_toggle = mcfg.music_auto_hide_when_idle;
-                        setting_row_card(
-                            ui,
-                            "仅在有媒体播放时显示音乐岛",
-                            "检测到系统正在播放音乐或媒体时自动展示音乐页面；无媒体播放时自动隐藏，不常驻占用页面",
-                            &mut mh_toggle,
-                        );
-                        if mh_toggle != mcfg.music_auto_hide_when_idle {
-                            crate::auralsle_ai_status::config::update(|c| {
-                                c.music_auto_hide_when_idle = mh_toggle;
-                            });
-                        }
-
                         // [需求 4] 音乐岛 UI 编辑区正下方增加音乐岛实时预览界面
                         settings_card(ui, |ui| {
                             let avail_w = layout_avail_w(ui).max(220.0);
@@ -7663,8 +8693,6 @@ impl App {
                             let live_cfg = crate::auralsle_ai_status::config::get();
                             let style_name = match live_cfg.music_ui_style {
                                 1 | 4 => "eIsland 灵动频谱",
-                                2 => "黑胶唱机",
-                                3 => "声波画布",
                                 5 => match live_cfg.glance_music_form % 3 {
                                     0 => "灵动自适应 · 紧凑歌词横条",
                                     1 => "灵动自适应 · 三行歌词卡片",
@@ -7779,21 +8807,75 @@ impl App {
                             std::mem::swap(&mut self.h.pos, &mut tmp_h);
                             std::mem::swap(&mut self.media, &mut tmp_media);
 
-                            if !cfg!(test) {
-                                ctx.request_repaint_after(std::time::Duration::from_millis(33));
+                            if !cfg!(test) && !settings_sizing_now() {
+                                ctx.request_repaint_after(std::time::Duration::from_millis(66));
                             }
                         });
 
-                        settings_label(ui,"歌词");
-                        setting_row_card(ui,"展开时显示歌词","在播放器右侧同步滚动显示歌词",&mut self.settings.lyrics_enabled);
-                        self.show_lyrics=self.settings.lyrics_enabled;
-                        setting_row_card(ui,"岛上歌词","收起时显示当前句；无同步歌词时显示封面和歌名",&mut self.settings.island_lyrics);
 
-                        settings_label(ui,"歌词显示时间");
-                        settings_card(ui,|ui|{
-                            let mut advance=-self.settings.lyric_delay_ms as f64/1000.0;
-                            if setting_number(ui,"时间偏移（正数提前，负数延后）",&mut advance,-5.0,5.0," 秒",0.1){self.settings.lyric_delay_ms=(-advance*1000.0).round()as i32;}
+                        }
+
+                        } else {
+                        // ── 通用设置（全部音乐岛 UI 样式均生效） ──
+                        settings_label(ui, "通用行为与歌词岛（全部样式生效）");
+                        let mut mh_toggle = mcfg.music_auto_hide_when_idle;
+                        setting_row_card(
+                            ui,
+                            "仅在有媒体播放时显示音乐岛",
+                            "检测到系统正在播放音乐或媒体时自动展示音乐页面；无媒体播放时自动隐藏，不常驻占用页面",
+                            &mut mh_toggle,
+                        );
+                        if mh_toggle != mcfg.music_auto_hide_when_idle {
+                            mcfg.music_auto_hide_when_idle = mh_toggle;
+                            crate::auralsle_ai_status::config::update(|c| c.music_auto_hide_when_idle = mh_toggle);
+                            self.dots_target();
+                        }
+                        settings_card(ui, |ui| {
+                            let mut p_ret = mcfg.music_pause_return_secs;
+                            if setting_number(ui, "暂停多少秒后自动切回默认页面（0 = 不切回）", &mut p_ret, 0, 3600, " 秒", 1.0) {
+                                mcfg.music_pause_return_secs = p_ret;
+                                crate::auralsle_ai_status::config::update(|c| c.music_pause_return_secs = p_ret);
+                            }
                         });
+                        let mut m_ai = mcfg.music_show_ai_status;
+                        setting_row_card(ui, "歌词岛显示 AI 工作状态", "有 AI 助手运行时，在收起态歌词岛吉祥物与专辑封面之间显示 AI 图标与状态灯", &mut m_ai);
+                        if m_ai != mcfg.music_show_ai_status {
+                            mcfg.music_show_ai_status = m_ai;
+                            crate::auralsle_ai_status::config::update(|c| c.music_show_ai_status = m_ai);
+                        }
+                        let mut ly_tc = mcfg.lyric_island_time_capsule;
+                        setting_row_card(ui, "歌词岛左侧显示时间胶囊", "在收起态歌词岛左侧独立显示与歌词岛同材质的时间胶囊", &mut ly_tc);
+                        if ly_tc != mcfg.lyric_island_time_capsule {
+                            mcfg.lyric_island_time_capsule = ly_tc;
+                            crate::auralsle_ai_status::config::update(|c| c.lyric_island_time_capsule = ly_tc);
+                        }
+                        settings_card(ui, |ui| {
+                            let mut ly_w = mcfg.lyric_island_width.clamp(200, 440) as u32;
+                            if setting_number(ui, "歌词岛长度（全部样式生效，默认 300 px）", &mut ly_w, 200, 440, " px", 10.0) {
+                                let w16 = ly_w.clamp(200, 440) as u16;
+                                mcfg.lyric_island_width = w16;
+                                crate::auralsle_ai_status::config::update(|c| c.lyric_island_width = w16);
+                            }
+                        });
+
+                        settings_label(ui, "歌词与时间偏移");
+                        setting_row_card(ui, "展开时显示歌词", "启用同步歌词抓取与展开页歌词显示", &mut self.settings.lyrics_enabled);
+                        self.show_lyrics = self.settings.lyrics_enabled;
+                        setting_row_card(ui, "岛上歌词", "收起时显示当前句；无同步歌词时显示封面和歌名", &mut self.settings.island_lyrics);
+                        settings_card(ui, |ui| {
+                            let mut advance = -self.settings.lyric_delay_ms as f64 / 1000.0;
+                            if setting_number(ui, "时间偏移（正数提前，负数延后）", &mut advance, -5.0, 5.0, " 秒", 0.1) {
+                                self.settings.lyric_delay_ms = (-advance * 1000.0).round() as i32;
+                            }
+                        });
+
+                        let live_accent = if !self.media.title.is_empty() {
+                            Some(self.extract_artwork_colors().0)
+                        } else {
+                            None
+                        };
+                        crate::auralsle_music_editor::show_music_bar_and_transport_settings(ui, &mut mcfg, live_accent);
+                        }
                     }
                     2=>{
                         settings_card(ui,|ui|{
@@ -7981,7 +9063,7 @@ impl App {
                         let master_hint=|ui:&mut egui::Ui|if !master {
                             ui.label(egui::RichText::new("提醒总开关已关闭（上方「系统提示」），打开后这里才会生效").size(12.0).color(Color32::from_rgb(230,150,40)));
                         };
-                        settings_label(ui,"新消息通知停留时长");
+                        settings_label(ui,"通知外观、悬浮球与隐私显示");
                         settings_card(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(egui::RichText::new("通知横幅停留时长").size(13.0));
@@ -7995,12 +9077,99 @@ impl App {
                                 }
                             });
                             ui.label(
-                                egui::RichText::new("统一控制 QQ、微信与新邮件在灵动岛上弹出消息预览的停留秒数（3–30 秒，默认 5 秒）。")
+                                egui::RichText::new("统一控制微信、QQ、镜像通知与系统通知在灵动岛上弹出横幅的停留秒数（3–30 秒，默认 5 秒）。")
                                     .size(12.0)
                                     .color(settings_color(ctx, Color32::from_gray(180), Color32::from_gray(75))),
                             );
+                            twinkle_card_break(ui);
+                            setting_row(
+                                ui,
+                                "未读图标显示红点",
+                                "为所有未读通知图标与悬浮球右上角显示小红点（含微信、QQ、镜像通知与系统通知）",
+                                &mut self.settings.unread_dot,
+                            );
+                            if !cfg!(test) {
+                                let mut mcfg_gen = crate::auralsle_ai_status::config::get();
+                                let before_gen = mcfg_gen.clone();
+                                twinkle_card_break(ui);
+                                setting_row(
+                                    ui,
+                                    "通知悬浮球显示数字角标",
+                                    "控制灵动岛外侧所有通知悬浮球右下角是否显示未读条数数字",
+                                    &mut mcfg_gen.show_unread_badge_count,
+                                );
+                                twinkle_card_break(ui);
+                                setting_row(
+                                    ui,
+                                    "极简药丸右侧显示等高消息悬浮球",
+                                    "收到新消息或手机镜像通知时，在极简药丸及展开岛外侧显示等高消息悬浮球",
+                                    &mut mcfg_gen.minimal_pill_msg_badge,
+                                );
+                                twinkle_card_break(ui);
+                                setting_row(
+                                    ui,
+                                    "显示通知正文",
+                                    "开启后所有通知直接显示正文；关闭时默认隐藏正文，可配合下方快捷键随时查看（屏幕共享时建议关闭）",
+                                    &mut self.settings.notification_preview,
+                                );
+                                twinkle_card_break(ui);
+                                ui.add_enabled_ui(master, |ui| {
+                                    ui.label(egui::RichText::new("快捷键显示消息正文").size(12.5).strong());
+                                    ui.label(
+                                        egui::RichText::new("对所有通知（含微信、QQ、OPPO 镜像通知与系统通知）生效：隐藏正文时按下快捷键即可显示或收起当前通知内容；下一条新通知到达时自动恢复。")
+                                            .size(11.0)
+                                            .color(settings_color(ctx, Color32::from_gray(175), Color32::from_gray(85))),
+                                    );
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(egui::RichText::new("当前快捷键：").size(11.5));
+                                        ui.add_sized(
+                                            [96.0, 24.0],
+                                            egui::TextEdit::singleline(&mut mcfg_gen.wechat_reveal_hotkey)
+                                                .hint_text("如 Alt+W"),
+                                        );
+                                        for preset in ["Alt+W", "Alt+V", "Ctrl+Shift+V", "F9", "Alt+Space"] {
+                                            let active = mcfg_gen.wechat_reveal_hotkey.trim().eq_ignore_ascii_case(preset);
+                                            if ui.selectable_label(active, egui::RichText::new(preset).size(11.0)).clicked() {
+                                                mcfg_gen.wechat_reveal_hotkey = preset.to_owned();
+                                            }
+                                        }
+                                    });
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui.small_button("发送测试通知到岛上").clicked() {
+                                            self.push_test_reveal_notification();
+                                        }
+                                        let toggle_label = if is_wechat_fingerprint_unlocked() {
+                                            "立即隐藏当前消息"
+                                        } else {
+                                            "立即显示当前消息"
+                                        };
+                                        if ui.small_button(toggle_label).clicked() {
+                                            if is_wechat_fingerprint_unlocked() {
+                                                reset_wechat_fingerprint_lock();
+                                            } else {
+                                                trigger_local_fingerprint_verify();
+                                            }
+                                        }
+                                    });
+                                });
+                                if mcfg_gen != before_gen {
+                                    crate::auralsle_ai_status::config::update(|c| {
+                                        c.show_unread_badge_count = mcfg_gen.show_unread_badge_count;
+                                        c.minimal_pill_msg_badge = mcfg_gen.minimal_pill_msg_badge;
+                                        c.wechat_reveal_hotkey = mcfg_gen.wechat_reveal_hotkey;
+                                    });
+                                }
+                            } else {
+                                twinkle_card_break(ui);
+                                setting_row(
+                                    ui,
+                                    "显示通知正文",
+                                    "开启后所有通知直接显示正文；关闭时默认隐藏正文",
+                                    &mut self.settings.notification_preview,
+                                );
+                            }
                         });
-                        settings_label(ui,"消息岛标签顺序与微信本地隐私防护");
+                        settings_label(ui,"消息岛分栏顺序");
                         if !cfg!(test) {
                             settings_card(ui, |ui| {
                                 let mut mcfg_o = crate::auralsle_ai_status::config::get();
@@ -8145,6 +9314,7 @@ impl App {
                                 }
                             });
                         }
+                        settings_label(ui,"微信消息提醒");
                         settings_card(ui,|ui|{
                             master_hint(ui);
                             ui.add_enabled_ui(master,|ui|{
@@ -8156,29 +9326,6 @@ impl App {
                                 "根据任务栏闪动提醒"
                             };
                             setting_row(ui,"微信新消息提醒",wechat_sub,&mut self.settings.wechat_notifications);
-                            twinkle_card_break(ui);
-                            setting_row(ui,"未读图标显示红点","在未读图标右上角显示小红点",&mut self.settings.unread_dot);
-                            if !cfg!(test) {
-                                twinkle_card_break(ui);
-                                let prev_num_badge = mcfg.show_unread_badge_count;
-                                setting_row(
-                                    ui,
-                                    "通知悬浮窗图标显示数字角标",
-                                    "控制灵动岛右侧通知悬浮球软件图标右下角是否显示未读条数数字（图五）",
-                                    &mut mcfg.show_unread_badge_count,
-                                );
-                                if mcfg.show_unread_badge_count != prev_num_badge {
-                                    let nb = mcfg.show_unread_badge_count;
-                                    crate::auralsle_ai_status::config::update(|c| c.show_unread_badge_count = nb);
-                                }
-                                twinkle_card_break(ui);
-                                setting_row(
-                                    ui,
-                                    "极简药丸右侧显示等高消息悬浮球",
-                                    "收到新消息时在极简药丸右侧显示等高未读图标",
-                                    &mut mcfg.minimal_pill_msg_badge,
-                                );
-                            }
                             if self.settings.wechat_notifications {
                                 twinkle_card_break(ui);
                                 setting_row(ui,"托盘一键唤起微信","点击提醒直接唤起最小化在托盘的微信窗口",&mut self.settings.wechat_tray_open);
@@ -8187,56 +9334,51 @@ impl App {
                                     setting_row(
                                         ui,
                                         "读取微信消息内容",
-                                        "在本地内存中提取最新微信消息预览，不落盘、不联网",
+                                        "在本地内存中提取最新微信消息预览，不落盘、不联网；配合上方“快捷键显示消息正文”隐藏或查看",
                                         &mut mcfg.wechat_read_content,
                                     );
-                                    if mcfg.wechat_read_content {
-                                        twinkle_card_break(ui);
-                                        ui.label(egui::RichText::new("快捷键显示消息正文").size(12.5).strong());
-                                        ui.label(
-                                            egui::RichText::new("来微信消息时默认隐藏正文，按下设定快捷键后立即显示当前这条通知的消息内容；下一条新消息到达时自动恢复隐藏。")
-                                                .size(11.0)
-                                                .color(settings_color(ctx, Color32::from_gray(175), Color32::from_gray(85))),
-                                        );
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.label(egui::RichText::new("当前快捷键：").size(11.5));
-                                            ui.add_sized(
-                                                [96.0, 24.0],
-                                                egui::TextEdit::singleline(&mut mcfg.wechat_reveal_hotkey)
-                                                    .hint_text("如 Alt+W"),
-                                            );
-                                            for preset in ["Alt+W", "Alt+V", "Ctrl+Shift+V", "F9", "Alt+Space"] {
-                                                let active = mcfg.wechat_reveal_hotkey.trim().eq_ignore_ascii_case(preset);
-                                                if ui.selectable_label(active, egui::RichText::new(preset).size(11.0)).clicked() {
-                                                    mcfg.wechat_reveal_hotkey = preset.to_owned();
-                                                }
-                                            }
-                                        });
-                                        ui.horizontal_wrapped(|ui| {
-                                            if ui.small_button("发送测试微信消息到岛上").clicked() {
-                                                store_local_wechat_sender_and_msg("微信测试", &format!("测试消息 ({}) · 按快捷键可查看当前通知内容", chrono::Local::now().format("%H:%M:%S")));
-                                                self.receive_wechat_reminder_from(0, 0);
-                                            }
-                                            if ui.small_button("立即显示当前消息").clicked() {
-                                                trigger_local_fingerprint_verify();
-                                            }
-                                        });
-                                    }
-                                    twinkle_card_break(ui);
-                                    setting_row(
-                                        ui,
-                                        "自动识别「OPPO 互联」通知并与电脑微信 / QQ 去重",
-                                        "收到 OPPO 互联转发的手机通知时按原生图标并附带互联微标区分展示；检测到电脑微信或 QQ 已登录时自动不展示对应手机转发通知",
-                                        &mut mcfg.oppo_wechat_dedup,
-                                    );
-                                    if mcfg != before_w {
-                                        crate::auralsle_ai_status::config::update(|c| *c = mcfg);
-                                    }
                                 }
                             }
-                            if master && !self.messenger_status(crate::app::Messenger::Wechat).is_empty(){ui.label(egui::RichText::new(self.messenger_status(crate::app::Messenger::Wechat)).size(12.0));}
+                            if mcfg != before_w {
+                                crate::auralsle_ai_status::config::update(|c| c.wechat_read_content = mcfg.wechat_read_content);
+                            }
+                            if master && !self.messenger_status(crate::app::Messenger::Wechat).is_empty(){
+                                twinkle_card_break(ui);
+                                ui.label(egui::RichText::new(self.messenger_status(crate::app::Messenger::Wechat)).size(12.0));
+                            }
                             });
                         });
+                        if !cfg!(test) {
+                            settings_label(ui, "OPPO 互联适配");
+                            settings_card(ui, |ui| {
+                                crate::oppo_compat::ensure_initial_detect(ctx);
+                                let cs = crate::oppo_compat::snapshot();
+                                let mcfg_o = crate::auralsle_ai_status::config::get();
+                                let status_col = match cs.report.status {
+                                    crate::oppo_compat::CompatStatus::Adapted => Color32::from_rgb(52, 211, 153),
+                                    crate::oppo_compat::CompatStatus::SupportedUnpatched => Color32::from_rgb(96, 165, 250),
+                                    crate::oppo_compat::CompatStatus::NeedsReadaptAfterUpdate => Color32::from_rgb(251, 191, 36),
+                                    crate::oppo_compat::CompatStatus::FailedRolledBack => Color32::from_rgb(248, 113, 113),
+                                    _ => settings_color(ctx, Color32::from_gray(165), Color32::from_gray(95)),
+                                };
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(egui::RichText::new("适配状态：").size(12.5).strong());
+                                    ui.label(egui::RichText::new(cs.report.status.label()).size(12.5).strong().color(status_col));
+                                });
+                                let state_summary = format!(
+                                    "模块总开关：{} · 手机通知镜像：{} · 拖拽互传悬浮球：{}",
+                                    if mcfg_o.mod_oppo_connect_enabled { "已开启" } else { "已关闭" },
+                                    if mcfg_o.mod_oppo_connect_enabled && mcfg_o.oppo_notify_mirror_enabled { "开启" } else { "关闭" },
+                                    if mcfg_o.mod_oppo_connect_enabled && mcfg_o.oppo_drag_transfer_enabled { "开启" } else { "关闭" },
+                                );
+                                settings_hint(ui, &state_summary);
+                                settings_hint(ui, "OPPO 互联的分身适配、手机通知镜像、原生通知静默、账号去重与文件拖拽互传均已统一收口至「功能模块 → OPPO 互联适配」。");
+                                ui.add_space(4.0);
+                                if twinkle_button(ui, "前往功能模块管理 OPPO 互联适配", true).clicked() {
+                                    self.settings_tab = 21;
+                                }
+                            });
+                        }
                         settings_label(ui,"办公软件提醒");
                         settings_card(ui,|ui|{
                             master_hint(ui);
@@ -8265,8 +9407,17 @@ impl App {
                             }
                             ui.label(egui::RichText::new("QQ 需开启系统通知；新通知统一沿用上方设置的停留时长（默认 5 秒），默认隐藏正文。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             twinkle_card_break(ui);
-                            setting_row(ui,"显示通知正文","可能包含私密消息；屏幕共享时建议关闭",&mut self.settings.notification_preview);
-                            ui.label(egui::RichText::new("只接收 Windows 通知中心可见的内容；应用会在收到通知后出现在下方。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                            {
+                                let mut otp_on = crate::auralsle_ai_status::config::get().auralsle_otp_capsule;
+                                setting_row(ui,"验证码浮窗胶囊（一键复制）","收到通知、邮件或微信验证码时直接弹出 灵屿大字胶囊并配「复制」按钮即刻复制",&mut otp_on);
+                                if otp_on != crate::auralsle_ai_status::config::get().auralsle_otp_capsule {
+                                    crate::auralsle_ai_status::config::update(|c| c.auralsle_otp_capsule = otp_on);
+                                }
+                                if ui.small_button("预览验证码浮窗胶囊").clicked() {
+                                    self.push_verification_code("短信验证码".to_owned(), "482913".to_owned());
+                                }
+                            }
+                            ui.label(egui::RichText::new("通知正文显示与快捷键隐私已收口至上方“通知外观、悬浮球与隐私显示”；应用会在收到通知后出现在下方。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             let before_apps=self.notification_apps.items.clone();
                             for (_,name,enabled) in &mut self.notification_apps.items {setting_row(ui,name,"",enabled);}
                             if before_apps!=self.notification_apps.items{self.notification_apps.save();}
@@ -8919,10 +10070,29 @@ unsafe extern "system" fn settings_subclass_proc(
     const WM_NCHITTEST: u32 = 0x0084;
     const WM_NCPAINT: u32 = 0x0085;
     const WM_NCACTIVATE: u32 = 0x0086;
+    const WM_SETTEXT: u32 = 0x000C;
+    const WM_SETICON_MSG: u32 = 0x0080;
     const WM_SIZING: u32 = 0x0214;
     const WM_ENTERSIZEMOVE: u32 = 0x0231;
     const WM_EXITSIZEMOVE: u32 = 0x0232;
+    const WM_DWMCOMPOSITIONCHANGED: u32 = 0x031E;
     const GWL_STYLE_I32: i32 = -16;
+
+    #[repr(C)]
+    struct DwmMargins {
+        cx_left: i32,
+        cx_right: i32,
+        cy_top: i32,
+        cy_bottom: i32,
+    }
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmExtendFrameIntoClientArea(hwnd: isize, p_mar_inset: *const DwmMargins) -> i32;
+    }
+    let extend_dwm_frame = |hwnd: windows::Win32::Foundation::HWND| {
+        let m = DwmMargins { cx_left: 0, cx_right: 0, cy_top: 1, cy_bottom: 0 };
+        unsafe { let _ = DwmExtendFrameIntoClientArea(hwnd.0 as isize, &m); }
+    };
 
     const HTCLIENT: isize = 1;
     const HTCAPTION: isize = 2;
@@ -9083,9 +10253,25 @@ unsafe extern "system" fn settings_subclass_proc(
             mmi.ptMinTrackSize.y = min_h;
             return res;
         }
+        WM_DWMCOMPOSITIONCHANGED => {
+            extend_dwm_frame(hwnd);
+            return LRESULT(0);
+        }
+        WM_SETTEXT | WM_SETICON_MSG => {
+            // 阻止 DefWindowProc 在设置标题/图标时重绘 Win32 经典浅蓝标题栏
+            let cur_s = unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, windows::Win32::UI::WindowsAndMessaging::GWL_STYLE) };
+            let ws_vis = 0x10000000isize;
+            if (cur_s & ws_vis) != 0 {
+                unsafe { windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, windows::Win32::UI::WindowsAndMessaging::GWL_STYLE, cur_s & !ws_vis) };
+                let res = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                unsafe { windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, windows::Win32::UI::WindowsAndMessaging::GWL_STYLE, cur_s) };
+                return res;
+            }
+        }
         WM_NCPAINT => return LRESULT(0),
         WM_NCACTIVATE => {
             if unsafe { IsIconic(hwnd) } == BOOL(0) {
+                extend_dwm_frame(hwnd);
                 return LRESULT(1);
             }
         }
@@ -9162,6 +10348,52 @@ unsafe extern "system" fn settings_subclass_proc(
 }
 
 /// [第 10/11 批 · 图七 圆角 + 图八 去闪框 + Win11 任务栏最小化]
+fn bring_settings_window_to_front() {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            AllowSetForegroundWindow, BringWindowToTop, IsIconic, IsWindow, SetForegroundWindow,
+            SetWindowPos, ShowWindow, ASFW_ANY, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE,
+            SWP_NOSIZE, SWP_SHOWWINDOW, SW_RESTORE, SW_SHOW,
+        };
+        let raw = SETTINGS_ACTIVE_HWND.load(std::sync::atomic::Ordering::Acquire);
+        if raw != 0 {
+            let hwnd = HWND(raw as *mut core::ffi::c_void);
+            unsafe {
+                if IsWindow(hwnd).as_bool() {
+                    let _ = AllowSetForegroundWindow(ASFW_ANY);
+                    if IsIconic(hwnd).as_bool() {
+                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                    } else {
+                        let _ = ShowWindow(hwnd, SW_SHOW);
+                    }
+                    let _ = BringWindowToTop(hwnd);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        HWND_TOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                    );
+                    let _ = SetWindowPos(
+                        hwnd,
+                        HWND_NOTOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                    );
+                    let _ = SetForegroundWindow(hwnd);
+                }
+            }
+        }
+    }
+}
+
 fn apply_settings_round_corners(ctx: &egui::Context, dark: bool) {
     if cfg!(test) {
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("auralsle_settings_hwnd_ready"), true));
@@ -9327,6 +10559,19 @@ fn round_settings_hwnd(ppp: f32, maximized: bool, dark: bool) -> bool {
                     4,
                 )
             };
+            #[repr(C)]
+            struct InitMargins {
+                cx_left: i32,
+                cx_right: i32,
+                cy_top: i32,
+                cy_bottom: i32,
+            }
+            #[link(name = "dwmapi")]
+            extern "system" {
+                fn DwmExtendFrameIntoClientArea(hwnd: isize, p_mar_inset: *const InitMargins) -> i32;
+            }
+            let init_m = InitMargins { cx_left: 0, cx_right: 0, cy_top: 1, cy_bottom: 0 };
+            unsafe { let _ = DwmExtendFrameIntoClientArea(hwnd.0 as isize, &init_m); }
 
             // 3) 保留 WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU（由 WM_NCCALCSIZE 拦截消除原生标题栏），
             //    使 Windows 11 DWM 完整接管最小化、还原、最大化动画与原生圆角阴影
@@ -9834,6 +11079,157 @@ mod settings_narrow_layout_tests {
             assert!(cell > 0.0);
             assert!(cols as f32 * cell + 6.0 * (cols as f32 - 1.0) <= avail + 0.01, "avail={avail}: 网格总宽不得超过可用宽度");
         }
+    }
+}
+
+#[cfg(test)]
+mod notification_icon_fallback_tests {
+    use super::{draw_notif_app_icon, fallback_badge_info};
+    use eframe::egui::{self, Color32};
+
+    #[test]
+    fn fallback_badges_cover_wechat_qq_oppo_exclusion_and_render_without_cache() {
+        assert_eq!(
+            fallback_badge_info("com.tencent.mm", "微信", "消息", Color32::BLUE).as_ref().map(|x| x.0.as_str()),
+            Some("微")
+        );
+        assert_eq!(
+            fallback_badge_info("com.tencent.mobileqq", "QQ", "消息", Color32::BLUE).as_ref().map(|x| x.0.as_str()),
+            Some("Q")
+        );
+        assert_eq!(
+            fallback_badge_info("com.oplus.devicespace", "OPPO 互联", "连接", Color32::BLUE),
+            None
+        );
+        assert_eq!(
+            fallback_badge_info("com.twitter.android", "X", "hello", Color32::BLUE).as_ref().map(|x| x.0.as_str()),
+            Some("X")
+        );
+
+        let ctx = egui::Context::default();
+        crate::theme::load_fonts(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let r = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(28.0, 28.0));
+                draw_notif_app_icon(ui, r, "auralsle.self", "灵屿 AuraIsle", "系统提醒", Color32::from_rgb(59, 130, 246));
+                draw_notif_app_icon(ui, r.translate(egui::vec2(32.0, 0.0)), "com.tencent.mm", "微信", "新消息", Color32::from_rgb(59, 130, 246));
+                draw_notif_app_icon(ui, r.translate(egui::vec2(64.0, 0.0)), "com.tencent.mobileqq", "QQ", "新消息", Color32::from_rgb(59, 130, 246));
+                draw_notif_app_icon(ui, r.translate(egui::vec2(96.0, 0.0)), "com.oplus.devicespace", "OPPO 互联", "状态", Color32::from_rgb(59, 130, 246));
+                draw_notif_app_icon(ui, r.translate(egui::vec2(128.0, 0.0)), "com.example.note", "便签", "待办", Color32::from_rgb(59, 130, 246));
+            });
+        });
+    }
+}
+
+#[cfg(test)]
+mod universal_reveal_and_oppo_orb_tests {
+    use super::{App, Alert, AlertSource};
+    use crate::app::{Messenger, Options, Unread};
+    use eframe::egui;
+
+    #[test]
+    fn universal_reveal_applies_to_all_notifications_hidden_or_shown() {
+        let (hidden_txt, shown1) = App::compute_notice_reveal_state(true, false, "F9", "抖音私信：今晚一起吃饭");
+        assert!(!shown1);
+        assert!(hidden_txt.contains("[F9]"));
+
+        let (rev_txt, shown2) = App::compute_notice_reveal_state(true, true, "F9", "抖音私信：今晚一起吃饭");
+        assert!(shown2);
+        assert_eq!(rev_txt, "抖音私信：今晚一起吃饭");
+
+        // 开启 notification_preview=true 时默认展示，按下快捷键可收起，再按恢复
+        let (vis_txt, shown3) = App::compute_notice_reveal_state(false, false, "Alt+W", "QQ：文件已发你");
+        assert!(shown3);
+        assert_eq!(vis_txt, "QQ：文件已发你");
+
+        let (fold_txt, shown4) = App::compute_notice_reveal_state(false, true, "Alt+W", "QQ：文件已发你");
+        assert!(!shown4);
+        assert!(fold_txt.contains("[Alt+W]"));
+    }
+
+    #[test]
+    fn mirrored_orb_dismiss_removes_orb_and_never_switches_page() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
+        app.page = 0;
+        app.mark_oppo_messenger(Messenger::Wechat);
+        app.mark_oppo_messenger(Messenger::Wechat);
+        assert_eq!(app.oppo_messenger_counts.get(&Messenger::Wechat).copied(), Some(2));
+        let u = Unread { source: Messenger::Wechat, pid: 0, window: 0 };
+        app.pending_messengers.push(u);
+
+        app.upsert_oppo_orb("com.ss.android.ugc.aweme".into(), "抖音".into(), "抖音·张三".into(), None);
+        app.upsert_oppo_orb("com.ss.android.ugc.aweme".into(), "抖音".into(), "抖音·张三".into(), None);
+        assert_eq!(app.pending_oppo_orbs[0].count, 2);
+
+        app.notice = Some(Alert {
+            title: "抖音·张三".into(),
+            source: AlertSource::External("oppo-mirror:com.ss.android.ugc.aweme".into()),
+            body: "收到新消息 · 内容已隐藏".into(),
+            full_body: Some("赞了你的作品".into()),
+            page: usize::MAX,
+            at: app.t,
+            duration: 5.0,
+            bluetooth: None,
+            meeting: None,
+            unread: None,
+            oppo_badge: true,
+            verification_code: None,
+            verification_copied: false,
+            icon_png: None,
+            dedupe_key: None,
+        });
+
+        app.dismiss_oppo_orb("com.ss.android.ugc.aweme");
+        assert!(app.pending_oppo_orbs.is_empty());
+        assert!(app.notice.is_none());
+        assert_eq!(app.page, 0, "点击第三方镜像悬浮球不应跳转到通知岛 page 5");
+
+        app.dismiss_mirrored_messenger_orb(u);
+        assert!(app.pending_messengers.is_empty());
+        assert!(!app.has_oppo_messenger(Messenger::Wechat));
+        assert_eq!(app.oppo_messenger_counts.get(&Messenger::Wechat), None);
+        assert_eq!(app.page, 0, "点击镜像微信/QQ悬浮球不应跳转到通知岛 page 5");
+    }
+
+    #[test]
+    fn banner_title_keeps_app_name_only_and_message_island_distinguishes_clones() {
+        assert_eq!(App::banner_app_name("微信 · 27°"), "微信");
+        assert_eq!(App::banner_app_name("QQ · 张三"), "QQ");
+        assert_eq!(App::banner_app_name("抖音 · 刘子妍"), "抖音");
+        assert_eq!(App::banner_app_name("微信"), "微信");
+
+        let main_wx = crate::model::NotificationRecord {
+            app_id: "oppo-mirror:com.tencent.mm".into(),
+            app_name: "微信".into(),
+            title: "27°".into(),
+            body: "晚上好".into(),
+            at: 100,
+        };
+        let clone_wx = crate::model::NotificationRecord {
+            app_id: "oppo-mirror:com.tencent.mm#u999".into(),
+            app_name: "微信分身".into(),
+            title: "工作号".into(),
+            body: "收到分身消息".into(),
+            at: 101,
+        };
+        let clone_qq = crate::model::NotificationRecord {
+            app_id: "oppo-mirror:com.tencent.mobileqq#u999".into(),
+            app_name: "QQ分身".into(),
+            title: "副号好友".into(),
+            body: "测试QQ分身".into(),
+            at: 102,
+        };
+
+        assert!(!crate::pages::is_clone_notification_record(&main_wx));
+        assert_eq!(crate::pages::notification_record_slot_tag(&main_wx), Some(("主应用", false)));
+
+        assert!(crate::pages::is_clone_notification_record(&clone_wx));
+        assert_eq!(crate::pages::notification_record_slot_tag(&clone_wx), Some(("分身", true)));
+
+        assert!(crate::pages::is_clone_notification_record(&clone_qq));
+        assert!(crate::pages::is_strict_qq_chat_record(&clone_qq));
+        assert_eq!(crate::pages::notification_record_slot_tag(&clone_qq), Some(("分身", true)));
     }
 }
 

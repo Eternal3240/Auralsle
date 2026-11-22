@@ -70,6 +70,7 @@ fn write_negative(path:&std::path::Path,plain:Option<&Lyrics>) {
 pub struct LyricsLine {
     pub t: f32,
     pub text: String,
+    pub translation: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -139,12 +140,47 @@ pub fn parse_lrc(raw: &str) -> Lyrics {
             continue;
         }
         for t in times {
-            lines.push(LyricsLine { t, text: body.to_string() });
+            lines.push(LyricsLine { t, text: body.to_string(), translation: None });
         }
     }
     lines.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
     let synced = !lines.is_empty();
     Lyrics { lines, synced }
+}
+
+/// 将双语翻译 LRC 按时间戳（0.45 秒容差）挂载到主歌词各行，跳过署名与空行。
+fn attach_translation(lyrics: &mut Lyrics, raw_trans: &str) {
+    if raw_trans.trim().is_empty() || lyrics.lines.is_empty() || raw_trans.len() > MAX_TEXT {
+        return;
+    }
+    let trans = parse_lrc(raw_trans);
+    if !trans.synced {
+        return;
+    }
+    for tl in &trans.lines {
+        let trimmed = tl.text.trim();
+        if trimmed.is_empty() || is_credit(trimmed) {
+            continue;
+        }
+        let mut best_idx = None;
+        let mut best_diff = 0.45f32;
+        for (idx, line) in lyrics.lines.iter().enumerate() {
+            if line.text.trim().is_empty() {
+                continue;
+            }
+            let diff = (line.t - tl.t).abs();
+            if diff <= best_diff {
+                best_diff = diff;
+                best_idx = Some(idx);
+            }
+        }
+        if let Some(idx) = best_idx {
+            let clean = trimmed.to_owned();
+            if lyrics.lines[idx].text.trim() != clean && lyrics.lines[idx].translation.is_none() {
+                lyrics.lines[idx].translation = Some(clean);
+            }
+        }
+    }
 }
 
 #[test]
@@ -160,7 +196,7 @@ pub fn from_plain(raw: &str) -> Lyrics {
     let lines: Vec<LyricsLine> = raw
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| LyricsLine { t: 0.0, text: l.trim().to_string() })
+        .map(|l| LyricsLine { t: 0.0, text: l.trim().to_string(), translation: None })
         .collect();
     Lyrics { lines, synced: false }
 }
@@ -323,10 +359,10 @@ fn parse_krc(raw:&str)->Lyrics {
     timed.sort_by_key(|line|line.0);
     let mut lines=Vec::new();
     for (i,(start,end,text)) in timed.iter().enumerate() {
-        lines.push(LyricsLine{t:*start as f32/1000.0,text:text.clone()});
+        lines.push(LyricsLine{t:*start as f32/1000.0,text:text.clone(),translation:None});
         // 短暂换气保留上一句，只在至少 3 秒的间奏或尾奏清空歌词。
         if end>start && timed.get(i+1).is_none_or(|next|next.0.saturating_sub(*end)>=3000) {
-            lines.push(LyricsLine{t:*end as f32/1000.0,text:String::new()});
+            lines.push(LyricsLine{t:*end as f32/1000.0,text:String::new(),translation:None});
         }
     }
     Lyrics{synced:lines.iter().any(|line|!line.text.is_empty()),lines}
@@ -429,14 +465,31 @@ fn read_cache(path:&std::path::Path)->Option<Lyrics> {
     let file=std::fs::File::open(path).ok()?;
     if file.metadata().ok()?.len()>MAX_TEXT as u64{rejected_lyrics();return None;}
     let mut raw=String::new();file.take(MAX_TEXT as u64+1).read_to_string(&mut raw).ok()?;
-    let lyrics=parse_lrc(&raw);
-    (lyrics.synced && lyrics.lines.iter().any(|l|!l.text.is_empty())).then_some(lyrics)
+    let mut lyrics=parse_lrc(&raw);
+    if !(lyrics.synced && lyrics.lines.iter().any(|l|!l.text.is_empty())) {
+        return None;
+    }
+    let trans_path=path.with_extension("tlrc");
+    if let Ok(tfile)=std::fs::File::open(&trans_path) {
+        if tfile.metadata().is_ok_and(|m| m.len() <= MAX_TEXT as u64) {
+            let mut traw=String::new();
+            if tfile.take(MAX_TEXT as u64).read_to_string(&mut traw).is_ok() {
+                attach_translation(&mut lyrics, &traw);
+            }
+        }
+    }
+    Some(lyrics)
 }
 
 fn write_cache(path:&std::path::Path,lyrics:&Lyrics) {
     if let Some(parent)=path.parent(){if std::fs::create_dir_all(parent).is_err(){return;}}
     let raw=lyrics.lines.iter().map(|line|format!("[{:02}:{:06.3}]{}\n",(line.t/60.0) as u32,line.t%60.0,line.text)).collect::<String>();
     let _=crate::model::atomic_write(path,raw.as_bytes());
+    let has_trans=lyrics.lines.iter().any(|l|l.translation.as_ref().is_some_and(|t|!t.trim().is_empty()));
+    if has_trans {
+        let traw=lyrics.lines.iter().filter_map(|line| line.translation.as_ref().map(|tr| format!("[{:02}:{:06.3}]{}\n",(line.t/60.0) as u32,line.t%60.0,tr))).collect::<String>();
+        let _=crate::model::atomic_write(&path.with_extension("tlrc"),traw.as_bytes());
+    }
 }
 
 #[cfg(test)]
@@ -628,7 +681,11 @@ fn fetch_netease_song(base:&str,id:u64)->Result<Lyrics,FetchError>{
     if result.get("code").and_then(|v|v.as_i64())!=Some(200){return Err(FetchError::Unavailable("网易云取词未成功".into()));}
     if result.get("nolyric").and_then(|v|v.as_bool())==Some(true) || result.get("uncollected").and_then(|v|v.as_bool())==Some(true){return Err(FetchError::NotFound);}
     let raw=result.pointer("/lrc/lyric").and_then(|v|v.as_str()).filter(|s|!s.trim().is_empty()).ok_or(FetchError::NotFound)?;
-    Ok(lyrics_from_text(raw))
+    let mut lyrics=lyrics_from_text(raw);
+    if let Some(tlyric)=result.pointer("/tlyric/lyric").and_then(|v|v.as_str()).filter(|s|!s.trim().is_empty()) {
+        attach_translation(&mut lyrics, tlyric);
+    }
+    Ok(lyrics)
 }
 
 fn is_credit(text:&str)->bool {
@@ -679,7 +736,10 @@ fn fetch_qqmusic(base:&str,track:&str,artist:&str,duration:f64)->Result<Lyrics,F
         };
         if result["code"].as_i64()!=Some(0){failure=FetchError::Unavailable("QQ 音乐取词未成功".into());continue;}
         if let Some(raw)=result["lyric"].as_str().filter(|raw|!raw.trim().is_empty()) {
-            let lyrics=lyrics_from_text(raw);
+            let mut lyrics=lyrics_from_text(raw);
+            if let Some(trans)=result["trans"].as_str().filter(|s|!s.trim().is_empty()) {
+                attach_translation(&mut lyrics, trans);
+            }
             if lyrics.synced{return Ok(lyrics);}
             if plain.is_none(){plain=Some(lyrics);}
         }

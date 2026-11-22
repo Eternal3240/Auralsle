@@ -293,6 +293,15 @@ unsafe extern "system" fn subclass(
         let _=enable_alpha_composition(hwnd);
         return result;
     }
+    if msg == WM_ENDSESSION && wp.0 != 0 {
+        crate::resources::allow_root_exit();
+        return DefSubclassProc(hwnd, msg, wp, lp);
+    }
+    if (msg == WM_CLOSE || (msg == WM_SYSCOMMAND && (wp.0 & 0xFFF0) == SC_CLOSE as usize))
+        && !crate::resources::is_root_exit_allowed()
+    {
+        return LRESULT(0);
+    }
     // 保留框架的焦点通知；lParam=-1 禁止系统在激活时重画透明窗口的顶边。
     if msg==WM_NCACTIVATE {return DefSubclassProc(hwnd,msg,wp,LPARAM(-1));}
     if msg==WM_NCPAINT {return LRESULT(0);}

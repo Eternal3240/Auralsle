@@ -293,6 +293,7 @@ fn show_menu_at(hwnd: HWND, ctx: &Ctx, x: i32, y: i32) {
             CMD_SETTINGS => {let _=ctx.tx.send(Event::OpenSettings);}
             CMD_ABOUT => about(),
             CMD_EXIT => {
+                crate::resources::allow_root_exit();
                 (ctx.before_exit)();
                 remove_icon(hwnd);
                 ExitProcess(0);
@@ -369,6 +370,7 @@ pub struct Tray {
 impl Tray {
     /// 与托盘菜单「退出」相同：先摘图标再结束进程（用于「立即重启」）。
     pub fn exit_process(&self) -> ! {
+        crate::resources::allow_root_exit();
         unsafe { remove_icon(self.hwnd); ExitProcess(0); }
     }
 }
@@ -533,6 +535,113 @@ pub fn single_instance() -> bool {
     }
 }
 
+/// 仅探测当前是否已有运行中的单实例，不创建新互斥体（供滞后自启动等待期间避让手动启动）。
+pub fn existing_instance_running() -> bool {
+    use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_ACCESS_RIGHTS};
+    const MUTEX_SYNCHRONIZE: SYNCHRONIZATION_ACCESS_RIGHTS = SYNCHRONIZATION_ACCESS_RIGHTS(0x0010_0000);
+    unsafe {
+        for name in [MUTEX_NAME, LEGACY_MUTEX_NAME] {
+            if let Ok(handle) = OpenMutexW(MUTEX_SYNCHRONIZE, false, name) {
+                let _ = CloseHandle(handle);
+                return true;
+            }
+        }
+        false
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AutostartMode {
+    #[default]
+    Normal = 0,
+    Priority = 1,
+    Delayed = 2,
+}
+
+impl AutostartMode {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Priority,
+            2 => Self::Delayed,
+            _ => Self::Normal,
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub fn cli_arg(self) -> Option<&'static str> {
+        match self {
+            Self::Normal => None,
+            Self::Priority => Some("--autostart-priority"),
+            Self::Delayed => Some("--autostart-delay"),
+        }
+    }
+
+    pub fn from_command(cmd: &str) -> Self {
+        if cmd.contains("--autostart-priority") {
+            Self::Priority
+        } else if cmd.contains("--autostart-delay") {
+            Self::Delayed
+        } else {
+            Self::Normal
+        }
+    }
+}
+
+pub fn build_autostart_command(exe: &std::path::Path, mode: AutostartMode) -> String {
+    match mode.cli_arg() {
+        Some(arg) => format!("\"{}\" {}", exe.display(), arg),
+        None => format!("\"{}\"", exe.display()),
+    }
+}
+
+fn read_run_value_string(key: HKEY, name: PCWSTR) -> Option<String> {
+    unsafe {
+        let mut size = 0u32;
+        let rc = RegQueryValueExW(key, name, None, None, None, Some(&mut size));
+        if rc.0 != 0 || size < 2 {
+            return None;
+        }
+        let mut buf = vec![0u16; (size as usize).div_ceil(2)];
+        let mut bytes_len = (buf.len() * 2) as u32;
+        let rc = RegQueryValueExW(
+            key,
+            name,
+            None,
+            None,
+            Some(buf.as_mut_ptr() as *mut u8),
+            Some(&mut bytes_len),
+        );
+        if rc.0 != 0 {
+            return None;
+        }
+        let words = (bytes_len as usize) / 2;
+        let slice = &buf[..words.min(buf.len())];
+        let trimmed = match slice.iter().position(|&c| c == 0) {
+            Some(end) => &slice[..end],
+            None => slice,
+        };
+        Some(String::from_utf16_lossy(trimmed))
+    }
+}
+
+pub fn autostart_mode() -> AutostartMode {
+    unsafe {
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_QUERY_VALUE, &mut key).0 == 0 {
+            let cmd = read_run_value_string(key, RUN_VALUE)
+                .or_else(|| read_run_value_string(key, LEGACY_RUN_VALUE));
+            let _ = RegCloseKey(key);
+            if let Some(cmd) = cmd {
+                return AutostartMode::from_command(&cmd);
+            }
+        }
+    }
+    AutostartMode::from_u8(crate::auralsle_ai_status::config::get().autostart_mode)
+}
+
 fn run_key() -> Option<HKEY> {
     unsafe {
         let mut key = HKEY::default();
@@ -569,10 +678,19 @@ pub fn autostart_enabled() -> bool {
 }
 
 pub fn set_autostart(on: bool) -> Result<(), String> {
+    let mode = if cfg!(test) {
+        AutostartMode::Normal
+    } else {
+        AutostartMode::from_u8(crate::auralsle_ai_status::config::get().autostart_mode)
+    };
+    set_autostart_mode(on, mode)
+}
+
+pub fn set_autostart_mode(on: bool, mode: AutostartMode) -> Result<(), String> {
     unsafe {
         if on {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let value = format!("\"{}\"", exe.display());
+            let value = build_autostart_command(&exe, mode);
             let utf16 = wide(&value);
             let bytes = std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * 2);
             let key = run_key().ok_or_else(|| "打不开 HKCU\\Run".to_string())?;
@@ -653,27 +771,74 @@ mod tests {
             [1, 2, 3, 4, 5]
         );
     }
+
+    #[test]
+    fn autostart_mode_roundtrips_command_arguments() {
+        let exe = std::path::Path::new(r"D:\AMicSoftEXE\AuraIsle\AuraIsle.exe");
+        let normal = build_autostart_command(exe, AutostartMode::Normal);
+        let priority = build_autostart_command(exe, AutostartMode::Priority);
+        let delayed = build_autostart_command(exe, AutostartMode::Delayed);
+
+        assert_eq!(normal, "\"D:\\AMicSoftEXE\\AuraIsle\\AuraIsle.exe\"");
+        assert_eq!(priority, "\"D:\\AMicSoftEXE\\AuraIsle\\AuraIsle.exe\" --autostart-priority");
+        assert_eq!(delayed, "\"D:\\AMicSoftEXE\\AuraIsle\\AuraIsle.exe\" --autostart-delay");
+
+        assert_eq!(AutostartMode::from_command(&normal), AutostartMode::Normal);
+        assert_eq!(AutostartMode::from_command(&priority), AutostartMode::Priority);
+        assert_eq!(AutostartMode::from_command(&delayed), AutostartMode::Delayed);
+    }
 }
 
 /// 重复启动时请求现有实例打开窗口，限制等待时间以免跟随挂起。
 fn request_existing_window(hwnd:HWND,calendar:bool)->bool {unsafe{
     if hwnd.0.is_null(){return false;}
     let mut reply=0usize;
-    SendMessageTimeoutW(hwnd,if calendar{WM_APP+5}else{WM_APP+4},WPARAM(0),LPARAM(0),
-        SMTO_ABORTIFHUNG|SMTO_ERRORONEXIT,1500,Some(&mut reply)).0!=0 && reply==1
+    let msg = if calendar{WM_APP+5}else{WM_APP+4};
+    if SendMessageTimeoutW(hwnd,msg,WPARAM(0),LPARAM(0),
+        SMTO_ABORTIFHUNG|SMTO_ERRORONEXIT,1500,Some(&mut reply)).0!=0 && reply==1 {
+        return true;
+    }
+    false
 }}
 
+unsafe extern "system" fn collect_tray_windows(hwnd: HWND, lparam: LPARAM) -> windows::Win32::Foundation::BOOL {
+    let mut cls = [0u16; 64];
+    let len = GetClassNameW(hwnd, &mut cls);
+    if len > 0 && String::from_utf16_lossy(&cls[..len as usize]) == "AuralsleTray" {
+        let out = &mut *(lparam.0 as *mut Vec<HWND>);
+        out.push(hwnd);
+    }
+    windows::Win32::Foundation::BOOL(1)
+}
+
 pub fn activate_existing(calendar:bool)->bool {unsafe{
-    let Ok(tray)=FindWindowW(w!("AuralsleTray"),PCWSTR::null()) else{return false;};
-    let Ok(window)=FindWindowW(PCWSTR::null(),w!("灵屿 AuraIsle")).or_else(|_| FindWindowW(PCWSTR::null(),w!("岛仔"))) else{return false;};
-    let(mut tray_pid,mut window_pid)=(0,0);
-    GetWindowThreadProcessId(tray,Some(&mut tray_pid));
-    GetWindowThreadProcessId(window,Some(&mut window_pid));
-    if tray_pid==0 || tray_pid!=window_pid{return false;}
-    // 托盘有独立线程，能接收消息不代表界面线程仍可响应。
-    if SendMessageTimeoutW(window,WM_NULL,WPARAM(0),LPARAM(0),
-        SMTO_ABORTIFHUNG|SMTO_ERRORONEXIT,1500,None).0==0{return false;}
-    // 用户再次启动时，把新进程的前台激活权限交给现有实例，无需模拟按键。
-    let _=AllowSetForegroundWindow(tray_pid);
-    request_existing_window(tray,calendar)
+    // 若现有实例刚创建互斥体、还在初始化窗口，短暂重试并枚举所有 AuralsleTray 窗口逐一唤醒
+    for attempt in 0..25 {
+        let mut trays: Vec<HWND> = Vec::new();
+        let _ = EnumWindows(Some(collect_tray_windows), LPARAM(&mut trays as *mut Vec<HWND> as isize));
+        if trays.is_empty() {
+            if let Ok(tray) = FindWindowW(w!("AuralsleTray"), PCWSTR::null()) {
+                trays.push(tray);
+            }
+        }
+        for tray in trays {
+            let mut tray_pid = 0u32;
+            GetWindowThreadProcessId(tray, Some(&mut tray_pid));
+            if tray_pid == 0 {
+                continue;
+            }
+            let _ = AllowSetForegroundWindow(tray_pid);
+            if request_existing_window(tray, calendar) {
+                return true;
+            }
+            let msg = if calendar { WM_APP + 5 } else { WM_APP + 4 };
+            if PostMessageW(tray, msg, WPARAM(0), LPARAM(0)).is_ok() {
+                return true;
+            }
+        }
+        if attempt < 24 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    false
 }}

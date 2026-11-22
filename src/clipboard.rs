@@ -34,7 +34,7 @@ pub fn clear_recent_external_copy() {
 }
 
 /// 未固定条目的上限；固定的不占这个名额。
-pub const MAX_RECENT: usize = 30;
+pub const MAX_RECENT: usize = 100;
 /// 单条最长字符数，超过的不记录（大段日志、整份文件内容）。
 pub const MAX_CHARS: usize = 20_000;
 pub const MAX_PINNED: usize = 20;

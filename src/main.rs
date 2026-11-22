@@ -88,6 +88,10 @@ struct Shell {
     quota: auralsle::quota::Service,
     quota_sig: Option<(bool,Vec<auralsle::quota::Account>)>,
     quota_at: PollClock,
+    #[cfg(windows)]
+    oppo_notify: Option<(auralsle::oppo_notify::MirrorHandle, std::sync::mpsc::Receiver<auralsle::oppo_notify::MirrorEvent>)>,
+    #[cfg(windows)]
+    oppo_notify_sig: Option<(bool, bool)>,
 }
 
 const MODULE_OFF:&str="该功能已在「页面管理」中关闭";
@@ -155,6 +159,11 @@ impl Shell {
         auralsle::monitors::start();
         let mut app = App::new(&cc.egui_ctx, Options::default());
         app.render_compat_running=running_compat;
+        let boot_suppress = app.settings.notifications
+            && boot_mcfg.oppo_notify_mirror_enabled
+            && boot_mcfg.oppo_suppress_native;
+        auralsle::oppo_notify::restore_crash_leftover_if_needed(boot_suppress);
+        auralsle::oppo_notify::set_suppress_active(boot_suppress);
         #[cfg(feature="record")] let quota_demo=std::env::var("AURALSLE_QUOTA_DEMO").is_ok();
         #[cfg(not(feature="record"))] let quota_demo=false;
         diagnostics::startup("初始化额度配置");
@@ -182,7 +191,7 @@ impl Shell {
         });
         diagnostics::startup("初始化通知监听");
         #[cfg(windows)]
-        let incoming=if app.settings.read_notifications || app.settings.wechat_notifications || auralsle::auralsle_ai_status::config::get().oppo_wechat_dedup {match auralsle::system::connect_with_settings(cc.egui_ctx.clone(),&app.settings){Ok(rx)=>Some(rx),Err(e)=>{app.listener_status=format!("Windows 无法读取通知：{}",e.code());None}}}else{None};
+        let incoming=if app.settings.read_notifications || app.settings.wechat_notifications || (!boot_mcfg.oppo_notify_mirror_enabled && boot_mcfg.oppo_wechat_dedup) {match auralsle::system::connect_with_settings(cc.egui_ctx.clone(),&app.settings){Ok(rx)=>Some(rx),Err(e)=>{app.listener_status=format!("Windows 无法读取通知：{}",e.code());None}}}else{None};
         // 音频、网络与输入法查询由后台完成，避免首帧等待系统服务。
         diagnostics::startup("创建后台采样与窗口");
         let initial_input=None;
@@ -244,6 +253,10 @@ impl Shell {
             cal_sig: None,
             clipboard_watch: None,
             quota: auralsle::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
+            #[cfg(windows)]
+            oppo_notify: None,
+            #[cfg(windows)]
+            oppo_notify_sig: None,
         }
     }
 
@@ -366,6 +379,9 @@ impl eframe::App for Shell {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_start = Instant::now();
+        if ctx.input(|i| i.viewport().close_requested()) && !auralsle::resources::is_root_exit_allowed() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
         auralsle::frame_watch::begin_frame(
             self.app.page(),
             self.app.page(),
@@ -500,6 +516,9 @@ impl eframe::App for Shell {
             }
             if let Some(service) = &self.bt_rx {
                 while let Ok(found) = service.rx.try_recv() {
+                    if self.bt_ready && found != self.bt {
+                        self.app.sync_bt_snapshot(&self.bt);
+                    }
                     self.bt = found;
                     self.bt_ready = true;
                 }
@@ -512,7 +531,43 @@ impl eframe::App for Shell {
                     self.app.receive_messenger_reminder(unread);
                 }
             }}
-            if (self.app.settings.read_notifications || self.app.settings.wechat_notifications || auralsle::auralsle_ai_status::config::get().oppo_wechat_dedup) && self.app.settings.notifications && self.incoming.is_none() {
+            let mirror_cfg = auralsle::auralsle_ai_status::config::get();
+            let mirror_want = (
+                mirror_cfg.mod_oppo_connect_enabled && mirror_cfg.oppo_notify_mirror_enabled,
+                mirror_cfg.mod_oppo_connect_enabled && mirror_cfg.oppo_notify_mirror_enabled && mirror_cfg.oppo_suppress_native,
+            );
+            auralsle::oppo_notify::set_suppress_active(
+                mirror_want.0 && mirror_want.1 && self.app.settings.notifications,
+            );
+            if !mirror_want.0 || !self.app.settings.notifications {
+                self.oppo_notify = None;
+                self.oppo_notify_sig = None;
+            } else if self.oppo_notify.is_none() || self.oppo_notify_sig != Some(mirror_want) {
+                self.oppo_notify = None;
+                let (h, rx) = auralsle::oppo_notify::spawn(
+                    auralsle::oppo_notify::MirrorConfig {
+                        suppress_oppo: mirror_want.1,
+                        ..Default::default()
+                    },
+                    Some(ctx.clone()),
+                );
+                self.oppo_notify = Some((h, rx));
+                self.oppo_notify_sig = Some(mirror_want);
+            }
+            if let Some((_, ref rx)) = self.oppo_notify {
+                while let Ok(ev) = rx.try_recv() {
+                    if let auralsle::oppo_notify::MirrorEventKind::Notification {
+                        notification,
+                        is_update,
+                        icon_png,
+                    } = ev.kind
+                    {
+                        self.app
+                            .receive_oppo_mirrored_notification(notification, is_update, icon_png);
+                    }
+                }
+            }
+            if (self.app.settings.read_notifications || self.app.settings.wechat_notifications || (!mirror_cfg.oppo_notify_mirror_enabled && mirror_cfg.oppo_wechat_dedup)) && self.app.settings.notifications && self.incoming.is_none() {
                 if let Ok(rx) = auralsle::system::connect_with_settings(ctx.clone(), &self.app.settings) {
                     self.incoming = Some(rx);
                 }
@@ -721,6 +776,12 @@ impl eframe::App for Shell {
                 }
                 Cmd::ViewMessenger(unread)=>{
                     #[cfg(windows)] {
+                        if unread.pid == 0 && self.app.has_oppo_messenger(unread.source) {
+                            self.app.discard_unread(unread);
+                            self.app.show_page(5);
+                            ctx.request_repaint();
+                            continue;
+                        }
                         let was_pending=self.app.pending_messengers.contains(&unread);
                         self.clear_exited_messengers(ctx);
                         if !self.app.pending_messengers.contains(&unread){
@@ -744,6 +805,7 @@ impl eframe::App for Shell {
                 }
                 Cmd::RestartApp=>{
                     // 先拉起新进程（它会等本进程退出），再像托盘「退出」一样摘图标后结束。
+                    auralsle::resources::allow_root_exit();
                     if diagnostics::spawn_replacement(){
                         self.app.save_window_before_exit();
                         #[cfg(windows)] if let Some(tray)=&self.tray {tray.exit_process();}
@@ -789,7 +851,14 @@ impl eframe::App for Shell {
                 },
                 Cmd::QuotaConnected=>{self.quota_sig=None;},
                 Cmd::ToggleAutostart=>{
-                    #[cfg(windows)] {let want=!self.autostart;match auralsle::tray::set_autostart(want){Ok(())=>self.autostart=want,Err(e)=>self.app.say(e)}}
+                    #[cfg(windows)] {
+                        let want = !self.autostart;
+                        let mode = auralsle::tray::AutostartMode::from_u8(auralsle::auralsle_ai_status::config::get().autostart_mode);
+                        match auralsle::tray::set_autostart_mode(want, mode) {
+                            Ok(()) => self.autostart = want,
+                            Err(e) => self.app.say(e),
+                        }
+                    }
                 },
                 Cmd::SetVolume(v)=>{
                     #[cfg(windows)] auralsle::system::set_volume(v);
@@ -884,6 +953,10 @@ impl eframe::App for Shell {
             auralsle::resources::append_log(&auralsle::model::config_dir().join("diagnostics"),"frames",
                 &format!("帧 {:.0} ms｜页面 {}｜展开 {}",elapsed.as_secs_f64()*1000.0,page,open));
         }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        auralsle::oppo_notify::restore_on_normal_exit();
     }
 }
 
@@ -1102,6 +1175,32 @@ mod open_path_tests {
     }
 }
 
+static INSTANCE_OWNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn apply_autostart_launch_policy() {
+    #[cfg(windows)]
+    {
+        let priority = std::env::args().any(|a| a == "--autostart-priority");
+        let delayed = std::env::args().any(|a| a == "--autostart-delay");
+        if priority {
+            unsafe {
+                use windows::Win32::System::Threading::{
+                    GetCurrentProcess, SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS,
+                };
+                let _ = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+            }
+        } else if delayed {
+            // 滞后自启动：登录初期等待 20 秒错峰启动；若期间用户已手动打开灵屿，则安静让位退出。
+            for _ in 0..20 {
+                if auralsle::tray::existing_instance_running() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
     diagnostics::install();
     if auralsle::diagnostics_tool::requested(std::env::args()) {
@@ -1110,9 +1209,31 @@ fn main() -> std::process::ExitCode {
             Err(error) => {diagnostics::report("诊断收集未完成。", &error); std::process::ExitCode::FAILURE}
         };
     }
+    apply_autostart_launch_policy();
+    if std::env::args().any(|a| a == "--autostart-delay") && auralsle::tray::existing_instance_running() {
+        return std::process::ExitCode::SUCCESS;
+    }
     match run() {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(()) => {
+            if INSTANCE_OWNED.load(std::sync::atomic::Ordering::Acquire)
+                && !auralsle::resources::is_root_exit_allowed()
+            {
+                let details = "主窗口事件循环在未收到退出指令的情况下意外返回。".to_owned();
+                let restarted = diagnostics::relaunch_after_failure("主循环意外退出");
+                let _ = diagnostics::write_report(
+                    &diagnostics::diagnostics_dir(),
+                    if restarted { "灵屿 AuraIsle 意外退出，已自动重新启动。" } else { "灵屿 AuraIsle 意外退出。" },
+                    &details,
+                );
+            }
+            std::process::ExitCode::SUCCESS
+        }
         Err(error) => {
+            if INSTANCE_OWNED.load(std::sync::atomic::Ordering::Acquire)
+                && !auralsle::resources::is_root_exit_allowed()
+            {
+                let _ = diagnostics::relaunch_after_failure("主循环异常退出");
+            }
             diagnostics::report("灵屿 AuraIsle 启动或运行失败。", &error.to_string());
             std::process::ExitCode::FAILURE
         }
@@ -1125,11 +1246,13 @@ fn run() -> eframe::Result<()> {
     // 单实例（与原版同名互斥体）
     #[cfg(windows)]
     if !auralsle::tray::single_instance() {
-        if !auralsle::tray::activate_existing(std::env::args().any(|arg|arg=="--calendar")) {
-            diagnostics::report("灵屿 AuraIsle 已在运行，但暂时无法打开窗口。\n请稍后重试；若仍无法打开，请在任务管理器的“详细信息”中结束 AuraIsle.exe 后重试。", "已有实例可能正在启动或已无响应。请稍后重试；若仍无法打开，请在任务管理器的“详细信息”中结束 AuraIsle.exe，再重新启动。");
+        if std::env::args().any(|a| a == "--autostart-priority" || a == "--autostart-delay") {
+            return Ok(());
         }
+        let _ = auralsle::tray::activate_existing(std::env::args().any(|arg|arg=="--calendar"));
         return Ok(());
     }
+    INSTANCE_OWNED.store(true, std::sync::atomic::Ordering::Release);
     #[cfg(windows)]
     std::thread::spawn(auralsle::record_install_size);
     diagnostics::startup("初始化图形窗口");

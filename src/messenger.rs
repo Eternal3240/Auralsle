@@ -58,7 +58,7 @@ const WECOM:Adapter=Adapter{
     client:Messenger::WeCom,name:"企业微信",capture:Capture::Taskbar,notification_id:"WXWork",
     aliases:&["WeCom","WeWork","Tencent.WeWork"],display_names:&["企业微信","WXWork"],process_names:&["WXWork.exe"],publishers:&["tencent"],
     keep_unidentified:true,dismiss_unread:true,icon_scale:1.0,collapsed_icon_scale:0.85,
-    enabled:|settings|settings.wecom_notifications,tray_enabled:|_|true,paint_icon:|c,x,y|crate::calendar_ui::source_icon(c,crate::calendar_ui::Source::Calendar(Some(crate::calendar::Provider::WeCom)),x-10.0,y-10.0,20.0),
+    enabled:|settings|settings.wecom_notifications,tray_enabled:|_|true,paint_icon:wecom_icon,
     #[cfg(windows)] native:&desktop::WECOM,
 };
 
@@ -66,7 +66,7 @@ const FEISHU:Adapter=Adapter{
     client:Messenger::Feishu,name:"飞书",capture:Capture::Taskbar,notification_id:"Feishu",
     aliases:&["com.electron.Feishu"],display_names:&["飞书","Feishu"],process_names:&["Feishu.exe"],publishers:&["beijing feishu technology","bytedance"],
     keep_unidentified:true,dismiss_unread:true,icon_scale:1.0,collapsed_icon_scale:0.85,
-    enabled:|settings|settings.feishu_notifications,tray_enabled:|_|true,paint_icon:|c,x,y|crate::calendar_ui::source_icon(c,crate::calendar_ui::Source::Calendar(Some(crate::calendar::Provider::Feishu)),x-10.0,y-10.0,20.0),
+    enabled:|settings|settings.feishu_notifications,tray_enabled:|_|true,paint_icon:feishu_icon,
     #[cfg(windows)] native:&desktop::FEISHU,
 };
 
@@ -74,7 +74,7 @@ const DINGTALK:Adapter=Adapter{
     client:Messenger::DingTalk,name:"钉钉",capture:Capture::Taskbar,notification_id:"DingTalk",
     aliases:&[],display_names:&["钉钉","DingTalk"],process_names:&["DingTalk.exe"],publishers:&["alibaba","dingtalk"],
     keep_unidentified:true,dismiss_unread:true,icon_scale:1.0,collapsed_icon_scale:0.85,
-    enabled:|settings|settings.dingtalk_notifications,tray_enabled:|_|true,paint_icon:|c,x,y|crate::calendar_ui::source_icon(c,crate::calendar_ui::Source::Calendar(Some(crate::calendar::Provider::DingTalk)),x-10.0,y-10.0,20.0),
+    enabled:|settings|settings.dingtalk_notifications,tray_enabled:|_|true,paint_icon:dingtalk_icon,
     #[cfg(windows)] native:&desktop::DINGTALK,
 };
 
@@ -184,79 +184,83 @@ impl AccountHistory {
     pub(crate) fn retain(&mut self,exists:impl Fn(u32,i64)->bool){self.targets.retain(|id,(created,_)|exists(*id,*created));}
 }
 
-fn fill_smooth_ellipse(c: &Card, cx: f32, cy: f32, rx: f32, ry: f32, col: egui::Color32) {
-    // [v21 合并修复] Card 没有 tint()：椭圆光晕直接使用传入颜色，
-    // 浅色皮肤下的统一换色由上层 recolor_layer 处理。
-    let center = c.pos(cx, cy);
-    let sx = rx * c.s;
-    let sy = ry * c.s;
-    let feather = 1.0 / c.ui.ctx().pixels_per_point();
-    let clear = egui::Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 0);
-    const N: usize = 36;
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(center, col);
-    for i in 0..N {
-        let a = (i as f32 / N as f32) * std::f32::consts::TAU;
-        let (ca, sa) = (a.cos(), a.sin());
-        let p_in = egui::pos2(center.x + sx * ca, center.y + sy * sa);
-        let nx = ca / sx.max(1.0);
-        let ny = sa / sy.max(1.0);
-        let n_len = (nx * nx + ny * ny).sqrt().max(1e-5);
-        let p_out = egui::pos2(p_in.x + (nx / n_len) * feather, p_in.y + (ny / n_len) * feather);
-        mesh.colored_vertex(p_in, col);
-        mesh.colored_vertex(p_out, clear);
+/// 运行时获取来源应用图标，未获取到时退化为圆角首字徽标（不在安装包中内置第三方图标）。
+fn paint_runtime_or_badge_icon(
+    c: &Card,
+    x: f32,
+    y: f32,
+    app_id: &str,
+    app_name: &str,
+    badge_letter: &str,
+    badge_bg: egui::Color32,
+) {
+    let side = 19.0;
+    let rect = c.rect(x - side * 0.5, y - side * 0.5, side, side);
+    if !cfg!(test) {
+        if let Some(tex) = crate::icons::extract_app_icon_texture(c.ui.ctx(), app_id, app_name) {
+            let r = ((5.0 * c.s).round()).clamp(3.0, 7.0) as u8;
+            c.painter.add(
+                egui::epaint::RectShape::filled(
+                    rect,
+                    egui::CornerRadius::same(r),
+                    egui::Color32::WHITE,
+                )
+                .with_texture(
+                    tex.id(),
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                ),
+            );
+            return;
+        }
     }
-    for i in 0..N {
-        let next = (i + 1) % N;
-        let in0 = (1 + i * 2) as u32;
-        let out0 = in0 + 1;
-        let in1 = (1 + next * 2) as u32;
-        let out1 = in1 + 1;
-        mesh.add_triangle(0, in0, in1);
-        mesh.add_triangle(in0, out0, out1);
-        mesh.add_triangle(in0, out1, in1);
-    }
-    c.painter.add(egui::Shape::mesh(mesh));
+    c.fill(x - side * 0.5, y - side * 0.5, side, side, 5.2, badge_bg);
+    c.centered_text(
+        x,
+        y,
+        badge_letter,
+        11.2,
+        crate::theme::W::Bold,
+        egui::Color32::WHITE,
+        crate::paint::H::Center,
+    );
 }
 
-fn wechat_icon(c:&Card,x:f32,y:f32){
-    use egui::Color32;
-    let ink=Color32::from_gray(24);let back=Color32::from_rgb(70,203,123);let front=Color32::from_rgb(145,235,165);
-    if cfg!(test) {
-        c.fill(x-10.,y-7.,14.,11.,5.5,back);c.poly(&[(x-8.,y+1.),(x-8.,y+6.),(x-3.,y+2.)],back);
-        for dx in [-6.,-1.]{c.circle(x+dx,y-3.,0.9,ink);}
-        c.fill(x-2.,y-2.,13.,10.,5.,front);c.poly(&[(x+5.,y+6.),(x+9.,y+10.),(x+8.,y+5.)],front);
-        for dx in [2.,7.]{c.circle(x+dx,y+1.,0.8,ink);}
-    } else {
-        // 视觉居中校准：原坐标左界 x-9.7、右界 x+10.1（偏右 0.2），顶界 y-6.6、底界 y+9.2（偏下 1.1）
-        let x = x - 0.2;
-        let y = y - 1.1;
-        // 使用真椭圆弧面绘制微信大小气泡，彻底消除水平胶囊顶边直线造成的「微信图标被削顶」现象
-        fill_smooth_ellipse(c, x - 3.0, y - 1.1, 6.7, 5.5, back);
-        c.poly(&[(x - 7.8, y + 1.4), (x - 8.2, y + 5.8), (x - 3.2, y + 2.6)], back);
-        for dx in [-5.4, -0.8] { c.circle(x + dx, y - 2.4, 0.9, ink); }
-        fill_smooth_ellipse(c, x + 4.3, y + 2.8, 5.8, 4.7, front);
-        c.poly(&[(x + 5.0, y + 5.6), (x + 8.6, y + 9.2), (x + 7.7, y + 4.6)], front);
-        for dx in [2.3, 6.3] { c.circle(x + dx, y + 1.6, 0.8, ink); }
-    }
+fn wechat_icon(c: &Card, x: f32, y: f32) {
+    paint_runtime_or_badge_icon(c, x, y, "WeChat", "微信", "微", egui::Color32::from_rgb(7, 193, 96));
 }
-fn qq_icon(c:&Card,x:f32,y:f32){
-    let rect=c.rect(x-9.5,y-9.5,19.0,19.0);let icon=egui::Image::new(egui::include_image!("../assets/qq-client.png"));
-    if let Ok(egui::load::TexturePoll::Ready{texture})=icon.load_for_size(c.ui.ctx(),rect.size()){
-        c.painter.image(texture.id,rect,egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),egui::Color32::WHITE);
-    }
+
+fn qq_icon(c: &Card, x: f32, y: f32) {
+    paint_runtime_or_badge_icon(c, x, y, "QQ", "QQ", "Q", egui::Color32::from_rgb(18, 183, 245));
+}
+
+fn wecom_icon(c: &Card, x: f32, y: f32) {
+    paint_runtime_or_badge_icon(c, x, y, "WXWork", "企业微信", "企", egui::Color32::from_rgb(43, 126, 247));
+}
+
+fn feishu_icon(c: &Card, x: f32, y: f32) {
+    paint_runtime_or_badge_icon(c, x, y, "Feishu", "飞书", "飞", egui::Color32::from_rgb(51, 112, 255));
+}
+
+fn dingtalk_icon(c: &Card, x: f32, y: f32) {
+    paint_runtime_or_badge_icon(c, x, y, "DingTalk", "钉钉", "钉", egui::Color32::from_rgb(0, 137, 255));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn qq_logo_has_no_pale_fringe_around_the_black_head(){
-        let image=image::load_from_memory(include_bytes!("../assets/qq-client.png")).unwrap().into_rgba8();
-        for y in image.height()/5..image.height()/3{
-            let edge=(0..image.width()/2).find_map(|x|{let pixel=image.get_pixel(x,y);(pixel[3]>=128).then_some(pixel)}).unwrap();
-            assert!(edge[0]<32 && edge[1]<32 && edge[2]<32,"QQ 黑色头部的外缘不能带浅色描边：{edge:?}");
-        }
+    fn runtime_icon_fallback_renders_clean_initial_badge(){
+        let ctx=egui::Context::default();
+        crate::theme::load_fonts(&ctx);
+        let _=ctx.run(egui::RawInput::default(),|ctx|{
+            egui::CentralPanel::default().show(ctx,|ui|{
+                let rect=egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(64.0,64.0));
+                let card=Card::new(ui,rect.min,rect);
+                wechat_icon(&card,16.0,16.0);
+                qq_icon(&card,44.0,16.0);
+                wecom_icon(&card,16.0,44.0);
+            });
+        });
     }
     #[test]
     fn registered_adapters_have_distinct_identities_and_matching_backends(){

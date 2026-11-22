@@ -1,9 +1,9 @@
 //! 系统文件缩略图 / 图标与本机软件真实图标提取器。
 //!
 //! - 置物架文件预览：优先用 `IShellItemImageFactory` 取 96 px 缩略图，失败再用 `SHGetFileInfoW` 取 32 px 大图标；
-//! - 通知应用真实图标提取（`extract_app_icon_texture`）：直接通过本机运行进程（`CreateToolhelp32Snapshot` + `QueryFullProcessImageNameW`）、
-//!   注册表 `App Paths` / `Uninstall`、开始菜单 `.lnk` 快捷方式定位本机软件真实路径，调用 `SHGetFileInfoW` 提取软件原生 32×32 图标纹理，
-//!   并对常见 AI / 通讯应用提供内嵌官方 SVG / PNG 矢量图标保底，彻底杜绝字符方块 `□`。
+//! - 通知来源应用图标提取（`extract_app_icon_texture`）：优先使用运行时从 Windows 通知
+//!   `AppInfo.DisplayInfo.GetLogo` 捕获的图标（缓存于 `%APPDATA%\Auralsle\icon-cache`），
+//!   其次才从用户本机已安装应用（运行进程、注册表、开始菜单快捷方式）运行时提取，不内置任何第三方通知图标。
 
 use eframe::egui::{self,ColorImage};
 use std::path::{Path,PathBuf};
@@ -576,11 +576,35 @@ fn file_icon(_path: &Path) -> Option<ColorImage> {
 }
 
 // ---------------------------------------------------------------
-// 本机软件真实图标提取器（进程镜像 + 注册表 App Paths/Uninstall + 开始菜单 .lnk + 内嵌官方图标）
+// 本机已安装软件与运行时通知 Logo 提取器（不内置第三方通知图标）
 // ---------------------------------------------------------------
+
+/// O+ / OPPO Connect 本身的标识：不得将其官方图标用作通知来源图标。
+pub fn is_excluded_oppo_app(app_id: &str, app_name: &str) -> bool {
+    let low_id = app_id.trim().to_ascii_lowercase();
+    let low_name = app_name.trim().to_ascii_lowercase();
+    if low_id.starts_with("oppo-mirror:") {
+        let pkg = low_id.trim_start_matches("oppo-mirror:");
+        return pkg == "com.oplus.devicespace";
+    }
+    low_id == "com.oplus.devicespace"
+        || low_id.contains("oplus.devicespace")
+        || low_id.contains("o+connect")
+        || low_id.contains("o+ connect")
+        || low_id.contains("oppo connect")
+        || low_id.contains("heytap")
+        || low_name.contains("o+ connect")
+        || low_name.contains("o+connect")
+        || low_name.contains("oppo 互联")
+        || low_name.contains("oppo connect")
+        || low_name.contains("跨屏互联")
+}
 
 #[cfg(windows)]
 fn resolve_local_app_icon_image(app_id: &str, app_name: &str) -> Option<ColorImage> {
+    if is_excluded_oppo_app(app_id, app_name) {
+        return None;
+    }
     use windows::{
         core::{PCWSTR, PWSTR},
         Win32::{
@@ -651,14 +675,6 @@ fn resolve_local_app_icon_image(app_id: &str, app_name: &str) -> Option<ColorIma
         exe_candidates.insert(1, "codebuddy.exe".into());
         lnk_keywords.push("workbuddy".into());
         lnk_keywords.push("codebuddy".into());
-    }
-    if s.contains("oppo") || s.contains("heytap") || s.contains("互联") || s.contains("跨屏") || s.contains("手机通知") || s.contains("手机连接") {
-        exe_candidates.insert(0, "pcsuite.exe".into());
-        exe_candidates.insert(1, "heytap.exe".into());
-        exe_candidates.insert(2, "oppopcsuite.exe".into());
-                lnk_keywords.push("oppo".into());
-        lnk_keywords.push("跨屏互联".into());
-        lnk_keywords.push("oppo 互联".into());
     }
     if s.contains("cursor") {
         exe_candidates.insert(0, "cursor.exe".into());
@@ -980,125 +996,93 @@ fn find_matching_lnk(dir: &Path, keywords: &[String], depth: usize) -> Option<Pa
     None
 }
 
-fn load_bundled_brand_icon(app_id: &str, app_name: &str) -> Option<ColorImage> {
-    let s = format!("{} {}", app_id, app_name).to_lowercase();
-    if s.contains("qq") {
-        let bytes = include_bytes!("../assets/qq-client.png");
-        let dyn_img = image::load_from_memory(bytes).ok()?.thumbnail(64, 64).to_rgba8();
-        return Some(ColorImage::from_rgba_unmultiplied(
-            [dyn_img.width() as usize, dyn_img.height() as usize],
-            dyn_img.as_raw(),
-        ));
-    }
-    // 为 OPPO 互联、抖音、微信、钉钉、飞书提供 64×64 高清矢量多色 SVG 图标，彻底告别模糊与快捷方式箭头
-    let custom_svg: Option<&'static [u8]> = if s.contains("oppo") || s.contains("heytap") || s.contains("互联") || s.contains("跨屏") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#059669'/><circle cx='25' cy='32' r='11' fill='none' stroke='#FFFFFF' stroke-width='4.2'/><circle cx='39' cy='32' r='11' fill='none' stroke='#A7F3D0' stroke-width='4.2'/></svg>")
-    } else if s.contains("抖音") || s.contains("douyin") || s.contains("tiktok") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#111218'/><path d='M38 15v23a9 9 0 1 1-6.5-8.6V22a16 16 0 1 0 13.5 15.8V26.5c2.8 2 6.2 3.1 9.8 3.1v-7c-5.2 0-9.6-3.3-10.8-7.6H38z' fill='#25F4EE' transform='translate(-2,-1.5)'/><path d='M38 15v23a9 9 0 1 1-6.5-8.6V22a16 16 0 1 0 13.5 15.8V26.5c2.8 2 6.2 3.1 9.8 3.1v-7c-5.2 0-9.6-3.3-10.8-7.6H38z' fill='#FE2C55' transform='translate(2,1.5)'/><path d='M38 15v23a9 9 0 1 1-6.5-8.6V22a16 16 0 1 0 13.5 15.8V26.5c2.8 2 6.2 3.1 9.8 3.1v-7c-5.2 0-9.6-3.3-10.8-7.6H38z' fill='#FFFFFF'/></svg>")
-    } else if s.contains("微信") || s.contains("wechat") || s.contains("weixin") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#07C160'/><ellipse cx='26' cy='27' rx='14' ry='11.5' fill='#FFFFFF'/><circle cx='21' cy='25' r='1.9' fill='#07C160'/><circle cx='31' cy='25' r='1.9' fill='#07C160'/><ellipse cx='40' cy='36' rx='12' ry='9.8' fill='#DCFCE7'/><circle cx='36' cy='35' r='1.6' fill='#059669'/><circle cx='44' cy='35' r='1.6' fill='#059669'/></svg>")
-    } else if s.contains("钉钉") || s.contains("dingtalk") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#0089FF'/><path d='M18 17h26l-8 14h11L25 50l4-15H19l-1-18z' fill='#FFFFFF'/></svg>")
-    } else if s.contains("飞书") || s.contains("feishu") || s.contains("lark") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#3370FF'/><path d='M16 32l30-14-9 29-7-9-14-6z' fill='#FFFFFF'/></svg>")
-    } else if s.contains("小黑盒") || s.contains("heybox") || s.contains("xiaoheihe") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#181920'/><path d='M32 13L50 23.5V44.5L32 55L14 44.5V23.5L32 13Z' fill='none' stroke='#FFFFFF' stroke-width='3.8' stroke-linejoin='round'/><path d='M14 23.5L32 34L50 23.5M32 34V55' fill='none' stroke='#38BDF8' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'/><circle cx='32' cy='23' r='3.2' fill='#FFFFFF'/></svg>")
-    } else if s.contains("steam") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#171A21'/><circle cx='40' cy='25' r='9.5' fill='none' stroke='#66C0F4' stroke-width='4.2'/><circle cx='40' cy='25' r='3.8' fill='#FFFFFF'/><circle cx='22' cy='43' r='6.5' fill='none' stroke='#FFFFFF' stroke-width='3.8'/><path d='M10 38L22 43L34 31' fill='none' stroke='#FFFFFF' stroke-width='5.2' stroke-linecap='round' stroke-linejoin='round'/></svg>")
-    } else if s.contains("云服务") || s.contains("云备份") || s.contains("onedrive") || s.contains("网盘") || s.contains("cloud") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#0284C7'/><path d='M21 44h23a10 10 0 0 0 1.2-19.9A13.5 13.5 0 0 0 19 26.5 9.5 9.5 0 0 0 21 44z' fill='#FFFFFF'/><path d='M28 35l4-4 4 4M32 31v10' fill='none' stroke='#0284C7' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/></svg>")
-    } else if s.contains("电源") || s.contains("电池") || s.contains("节能") || s.contains("power") || s.contains("battery") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#059669'/><rect x='13' y='21' width='34' height='22' rx='5' fill='none' stroke='#FFFFFF' stroke-width='3.6'/><rect x='48' y='27' width='4.5' height='10' rx='2' fill='#FFFFFF'/><path d='M33 23L25 33h7l-2 8 9-10h-7l1-8z' fill='#FDE047'/></svg>")
-    } else if s.contains("信息") || s.contains("短信") || s.contains("messages") || s.contains("sms") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#2563EB'/><path d='M15 20h34a5 5 0 0 1 5 5v16a5 5 0 0 1-5 5H27l-10 7v-7h-2a5 5 0 0 1-5-5V25a5 5 0 0 1 5-5z' fill='#FFFFFF'/><rect x='22' y='27' width='20' height='3.4' rx='1.7' fill='#2563EB'/><rect x='22' y='34' width='13' height='3.4' rx='1.7' fill='#60A5FA'/></svg>")
-    } else if s.contains("天气") || s.contains("气象") || s.contains("weather") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#0EA5E9'/><circle cx='24' cy='25' r='9' fill='#FACC15'/><path d='M23 45h22a8.5 8.5 0 0 0 0-17 11.5 11.5 0 0 0-21.6-3.2A7.5 7.5 0 0 0 23 45z' fill='#FFFFFF'/></svg>")
-    } else if s.contains("安全") || s.contains("防护") || s.contains("defender") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#1D4ED8'/><path d='M32 13l17 6.5v11.5c0 11.2-7.2 20.6-17 24-9.8-3.4-17-12.8-17-24V19.5L32 13z' fill='#FFFFFF'/><path d='M25 32l5 5 10-10' fill='none' stroke='#1D4ED8' stroke-width='3.8' stroke-linecap='round' stroke-linejoin='round'/></svg>")
-    } else if s.contains("邮件") || s.contains("邮箱") || s.contains("outlook") || s.contains("mail") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#0284C7'/><rect x='13' y='19' width='38' height='26' rx='4.5' fill='#FFFFFF'/><path d='M15 22l17 12 17-12' fill='none' stroke='#0284C7' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'/></svg>")
-    } else if s.contains("小红书") || s.contains("xiaohongshu") || s.contains("rednote") || s.contains("xhs") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#FF2442'/><rect x='13' y='18' width='38' height='28' rx='6' fill='none' stroke='#FFFFFF' stroke-width='3.6'/><path d='M32 18v28M21 26h6M21 33h6M37 26h6M37 33h6' stroke='#FFFFFF' stroke-width='3.4' stroke-linecap='round'/></svg>")
-    } else if s.contains("哔哩") || s.contains("bilibili") || s.contains("b站") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#FB7299'/><path d='M22 13l6 7M42 13l-6 7' stroke='#FFFFFF' stroke-width='3.6' stroke-linecap='round'/><rect x='13' y='20' width='38' height='28' rx='7' fill='none' stroke='#FFFFFF' stroke-width='3.8'/><path d='M23 30l4 3-4 3M41 30l-4 3 4 3' fill='none' stroke='#FFFFFF' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/></svg>")
-    } else if s.contains("网易云") || s.contains("cloudmusic") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#E60026'/><circle cx='32' cy='32' r='17' fill='none' stroke='#FFFFFF' stroke-width='3.8'/><circle cx='32' cy='32' r='6.5' fill='none' stroke='#FFFFFF' stroke-width='3.6'/><path d='M32 15c6 0 11 4 11 10' fill='none' stroke='#FFFFFF' stroke-width='3.6' stroke-linecap='round'/></svg>")
-    } else if s.contains("qq音乐") || s.contains("qqmusic") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#10B981'/><path d='M26 42a6 6 0 1 1-4-5.6V20l20-4v18a6 6 0 1 1-4-5.6V21l-12 2.4V42z' fill='#FACC15'/></svg>")
-    } else if s.contains("淘宝") || s.contains("天猫") || s.contains("闲鱼") || s.contains("京东") || s.contains("拼多多") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#F97316'/><path d='M16 24h32l-3 24H19L16 24z' fill='#FFFFFF'/><path d='M24 24v-4a8 8 0 0 1 16 0v4' fill='none' stroke='#FFFFFF' stroke-width='3.8' stroke-linecap='round'/></svg>")
-    } else if s.contains("系统") || s.contains("windows") || s.contains("更新") || s.contains("设置") {
-        Some(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='15' fill='#0F172A'/><rect x='15' y='15' width='15' height='15' rx='2.5' fill='#38BDF8'/><rect x='34' y='15' width='15' height='15' rx='2.5' fill='#38BDF8'/><rect x='15' y='34' width='15' height='15' rx='2.5' fill='#38BDF8'/><rect x='34' y='34' width='15' height='15' rx='2.5' fill='#38BDF8'/></svg>")
-    } else {
-        None
-    };
-    if let Some(svg_b) = custom_svg {
-        if let Ok(img) = egui_extras::image::load_svg_bytes_with_size(
-            svg_b,
-            Some(egui::load::SizeHint::Size(64, 64)),
-        ) {
-            return Some(img);
-        }
-    }
-    let (svg_bytes, tint): (&[u8], Option<egui::Color32>) = if s.contains("workbuddy") || s.contains("codebuddy") {
-        (include_bytes!("auralsle_ai_status/assets/ai-icons/workbuddy.svg"), None)
-    } else if s.contains("gemini") || s.contains("google") {
-        (
-            include_bytes!("auralsle_ai_status/assets/ai-icons/gemini.svg"),
-            Some(egui::Color32::from_rgb(96, 165, 250)),
-        )
-    } else if s.contains("claude") || s.contains("anthropic") {
-        (
-            include_bytes!("auralsle_ai_status/assets/ai-icons/claude.svg"),
-            Some(egui::Color32::from_rgb(251, 146, 60)),
-        )
-    } else if s.contains("codex") || s.contains("openai") || s.contains("chatgpt") {
-        (
-            include_bytes!("auralsle_ai_status/assets/ai-icons/codex.svg"),
-            Some(egui::Color32::from_rgb(167, 139, 250)),
-        )
-    } else if s.contains("deepseek") {
-        (
-            include_bytes!("auralsle_ai_status/assets/ai-icons/deepseek.svg"),
-            Some(egui::Color32::from_rgb(77, 107, 254)),
-        )
-    } else if s.contains("kimi") || s.contains("moonshot") {
-        (
-            include_bytes!("auralsle_ai_status/assets/ai-icons/kimi.svg"),
-            Some(egui::Color32::from_rgb(56, 189, 248)),
-        )
-    } else if s.contains("grok") {
-        (
-            include_bytes!("auralsle_ai_status/assets/ai-icons/grokbot.svg"),
-            Some(egui::Color32::from_rgb(52, 211, 153)),
-        )
-    } else if s.contains("zcode") {
-        (include_bytes!("auralsle_ai_status/assets/ai-icons/zcode.svg"), None)
-    } else {
-        return None;
-    };
-
-    let mut image = egui_extras::image::load_svg_bytes_with_size(
-        svg_bytes,
-        Some(egui::load::SizeHint::Size(64, 64)),
-    )
-    .ok()?;
-    if let Some(c) = tint {
-        for px in &mut image.pixels {
-            let a = px.a();
-            if a > 0 {
-                *px = egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a);
-            }
-        }
-    }
-    Some(image)
-}
-
+static RUNTIME_APP_LOGOS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, ColorImage>>> =
+    std::sync::OnceLock::new();
 static ASYNC_NATIVE_ICON_IMAGES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Option<ColorImage>>>> =
     std::sync::OnceLock::new();
 static ASYNC_NATIVE_ICON_PENDING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
     std::sync::OnceLock::new();
 static ASYNC_ICON_WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn sanitize_cache_key(raw: &str) -> String {
+    raw.trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .take(64)
+        .collect()
+}
+
+fn aumid_cache_path(app_id: &str) -> Option<PathBuf> {
+    let clean = sanitize_cache_key(app_id);
+    if clean.is_empty() {
+        return None;
+    }
+    Some(crate::oppo_notify::default_icon_dir().join(format!("aumid-{clean}.png")))
+}
+
+/// 缓存运行时从 Windows 通知 `AppInfo.DisplayInfo.GetLogo` 读取到的来源应用图标（仅存于 `%APPDATA%\Auralsle\icon-cache`）。
+pub fn register_runtime_logo(app_id: &str, bytes: &[u8]) {
+    if bytes.len() < 8 || is_excluded_oppo_app(app_id, "") {
+        return;
+    }
+    let key = app_id.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return;
+    }
+    let Ok(dyn_img) = image::load_from_memory(bytes) else {
+        return;
+    };
+    let rgba = dyn_img.thumbnail(64, 64).to_rgba8();
+    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let ci = ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
+    if let Ok(mut map) = RUNTIME_APP_LOGOS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    {
+        map.insert(key, ci);
+    }
+    if let Some(path) = aumid_cache_path(app_id) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+fn lookup_runtime_logo(app_id: &str) -> Option<ColorImage> {
+    let key = app_id.trim().to_ascii_lowercase();
+    if key.is_empty() || is_excluded_oppo_app(app_id, "") {
+        return None;
+    }
+    if let Ok(map) = RUNTIME_APP_LOGOS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    {
+        if let Some(img) = map.get(&key) {
+            return Some(img.clone());
+        }
+    }
+    let path = aumid_cache_path(app_id)?;
+    let bytes = std::fs::read(path).ok()?;
+    let dyn_img = image::load_from_memory(&bytes).ok()?;
+    let rgba = dyn_img.thumbnail(64, 64).to_rgba8();
+    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let ci = ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
+    if let Ok(mut map) = RUNTIME_APP_LOGOS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    {
+        map.insert(key, ci.clone());
+    }
+    Some(ci)
+}
 
 fn async_native_icon_images() -> &'static std::sync::Mutex<HashMap<String, Option<ColorImage>>> {
     ASYNC_NATIVE_ICON_IMAGES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
@@ -1108,10 +1092,9 @@ fn async_native_icon_pending() -> &'static std::sync::Mutex<std::collections::Ha
     ASYNC_NATIVE_ICON_PENDING.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
-/// 获取应用的高清圆角图标纹理（100% 异步非阻塞：本地软件 .exe 图标在后台低优线程提取，UI 主线程绝不执行磁盘/注册表/进程遍历，彻底根除切页无响应！）。
-/// 快速判断指定应用是否已有后台提取完成的本机原生图标（避免每帧重复构造字符串与锁竞争）。
+/// 快速判断指定应用是否已有运行时/本机提取的应用图标（不内置第三方图标资源）。
 pub fn has_ready_native_icon(ctx: &egui::Context, app_id: &str, app_name: &str) -> Option<egui::TextureHandle> {
-    let native_tex_key = egui::Id::new(("auralsle_native_icon_fast_v30", app_id, app_name));
+    let native_tex_key = egui::Id::new(("auralsle_native_icon_fast_v31", app_id, app_name));
     if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(native_tex_key)) {
         return Some(tex);
     }
@@ -1125,17 +1108,32 @@ pub fn extract_app_icon_texture(
     app_id: &str,
     app_name: &str,
 ) -> Option<egui::TextureHandle> {
+    if is_excluded_oppo_app(app_id, app_name) {
+        return None;
+    }
     let norm_key = format!(
         "{}:{}",
         app_id.trim().to_ascii_lowercase(),
         app_name.trim().to_ascii_lowercase()
     );
-    let native_tex_key = egui::Id::new(("auralsle_native_icon_tex_v26", norm_key.as_str()));
+    let native_tex_key = egui::Id::new(("auralsle_native_icon_tex_v27", norm_key.as_str()));
     if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(native_tex_key)) {
         return Some(tex);
     }
 
-    // 1. 检查后台线程是否已完成本机软件高清图标提取
+    // 0. 优先使用运行时从 Windows 通知 AppInfo/DisplayInfo/Logo 捕获到的图标
+    if let Some(img) = lookup_runtime_logo(app_id) {
+        let tex = ctx.load_texture(
+            format!("app-runtime-logo-{norm_key}"),
+            img,
+            egui::TextureOptions::LINEAR,
+        );
+        crate::skin_paint::mark_colored(tex.id());
+        ctx.data_mut(|d| d.insert_temp(native_tex_key, tex.clone()));
+        return Some(tex);
+    }
+
+    // 1. 若系统未提供通知 Logo，则从用户本机已安装应用后台异步提取图标（不阻塞 UI 线程）
     #[cfg(windows)]
     {
         let resolved_opt = async_native_icon_images()
@@ -1153,11 +1151,8 @@ pub fn extract_app_icon_texture(
                 ctx.data_mut(|d| d.insert_temp(native_tex_key, tex.clone()));
                 return Some(tex);
             }
-            Some(None) => {
-                // 后台已确认本机未安装该独立软件，直接走下方内置高清矢量/位图缓存
-            }
+            Some(None) => {}
             None => {
-                // 尚未在后台解析过：投递至后台线程（限制并发数 <= 2，绝不阻塞 UI 线程）
                 let should_spawn = async_native_icon_pending()
                     .lock()
                     .ok()
@@ -1192,22 +1187,7 @@ pub fn extract_app_icon_texture(
         }
     }
 
-    // 2. 内置高清品牌图标快速通道（内存直接解码，耗时 < 0.05ms）
-    let fallback_tex_key = egui::Id::new(("auralsle_bundled_icon_tex_v26", norm_key.as_str()));
-    if let Some(cached) = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(fallback_tex_key)) {
-        return cached;
-    }
-    let handle = load_bundled_brand_icon(app_id, app_name).map(|img| {
-        let tex = ctx.load_texture(
-            format!("app-bundled-icon-{norm_key}"),
-            img,
-            egui::TextureOptions::LINEAR,
-        );
-        crate::skin_paint::mark_colored(tex.id());
-        tex
-    });
-    ctx.data_mut(|d| d.insert_temp(fallback_tex_key, handle.clone()));
-    handle
+    None
 }
 
 #[cfg(test)]
@@ -1252,5 +1232,15 @@ mod tests {
         assert!(ctx.tex_manager().read().num_allocated()<=33,"滚动大量文件不能无限保留 GPU 缩略图");
         cache.clear();
         assert!(ctx.tex_manager().read().num_allocated()<=1,"清空置物架后应释放缩略图纹理");
+    }
+
+    #[test]
+    fn excludes_oppo_official_and_never_uses_bundled_third_party_icons() {
+        assert!(is_excluded_oppo_app("com.oplus.devicespace", "OPPO 互联"));
+        assert!(is_excluded_oppo_app("oppo-mirror:com.oplus.devicespace", "OPPO 互联"));
+        assert!(!is_excluded_oppo_app("oppo-mirror:com.tencent.mm", "微信"));
+        let ctx = egui::Context::default();
+        assert!(extract_app_icon_texture(&ctx, "com.oplus.devicespace", "OPPO 互联").is_none());
+        assert!(extract_app_icon_texture(&ctx, "nonexistent.app.id.xyz", "NoSuchApp").is_none());
     }
 }

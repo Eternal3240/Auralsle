@@ -520,7 +520,7 @@ mod app_win {
 // ---------------------------------------------------------------
 
 /// 各 AI 客户端的品牌图标，随 mod 一起分发，不依赖上游素材版本。
-fn icon_bytes(key: &str) -> Option<&'static [u8]> {
+pub(crate) fn icon_bytes(key: &str) -> Option<&'static [u8]> {
     let k = key.to_ascii_lowercase();
     let bytes: &'static [u8] = if k.contains("doubao") || key.contains("豆包") {
         include_bytes!("assets/ai-icons/doubao.svg")
@@ -532,7 +532,9 @@ fn icon_bytes(key: &str) -> Option<&'static [u8]> {
         include_bytes!("assets/ai-icons/codex.svg")
     } else if k.contains("deepseek") || k == "dsh" {
         include_bytes!("assets/ai-icons/deepseek.svg")
-    } else if k.contains("gemini") || k.contains("antigravity") {
+    } else if k.contains("antigravity") || k == "agy" {
+        include_bytes!("../../assets/ai-icons/antigravity.svg")
+    } else if k.contains("gemini") {
         include_bytes!("assets/ai-icons/gemini.svg")
     } else if k.contains("kimi") {
         include_bytes!("assets/ai-icons/kimi.svg")
@@ -552,14 +554,25 @@ fn icon_bytes(key: &str) -> Option<&'static [u8]> {
     Some(bytes)
 }
 
-fn icon_texture(ctx: &egui::Context, key: &str, px: u32) -> Option<egui::TextureHandle> {
-    let id = egui::Id::new(("ai-status-mod-icon-v42", key, px));
+pub(crate) fn icon_texture(ctx: &egui::Context, key: &str, px: u32) -> Option<egui::TextureHandle> {
+    let id = egui::Id::new(("ai-status-mod-icon-v44", key, px));
     if let Some(t) = ctx.data_mut(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return Some(t);
     }
     let k = key.to_ascii_lowercase();
     let render_px = px.max(32);
-    let mut image = if k.contains("doubao") || key.contains("豆包") {
+    let mut image = if !cfg!(test) && (k.contains("antigravity") || k == "agy") {
+        if let Some(real_img) = crate::icons::load_antigravity_software_icon_image(render_px) {
+            real_img
+        } else {
+            let bytes = icon_bytes(key)?;
+            egui_extras::image::load_svg_bytes_with_size(
+                bytes,
+                Some(egui::load::SizeHint::Size(render_px, render_px)),
+            )
+            .ok()?
+        }
+    } else if k.contains("doubao") || key.contains("豆包") {
         if let Ok(dyn_img) = image::load_from_memory(include_bytes!("../../assets/ai-icons/doubao.png")) {
             let rgba = dyn_img
                 .resize_exact(render_px, render_px, image::imageops::FilterType::Lanczos3)
@@ -594,7 +607,9 @@ fn icon_texture(ctx: &egui::Context, key: &str, px: u32) -> Option<egui::Texture
                 *p = Color32::from_rgba_unmultiplied(217, 119, 87, p.a());
             }
         }
-    } else if k.contains("gemini") || k.contains("antigravity") {
+    } else if k.contains("antigravity") || k == "agy" {
+        // Antigravity 官方多色 SVG 保留原本渐变配色，不被单色覆写
+    } else if k.contains("gemini") {
         for p in &mut image.pixels {
             if p.a() > 0 {
                 *p = Color32::from_rgba_unmultiplied(78, 149, 255, p.a());
@@ -703,7 +718,7 @@ pub fn draw_compact(c: &Card, left: f32, alpha: f32) {
         // 写入方还写着 working 就照实说「工作中」；静默只在展开页用颜色提示，
         // 绝不因为超时改口说「已完成」。
         let label = s.agent.phase.label();
-        draw_icon(&c, &s.agent.key, x + ICON / 2.0, ICON_CY, icon_side, color);
+        draw_icon(&c, &s.agent.key, x + icon_side / 2.0, ICON_CY, icon_side, color);
         // [Fly-Island AgentAI 状态灯]：根据生命周期阶段在图标右上角渲染呼吸/闪烁状态灯（工作中呼吸蓝、待审批快闪琥珀金、完成翠绿、出错红）
         if !cfg!(test) && cfg.agent_status_lamp {
             let t_sec = c.ui.input(|i| i.time) as f32;
@@ -712,13 +727,13 @@ pub fn draw_compact(c: &Card, left: f32, alpha: f32) {
                 state::Phase::Working | state::Phase::Tool | state::Phase::Running => ((t_sec * 3.8).sin() * 0.5 + 0.5),
                 _ => 0.85,
             };
-            let lamp_x = x + ICON - 1.0;
+            let lamp_x = x + icon_side - 1.5;
             let lamp_y = ICON_CY - 6.2;
             c.circle(lamp_x, lamp_y, 3.8 + pulse * 1.4, color.gamma_multiply(0.32 * pulse));
             c.circle(lamp_x, lamp_y, 2.3, color);
         }
         c.text(
-            x + ICON + auralsle_ai_status::ICON_TEXT_GAP,
+            x + icon_side + auralsle_ai_status::ICON_TEXT_GAP,
             TEXT_BASE,
             label,
             auralsle_ai_status::label_size(),
@@ -1887,12 +1902,21 @@ impl DevicePill {
     fn label(kind: crate::bt::DeviceKind) -> &'static str {
         use crate::bt::DeviceKind::*;
         match kind {
-            Bone | Earbuds | Headphones => "耳机",
+            Headphones | Earbuds | EarbudsStem | EarbudsStemTips | OpenEar | Bone | HearingAid => "耳机",
             Speaker => "音箱",
+            Mic => "麦克风",
             Keyboard => "键盘",
             Mouse => "鼠标",
-            Gamepad => "手柄",
+            Trackpad => "触控板",
+            Pen => "手写笔",
+            Presenter | Remote => "遥控",
+            Gamepad | JoyCon => "手柄",
             Phone => "手机",
+            Tablet => "平板",
+            Watch => "手表",
+            Band => "手环",
+            Health => "穿戴",
+            Receiver24G => "接收器",
             Other => "设备",
         }
     }
@@ -2144,7 +2168,7 @@ fn draw_brimdeck_device_island(
         (
             "耳机",
             DeviceKind::Headphones,
-            find_kind(|k| matches!(k, DeviceKind::Earbuds | DeviceKind::Headphones | DeviceKind::Bone | DeviceKind::Speaker)),
+            find_kind(|k| k.is_audio()),
         ),
         ("手柄", DeviceKind::Gamepad, find_kind(|k| k == DeviceKind::Gamepad || k == DeviceKind::Other)),
     ];
@@ -2408,8 +2432,10 @@ fn paint_fly_provider_badge(c: &Card, cx: f32, cy: f32, provider_key: &str) {
         c.centered_text(cx, cy, "D", 7.8, W::Bold, Color32::WHITE, H::Center);
     } else if pk.contains("doubao") || pk.contains("豆包") {
         draw_icon(c, "doubao", cx, cy, 13.0, Color32::from_rgb(62, 109, 240));
-    } else if pk.contains("antigravity") || pk.contains("gemini") {
-        draw_icon(c, "antigravity", cx, cy, 13.0, Color32::from_rgb(78, 149, 255));
+    } else if pk.contains("antigravity") || pk == "agy" {
+        draw_icon(c, "antigravity", cx, cy, 13.0, Color32::WHITE);
+    } else if pk.contains("gemini") {
+        draw_icon(c, "gemini", cx, cy, 13.0, Color32::from_rgb(78, 149, 255));
     } else if pk.contains("workbuddy") || pk.contains("codebuddy") {
         draw_icon(c, "workbuddy", cx, cy, 13.0, Color32::from_rgb(16, 185, 129));
     } else if pk.contains("grok") {
@@ -3214,24 +3240,28 @@ pub fn draw_pill_settings(ui: &mut egui::Ui) {
                 name: "AirPods Pro".into(),
                 kind: crate::bt::DeviceKind::Earbuds,
                 battery: Some(92),
+                ..Default::default()
             },
             crate::bt::Device {
                 id: "VOLTIDE_MOUSE".into(),
                 name: "Voltide 鼠标".into(),
                 kind: crate::bt::DeviceKind::Mouse,
                 battery: Some(76),
+                ..Default::default()
             },
             crate::bt::Device {
                 id: "DEMO_KB".into(),
                 name: "无线键盘".into(),
                 kind: crate::bt::DeviceKind::Keyboard,
                 battery: Some(64),
+                ..Default::default()
             },
             crate::bt::Device {
                 id: "DEMO_PAD".into(),
                 name: "无线手柄".into(),
                 kind: crate::bt::DeviceKind::Gamepad,
                 battery: Some(88),
+                ..Default::default()
             },
         ];
         let style_descs = [
@@ -4650,4 +4680,33 @@ pub fn draw_venu_border_effects_panel(ui: &mut egui::Ui, skin_fill: Color32, is_
 /// 预热 AI 工作状态常用缓存（消除首次切页卡顿）。
 pub fn prewarm_icons(_ctx: &egui::Context) {
     let _ = state::snapshot();
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+
+    #[test]
+    fn gemini_and_antigravity_status_icons_are_distinct() {
+        let g_bytes = icon_bytes("gemini").unwrap();
+        let a_bytes = icon_bytes("antigravity").unwrap();
+        assert_ne!(g_bytes, a_bytes, "Gemini 与 Gemini Antigravity 应使用完全不同的图标资源");
+
+        let ctx = egui::Context::default();
+        let out_g = ctx.run(egui::RawInput::default(), |ctx| {
+            let _ = icon_texture(ctx, "gemini", 32).unwrap();
+        });
+        let out_a = ctx.run(egui::RawInput::default(), |ctx| {
+            let _ = icon_texture(ctx, "antigravity", 32).unwrap();
+        });
+        let px_g = out_g.textures_delta.set.iter().find_map(|(_, d)| match &d.image {
+            egui::ImageData::Color(img) => Some(img.pixels.clone()),
+            _ => None,
+        }).unwrap();
+        let px_a = out_a.textures_delta.set.iter().find_map(|(_, d)| match &d.image {
+            egui::ImageData::Color(img) => Some(img.pixels.clone()),
+            _ => None,
+        }).unwrap();
+        assert_ne!(px_g, px_a, "Gemini 与 Antigravity 渲染出的状态栏纹理像素必须明显区分");
+    }
 }

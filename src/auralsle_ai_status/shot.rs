@@ -141,7 +141,9 @@ fn scan_ai_providers() -> Vec<crate::quota::Provider> {
                             Some(Provider::Kiro)
                         } else if name.contains("grok") || name.contains("cursor") {
                             Some(Provider::GrokBot)
-                        } else if name.contains("gemini") || name.contains("antigravity") {
+                        } else if name.contains("antigravity") {
+                            Some(Provider::Antigravity)
+                        } else if name.contains("gemini") {
                             Some(Provider::Gemini)
                         } else {
                             None

@@ -6,9 +6,10 @@ const REPOSITORY: &str = "https://github.com/Eternal3240/Auralsle";
 const API: &str = "https://api.github.com/repos/Eternal3240/Auralsle/releases/latest";
 const RELEASES: &str = "https://github.com/Eternal3240/Auralsle/releases/latest";
 const BACKUP_DOWNLOAD: &str = "https://github.com/Eternal3240/Auralsle/releases";
-const STARTUP_DELAY: Duration = Duration::from_secs(10);
+const STARTUP_WINDOW: Duration = Duration::from_secs(10);
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 const RETRY_INTERVAL: Duration = Duration::from_secs(3600);
+const MANUAL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 struct Release { version: String, notes: String, page: String, package: Option<Package> }
@@ -26,8 +27,9 @@ pub(crate) struct State {
     dialog_open: bool,
     focus_requested: bool,
     logo: Option<egui::TextureHandle>,
-    next_check: Option<Instant>,
-    automatic_check: bool,
+    startup_check_until: Option<Instant>,
+    manual_check_after: Option<Instant>,
+    automatic_check_until: Option<Instant>,
     notified_version: Option<String>,
     history_path: Option<PathBuf>,
 }
@@ -39,12 +41,13 @@ impl Drop for State {
 impl State {
     pub(crate) fn load(path: PathBuf) -> Self {
         let mut state = State::default();
-        if let Some((next, version)) = std::fs::read(&path).ok()
-            .and_then(|bytes| serde_json::from_slice::<(i64, Option<String>)>(&bytes).ok()) {
-            let seconds = next.saturating_sub(chrono::Utc::now().timestamp()).clamp(0, CHECK_INTERVAL.as_secs() as i64);
-            state.next_check = Some(Instant::now() + STARTUP_DELAY.max(Duration::from_secs(seconds as u64)));
-            state.notified_version = version;
+        let (next, notified_version) = std::fs::read(&path).ok()
+            .and_then(|bytes| serde_json::from_slice::<(i64, Option<String>)>(&bytes).ok())
+            .unwrap_or_default();
+        if option_env!("AURALSLE_TEST_BUILD").is_none() && next <= chrono::Utc::now().timestamp() {
+            state.startup_check_until = Some(Instant::now() + STARTUP_WINDOW);
         }
+        state.notified_version = notified_version;
         state.history_path = Some(path);
         state
     }
@@ -60,15 +63,17 @@ impl State {
         }
     }
 
-    fn should_check(&mut self, now: Instant) -> bool {
-        now >= *self.next_check.get_or_insert(now + STARTUP_DELAY) && self.rx.is_none() && !self.dialog_open
+    fn take_startup_check(&mut self, now: Instant) -> Option<Instant> {
+        self.startup_check_until.take().filter(|until| now < *until)
     }
 
-    fn begin_check(&mut self, ctx: &egui::Context, automatic: bool, load: impl FnOnce() -> Result<Option<Release>, String> + Send + 'static) -> bool {
-        if self.rx.is_some() { return false; }
-        let (tx, rx) = mpsc::channel(); self.rx = Some(rx); self.automatic_check = automatic;
-        let interval = Self::configured_interval();
-        self.next_check = Some(Instant::now() + interval);
+    fn manual_wait(&self) -> Duration {
+        self.manual_check_after.map(|t| t.saturating_duration_since(Instant::now())).unwrap_or_default()
+    }
+
+    fn begin_check(&mut self, ctx: &egui::Context, automatic_until: Option<Instant>, load: impl FnOnce() -> Result<Option<Release>, String> + Send + 'static) -> bool {
+        if self.rx.is_some() || (automatic_until.is_none() && !self.manual_wait().is_zero()) { return false; }
+        let (tx, rx) = mpsc::channel(); self.rx = Some(rx); self.automatic_check_until = automatic_until;
         self.message.clear(); self.result = None; self.dialog_open = false; self.focus_requested = false;
         let ctx = ctx.clone();
         std::thread::spawn(move || { let _ = tx.send(Event::Checked(load())); ctx.request_repaint(); });
@@ -90,19 +95,24 @@ impl State {
                 Some(Ok(event)) => event,
                 Some(Err(mpsc::TryRecvError::Disconnected)) => {
                     self.rx = None; self.cancel = None;
-                    self.automatic_check = false; self.next_check = Some(Instant::now() + RETRY_INTERVAL);
+                    if self.automatic_check_until.take().is_some() { self.remember_check(RETRY_INTERVAL); }
                     self.message = "检查或下载已中断，请重试。".into(); break;
                 }
                 _ => break,
             };
             match event {
                 Event::Checked(result) => {
-                    let automatic = std::mem::take(&mut self.automatic_check);
-                    let delay = if result.is_err() { RETRY_INTERVAL } else { Self::configured_interval() };
-                    self.next_check = Some(Instant::now() + delay);
-                    self.dialog_open = matches!(&result, Ok(Some(release)) if !automatic || self.notified_version.as_deref() != Some(release.version.as_str()));
+                    let automatic_until = self.automatic_check_until.take();
+                    let now = Instant::now();
+                    self.manual_check_after = Some(now + MANUAL_INTERVAL);
+                    let new_notice = matches!(&result, Ok(Some(release)) if self.notified_version.as_deref() != Some(release.version.as_str()));
+                    self.dialog_open = matches!(&result, Ok(Some(_))) && automatic_until.is_none_or(|until| now < until && new_notice);
                     self.focus_requested = self.dialog_open;
                     if self.dialog_open { if let Ok(Some(release)) = &result { self.notified_version = Some(release.version.clone()); } }
+                    // 错过启动时段的新版留在设置里，下次启动时可以再提醒。
+                    let delay = if result.is_err() { RETRY_INTERVAL }
+                        else if new_notice && !self.dialog_open { Duration::ZERO }
+                        else { Self::configured_interval() };
                     self.remember_check(delay);
                     self.result = Some(result); self.rx = None;
                 }
@@ -130,15 +140,18 @@ impl State {
                 }
             }
         }
-        // 复用主界面的低频轮询；只在实际开启定时检查更新且到达设定周期时才启动线程。
+        // 复用主界面的低频轮询；只在实际开启定时检查更新且到达启动窗口时才启动线程。
         let auto_on = cfg!(test) || crate::auralsle_ai_status::config::get().auto_check_updates;
-        if !cfg!(test) && auto_on && self.should_check(Instant::now()) { self.begin_check(ctx, true, check); }
-        if self.rx.is_some() && !self.automatic_check { ctx.request_repaint_after(Duration::from_millis(100)); }
+        if !cfg!(test) && auto_on {
+            if let Some(until) = self.take_startup_check(Instant::now()) { self.begin_check(ctx, Some(until), check); }
+        }
+        if self.rx.is_some() && self.automatic_check_until.is_none() { ctx.request_repaint_after(Duration::from_millis(100)); }
     }
 
     pub(crate) fn ui(&mut self, ui: &mut egui::Ui) {
-        if ui.add_enabled(self.rx.is_none(), egui::Button::new("检查更新")).clicked() {
-            self.begin_check(ui.ctx(), false, check);
+        let wait = self.manual_wait();
+        if ui.add_enabled(self.rx.is_none() && wait.is_zero(), egui::Button::new("检查更新")).clicked() {
+            self.begin_check(ui.ctx(), None, check);
         }
         match &self.result {
             Some(Ok(Some(release))) => {
@@ -150,6 +163,11 @@ impl State {
             Some(Err(message)) => { ui.label(message); ui.hyperlink_to("打开发布页", RELEASES); }
             None if self.rx.is_some() => { ui.label("正在检查…"); }
             _ => {}
+        }
+        if self.rx.is_none() && !wait.is_zero() {
+            let seconds = wait.as_secs_f64().ceil() as u64;
+            ui.weak(format!("显示上次结果，本机 {seconds} 秒后可重新检查。"));
+            ui.ctx().request_repaint_after(Duration::from_secs(1).min(wait));
         }
         ui.add_space(5.0);
     }
@@ -363,14 +381,25 @@ fn http_agent() -> Result<ureq::Agent, String> {
     update_agent(proxy.as_deref(), Duration::from_secs(15))
 }
 
+fn check_error(error: ureq::Error) -> String {
+    const LIMITED: &str = "更新服务暂时限流，请稍后再试。";
+    match error {
+        ureq::Error::Status(429, _) => LIMITED,
+        ureq::Error::Status(403, response) => {
+            let limited = response.header("X-RateLimit-Remaining") == Some("0") || response.has("Retry-After")
+                || serde_json::from_reader::<_, serde_json::Value>(response.into_reader().take(8192))
+                    .is_ok_and(|body| body["message"].as_str().is_some_and(|s| s.to_ascii_lowercase().contains("rate limit")));
+            if limited { LIMITED } else { "更新服务拒绝访问（403），可打开发布页查看版本。" }
+        }
+        ureq::Error::Status(404, _) => "暂未找到正式版本，请查看发布页",
+        _ => "无法连接更新服务，请检查网络或代理后重试",
+    }.to_owned()
+}
+
 fn check() -> Result<Option<Release>, String> {
     let response = http_agent()?
         .get(API).set("User-Agent", concat!("AuraIsle/", env!("CARGO_PKG_VERSION")))
-        .set("Accept", "application/vnd.github+json").call().map_err(|error| match error {
-            ureq::Error::Status(403 | 429, _) => "检查过于频繁，请稍后重试".to_owned(),
-            ureq::Error::Status(404, _) => "暂未找到正式版本，请查看发布页".to_owned(),
-            _ => "无法连接更新服务，请检查网络或代理后重试".to_owned(),
-        })?;
+        .set("Accept", "application/vnd.github+json").call().map_err(check_error)?;
     let value: serde_json::Value = serde_json::from_reader(response.into_reader())
         .map_err(|_| "更新信息格式异常，请稍后重试".to_owned())?;
     release_info(&value, env!("CARGO_PKG_VERSION"))
@@ -692,6 +721,138 @@ mod tests {
         state.dismiss();
         assert!(!state.dialog_open); assert!(cancel.load(Ordering::Relaxed));
         assert!(matches!(state.result, Some(Ok(Some(_)))));
+    }
+
+    #[test]
+    fn automatic_check_does_not_wait_for_cooldown_in_this_session() {
+        let path = std::env::temp_dir().join(format!("auralsle-update-cooldown-{}.json", std::process::id()));
+        let next = chrono::Utc::now().timestamp() + 60;
+        std::fs::write(&path, serde_json::to_vec(&(next, Some("v0.6.66"))).unwrap()).unwrap();
+        let mut state = State::load(path.clone());
+        assert!(state.startup_check_until.is_none());
+        assert!(state.take_startup_check(Instant::now() + Duration::from_secs(60)).is_none());
+        std::fs::write(&path, b"[0,null]").unwrap();
+        let state = State::load(path.clone());
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(state.startup_check_until.is_some(), option_env!("AURALSLE_TEST_BUILD").is_none());
+    }
+
+    #[test]
+    fn automatic_check_is_consumed_during_startup() {
+        let start = Instant::now();
+        let until = start + STARTUP_WINDOW;
+        let mut state = State::default();
+        state.startup_check_until = Some(until);
+        assert_eq!(state.take_startup_check(start), Some(until));
+        assert!(state.take_startup_check(start).is_none());
+        state.startup_check_until = Some(until);
+        assert!(state.take_startup_check(until).is_none());
+    }
+
+    #[test]
+    fn automatic_check_records_cooldown_for_future_launches() {
+        let path = std::env::temp_dir().join(format!("auralsle-update-retry-{}.json", std::process::id()));
+        for (result, delay) in [(Ok(None), 24 * 3600), (Err("网络失败".into()), 3600)] {
+            let mut state = State::default();
+            state.history_path = Some(path.clone());
+            state.automatic_check_until = Some(Instant::now() + STARTUP_WINDOW);
+            let (tx, rx) = mpsc::channel(); state.rx = Some(rx);
+            tx.send(Event::Checked(result)).unwrap();
+            let before = chrono::Utc::now().timestamp();
+            state.poll(&egui::Context::default());
+            let (next, _): (i64, Option<String>) = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert!((before + delay..=chrono::Utc::now().timestamp() + delay).contains(&next));
+            assert!(!state.dialog_open); assert!(!state.focus_requested);
+            assert!(state.automatic_check_until.is_none()); assert!(state.rx.is_none());
+            assert!(state.take_startup_check(Instant::now()).is_none());
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn late_startup_result_stays_available_without_opening_the_dialog() {
+        let path = std::env::temp_dir().join(format!("auralsle-update-late-{}.json", std::process::id()));
+        let mut state = State::default();
+        state.history_path = Some(path.clone());
+        state.automatic_check_until = Some(Instant::now());
+        let (tx, rx) = mpsc::channel(); state.rx = Some(rx);
+        tx.send(Event::Checked(Ok(Some(Release {
+            version: "v0.6.67".into(), notes: String::new(), page: RELEASES.into(), package: None,
+        })))).unwrap();
+        state.poll(&egui::Context::default());
+        assert!(!state.dialog_open);
+        assert!(!state.focus_requested);
+        assert!(matches!(&state.result, Some(Ok(Some(release))) if release.version == "v0.6.67"));
+        let (next, notified_version): (i64, Option<String>) = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(next <= chrono::Utc::now().timestamp());
+        assert!(notified_version.is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn automatic_notice_is_once_per_version_and_manual_check_can_reopen_it() {
+        let path=std::env::temp_dir().join(format!("auralsle-update-check-{}.json",std::process::id()));
+        let _=std::fs::remove_file(&path);
+        for (automatic, version, expected) in [(true, "v0.6.65", true), (true, "v0.6.65", false),
+            (true, "v0.6.66", true), (false, "v0.6.66", true)] {
+            let mut state=State::load(path.clone());
+            if path.exists() { assert!(state.startup_check_until.is_none()); }
+            state.automatic_check_until = automatic.then(|| Instant::now() + STARTUP_WINDOW);
+            let (tx, rx) = mpsc::channel(); state.rx = Some(rx);
+            tx.send(Event::Checked(Ok(Some(Release { version: version.into(), notes: String::new(), page: RELEASES.into(),
+                package: Some(Package { url: String::new(), size: 1, hash: String::new() }) })))).unwrap();
+            state.poll(&egui::Context::default());
+            assert_eq!(state.dialog_open, expected); assert_eq!(state.focus_requested, expected);
+            assert!(state.rx.is_none()); assert!(state.cancel.is_none()); assert_eq!(state.progress, 0.0);
+            assert!(matches!(&state.result, Some(Ok(Some(release))) if release.version == version));
+            state.dismiss();
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn recent_check_keeps_its_result_on_manual_retry() {
+        let ctx = egui::Context::default();
+        for result in [Ok(None), Err("更新服务拒绝访问".into())] {
+            let mut state = State::default();
+            let (tx, rx) = mpsc::channel();
+            state.rx = Some(rx);
+            tx.send(Event::Checked(result)).unwrap();
+            state.poll(&ctx);
+            assert!(!state.begin_check(&ctx, None, || Ok(None)));
+            assert!(state.result.is_some() && state.rx.is_none());
+            let page = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| state.ui(ui));
+            });
+            assert!(page.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Text(t) if t.galley.text().contains("秒后可重新检查"))));
+            state.manual_check_after = Some(Instant::now());
+            assert!(state.begin_check(&ctx, None, || Ok(None)));
+        }
+    }
+
+    #[test]
+    fn update_service_distinguishes_rate_limits_from_access_denied() {
+        for (code, headers, body, limited) in [
+            (429, "", "", true),
+            (403, "X-RateLimit-Remaining: 0\r\n", "", true),
+            (403, "Retry-After: 60\r\n", "", true),
+            (403, "", r#"{"message":"You have exceeded a secondary rate limit."}"#, true),
+            (403, "X-RateLimit-Remaining: 59\r\n", r#"{"message":"Forbidden"}"#, false),
+        ] {
+            let response = format!("HTTP/1.1 {code} Error\r\n{headers}\r\n{body}").parse().unwrap();
+            let message = check_error(ureq::Error::Status(code, response));
+            assert!(message.contains(if limited { "暂时限流" } else { "拒绝访问" }), "{message}");
+        }
+    }
+
+    #[test]
+    fn background_checks_do_not_overlap_active_work() {
+        let mut state = State::default();
+        let ctx = egui::Context::default();
+        assert!(state.begin_check(&ctx, Some(Instant::now() + STARTUP_WINDOW), || Ok(None)));
+        assert!(!state.begin_check(&ctx, None, || panic!("已有任务时不应发起检查")));
+        assert!(matches!(state.rx.as_ref().unwrap().recv_timeout(Duration::from_secs(3)), Ok(Event::Checked(Ok(None)))));
     }
 
     #[test]

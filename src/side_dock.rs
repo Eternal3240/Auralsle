@@ -6,8 +6,9 @@
 //! 吉祥物和岛上歌词是横向内容，侧边停靠时不显示。
 
 use crate::app::{App, Env, Phase, BAR_H_MIN, BAR_W_MIN, PILL_GAP, PW};
-use crate::model::{Dock, IslandShape};
+use crate::model::{Dock, IslandShape, ResidentDate};
 use crate::paint::{self, Card, H};
+use crate::resident_date::ResidentDay;
 use crate::theme::{self, size, W};
 use eframe::egui::{Color32, Pos2, Rect, Vec2};
 
@@ -21,14 +22,14 @@ pub const SIDE_HALF_EXTENT: f32 = 150.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum SideItem {
-    Clock, Weather, Battery, Music, Focus, Bell,
+    Clock, Date(f32), Weather, Battery, Music, Focus, Bell, Wireless, Performance(f32),
     /// AI 额度：账号下标（None 为「+N」）与高度。
     Quota(usize, f32),
 }
 
 impl SideItem {
     fn height(self, clock_seconds: bool) -> f32 {
-        match self { Self::Clock => if clock_seconds { 46.0 } else { 32.0 }, Self::Weather => 40.0, Self::Battery => 20.0, Self::Music => 18.0, Self::Focus => 22.0, Self::Bell => 22.0, Self::Quota(_, h) => h }
+        match self { Self::Performance(h) | Self::Date(h) => h, Self::Clock => if clock_seconds { 46.0 } else { 32.0 }, Self::Weather => 40.0, Self::Wireless => 37.0, Self::Battery => 20.0, Self::Music => 18.0, Self::Focus => 22.0, Self::Bell => 22.0, Self::Quota(_, h) => h }
     }
 }
 
@@ -40,8 +41,15 @@ impl App {
     pub(crate) fn side_items(&self) -> Vec<SideItem> {
         let mut items = Vec::new();
         if self.settings.show_clock { items.push(SideItem::Clock); }
+        match self.settings.resident_date {
+            ResidentDate::Off => {},
+            ResidentDate::Gregorian => items.push(SideItem::Date(20.0)),
+            ResidentDate::LunarOnly | ResidentDate::Lunar => items.push(SideItem::Date(44.0)),
+        }
         if self.weather_pill().is_some() {items.push(SideItem::Weather);}
+        if !self.wireless_resident().is_empty() { items.push(SideItem::Wireless); }
         if self.settings.show_battery && self.resident_power.0.is_some() { items.push(SideItem::Battery); }
+        if self.performance_on_bar() { items.push(SideItem::Performance(self.settings.performance_bar.side_height(self.settings.performance_metrics))); }
         if self.media.is_music() { items.push(SideItem::Music); }
         if self.pomo.running { items.push(SideItem::Focus); }
         items.extend(self.quota_side_items().into_iter().map(|(index, h)| SideItem::Quota(index, h)));
@@ -63,12 +71,13 @@ impl App {
         if self.settings.island_shape == IslandShape::Pill { PILL_GAP } else { 0.0 }
     }
 
-    /// 宽 `w`、高 `h` 的岛体在画布 `win` 里的位置：顶部停靠水平居中贴顶，
+    /// 宽 `w`、高 `h` 的岛体在画布 `win` 里的位置：上下停靠水平居中贴边，
     /// 左右停靠贴边、竖直居中。
     pub(crate) fn island_rect(&self, win: Rect, w: f32, h: f32) -> Rect {
         let gap = self.side_gap();
         match self.dock() {
             Dock::Top => Rect::from_min_size(Pos2::new(win.center().x - w / 2.0, win.top() + gap), Vec2::new(w, h)),
+            Dock::Bottom => Rect::from_min_size(Pos2::new(win.center().x - w / 2.0, win.bottom() - gap - h), Vec2::new(w, h)),
             Dock::Left => Rect::from_min_size(Pos2::new(win.left() + gap, win.center().y - h / 2.0), Vec2::new(w, h)),
             Dock::Right => Rect::from_min_size(Pos2::new(win.right() - gap - w, win.center().y - h / 2.0), Vec2::new(w, h)),
         }
@@ -93,7 +102,7 @@ impl App {
         match self.dock() {
             Dock::Left => Rect::from_min_max(Pos2::new(win.left(), rect.top()), rect.max),
             Dock::Right => Rect::from_min_max(rect.min, Pos2::new(win.right(), rect.bottom())),
-            Dock::Top => rect,
+            Dock::Top | Dock::Bottom => rect,
         }
     }
 
@@ -101,19 +110,20 @@ impl App {
     /// 使液态玻璃折射边与底色对比度实时反映岛体正下方与边缘紧邻的屏幕内容。
     pub fn backdrop_points(&self) -> Vec<(f32, f32)> {
         match self.dock() {
-            Dock::Top => {
+            Dock::Top | Dock::Bottom => {
                 let cx = crate::app::LEFT_PAD + crate::app::WIN_W / 2.0 + self.notice_width.pos * 0.5;
                 let hw = (self.w.pos * 0.5 + 5.0).max(48.0);
                 let by = (self.h.pos + 4.0).clamp(22.0, crate::app::WIN_H - 4.0);
+                let y = |v: f32| if self.dock() == Dock::Bottom { crate::app::WIN_H - v } else { v };
                 vec![
-                    (cx - hw, 4.0),
-                    (cx - hw, (by * 0.5).max(12.0)),
-                    (cx - hw * 0.85, by),
-                    (cx - hw * 0.35, by),
-                    (cx, by),
-                    (cx + hw * 0.35, by),
-                    (cx + hw * 0.85, by),
-                    (cx + hw, 4.0),
+                    (cx - hw, y(4.0)),
+                    (cx - hw, y((by * 0.5).max(12.0))),
+                    (cx - hw * 0.85, y(by)),
+                    (cx - hw * 0.35, y(by)),
+                    (cx, y(by)),
+                    (cx + hw * 0.35, y(by)),
+                    (cx + hw * 0.85, y(by)),
+                    (cx + hw, y(4.0)),
                 ]
             }
             dock => {
@@ -126,7 +136,7 @@ impl App {
     }
 
     /// 竖向胶囊的内容。`c` 的原点是胶囊左上角。
-    pub(crate) fn side_bar(&mut self, c: &Card, width: f32, height: f32, env: &Env) {
+    pub(crate) fn side_bar(&mut self, c: &Card, width: f32, height: f32, env: &Env, resident_day: Option<&ResidentDay>) {
         let items = self.side_items();
         let total: f32 = items.iter().map(|i| i.height(self.settings.clock_seconds)).sum();
         let cx = width / 2.0;
@@ -147,8 +157,11 @@ impl App {
                         c.text(cx, top + 28.0, text.rsplit(':').next().unwrap_or("--"), 12.0, W::Bold, theme::GRAY, H::Center);
                     }
                 }
+                SideItem::Date(_) => if let Some(day) = resident_day { day.draw_side(c, cx, mid); },
                 SideItem::Weather => self.draw_side_weather(c,cx,mid),
+                SideItem::Wireless => self.draw_wireless_side(c, cx, mid),
                 SideItem::Battery => paint::battery(c, cx, mid, env.battery, env.charging, 0.72),
+                SideItem::Performance(h) => self.side_performance(c, cx, mid, h),
                 SideItem::Music => paint::playback_bars(c, cx, mid, self.t, self.media.playing, theme::WHITE),
                 SideItem::Focus => {
                     let minutes = (self.pomo.remaining / 60.0).ceil().max(0.0) as u32;

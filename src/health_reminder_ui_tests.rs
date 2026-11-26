@@ -141,8 +141,8 @@ fn health_entering_fullscreen_clears_active_and_queued_popups_only(){
     let health=|alert:&crate::extras::Alert|alert.health().is_some();
     assert!(!h.app.notice.as_ref().is_some_and(health) && !h.app.hud_notice.as_ref().is_some_and(health),"全屏隐藏时清除正在显示的健康横幅");
     assert!(!h.app.alerts.iter().any(health),"健康提醒不能留在弹窗队列里等退出后重播");
-    assert!(!h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::Notify(title,_)if title=="喝水时间到了" || title==crate::app::SIT_TITLE)),"尚未发出的健康系统通知也要抑制");
-    assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::Notify(title,_)if title=="待办到时间了")),"其他类型提醒沿用原有逻辑");
+    assert!(!h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::Notify(title,..)if title=="喝水时间到了" || title==crate::app::SIT_TITLE)),"尚未发出的健康系统通知也要抑制");
+    assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::Notify(title,..)if title=="待办到时间了")),"其他类型提醒沿用原有逻辑");
     assert_eq!(h.app.health_pending,[true,true]);
     h.fullscreen=false;h.frame(vec![]);
     assert!(!h.app.notice.as_ref().is_some_and(health));
@@ -157,6 +157,31 @@ fn health_fullscreen_with_hide_disabled_keeps_normal_reminders(){
     h.t+=61.0*60.0;h.cmds.clear();h.frame(vec![]);
     assert!(h.app.notice.as_ref().is_some_and(|a|a.health().is_some()));
     assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::Notify(..))),"关闭全屏隐藏时仍正常提醒");
+}
+
+#[test]
+fn health_sound_follows_sound_setting_and_only_rings_when_first_due() {
+    use crate::app::{Cmd, NotificationSound};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for (enabled,sound,expected) in [
+        (true,true,Some(NotificationSound::Health)),
+        (true,false,Some(NotificationSound::Silent)),
+        (false,true,None),
+    ] {
+        let mut h=H::new();
+        h.app.settings.notifications=enabled;
+        h.app.settings.sound=sound;
+        for kind in crate::extras::HealthReminder::ALL {
+            h.app.pending.clear();
+            h.app.alert(kind.title(),"到时间了",2,true);
+            h.app.alert(kind.title(),"到时间了",2,true);
+            let sounds:Vec<_>=h.app.pending.iter().filter_map(|cmd|match cmd {
+                Cmd::Notify(title,_,sound) if title==kind.title()=>Some(*sound),
+                _=>None,
+            }).collect();
+            assert_eq!(sounds,expected.into_iter().collect::<Vec<_>>());
+        }
+    }
 }
 
 #[test]

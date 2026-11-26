@@ -18,9 +18,12 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CombineRgn, CreatePolygonRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, HRGN, RGN_OR, WINDING};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState,VK_LBUTTON,VK_RBUTTON};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, IsWindowEnabled, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+#[path = "native_capture.rs"]
+mod capture;
 
 const SUBCLASS_ID: usize = 0x4E55_5341; // "AURALSLE"
 #[allow(dead_code)]
@@ -30,6 +33,7 @@ const WS_EX_NOREDIRECTIONBITMAP: isize = 0x0020_0000;
 static HIT: OnceLock<Mutex<Vec<(i32, i32, i32, i32)>>> = OnceLock::new();
 /// 前台窗口切到别的进程时置位，由主线程消费。
 static FG_CHANGED: AtomicBool = AtomicBool::new(false);
+static DISPLAY_CHANGED: AtomicBool = AtomicBool::new(false);
 
 // `WS_EX_NOREDIRECTIONBITMAP` 只能在 CreateWindowEx 时设置（运行时 SetWindowLongPtrW
 // 会回 ERROR_INVALID_PARAMETER），本项目用 GL 合成窗口，加上这一位后画面上什么都
@@ -286,6 +290,9 @@ unsafe extern "system" fn subclass(
     _id: usize,
     _data: usize,
 ) -> LRESULT {
+    if msg==WM_DISPLAYCHANGE || (msg==WM_SETTINGCHANGE && wp.0==SPI_SETWORKAREA.0 as usize) {
+        DISPLAY_CHANGED.store(true,Ordering::Relaxed);
+    }
     if matches!(msg,WM_DWMCOMPOSITIONCHANGED|WM_DISPLAYCHANGE|WM_DWMCOLORIZATIONCOLORCHANGED)
         || (msg==WM_SHOWWINDOW && wp.0!=0) {
         // 隐藏创建到首次显示、隐藏后恢复时也要恢复透明；等框架处理完窗口状态再应用。
@@ -412,20 +419,34 @@ fn surface_needs_outline_clip(backend:Option<eframe::wgpu::Backend>,vendor:&str,
 }
 
 /// 只识别同屏顶部的宽条窗口，普通弹窗、全屏窗口和其他屏幕不触发抬高。
-unsafe fn top_bar_above(hwnd:HWND,bounds:crate::display_layout::Bounds)->bool {
+unsafe fn top_bar_above(hwnd:HWND,bounds:crate::display_layout::Bounds,target:Option<RECT>)->bool {
+    use windows::Win32::Graphics::Gdi::{GetWindowRgnBox, NULLREGION};
+    use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+
     let mut island=RECT::default();
     if !IsWindowVisible(hwnd).as_bool() || GetWindowRect(hwnd,&mut island).is_err(){return false;}
+    if let Some(target)=target {
+        if GetWindowRgnBox(hwnd,&mut RECT::default())==NULLREGION {return false;}
+        island.left=island.left.max(target.left);
+        island.top=island.top.max(target.top);
+        island.right=island.right.min(target.right);
+        island.bottom=island.bottom.min(target.bottom);
+        if island.left>=island.right || island.top>=island.bottom {return false;}
+    }
+    let click_through=(WS_EX_LAYERED|WS_EX_TRANSPARENT).0 as isize;
     let mut current=hwnd;
     while let Ok(previous)=GetWindow(current,GW_HWNDPREV) {
         current=previous;
-        if !IsWindowVisible(current).as_bool() || GetWindowLongPtrW(current,GWL_EXSTYLE)&WS_EX_TOPMOST.0 as isize==0 {continue;}
+        let style=GetWindowLongPtrW(current,GWL_EXSTYLE);
+        if style&WS_EX_TOPMOST.0 as isize==0 || style&click_through==click_through
+            || !IsWindowVisible(current).as_bool() || !IsWindowEnabled(current).as_bool() {continue;}
         let mut bar=RECT::default();
         if GetWindowRect(current,&mut bar).is_ok()
             && bar.top<=bounds.top && bar.bottom>bounds.top
             && bar.bottom-bar.top<=(bounds.bottom-bounds.top)/8
             && bar.right-bar.left>=(bounds.right-bounds.left)/2
             && bar.left<island.right && bar.right>island.left
-            && bar.bottom>island.top {
+            && bar.top<island.bottom && bar.bottom>island.top {
             return true;
         }
     }
@@ -452,6 +473,7 @@ fn outline_test()->Option<bool> {
 
 pub struct Window {
     hwnd: HWND,
+    capture_exclusion: capture::Exclusion,
     layering: Layering,
     region: (i32, i32, i32, i32),
     expanded: bool,
@@ -463,6 +485,7 @@ pub struct Window {
     backdrop: Option<crate::composition::Backdrop>,
     blur: bool,
     blur_unavailable: bool,
+    blur_suppressed: bool,
     opaque_surface: bool,
     outline: ShapeAlpha,
 }
@@ -497,10 +520,74 @@ impl ShapeAlpha {
 impl Window {
     pub fn hwnd(&self)->HWND {self.hwnd}
 
-    pub fn keep_above_top_bar(&mut self,bounds:crate::display_layout::Bounds) {
-        let display=match &self.layering {Layering::Active(layered)=>layered.display(),_=>self.hwnd};
-        if unsafe{top_bar_above(display,bounds)} {
-            unsafe{let _=SetWindowPos(self.hwnd,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);}
+    pub fn capture_exclusion_supported() -> bool { capture::supported() }
+
+    pub fn set_capture_exclusion(&mut self, desired: bool) {
+        let targets = self.capture_targets();
+        self.capture_exclusion.set(desired, targets);
+    }
+
+    pub fn ensure_material_capture_exclusion(&mut self) -> Result<bool, String> {
+        let targets = self.capture_targets();
+        self.capture_exclusion.ensure(targets)
+    }
+
+    pub fn restore_capture_exclusion(&mut self, desired: bool) {
+        let targets = self.capture_targets();
+        self.capture_exclusion.restore(desired, targets);
+    }
+
+    pub fn set_material_blur_suppressed(&mut self, suppressed: bool) {
+        self.blur_suppressed = suppressed;
+        if suppressed {
+            if let Some(backdrop) = &mut self.backdrop {
+                backdrop.hide();
+            }
+            self.blur = false;
+        }
+    }
+
+    pub fn take_capture_exclusion_error(&mut self) -> Option<String> {
+        self.capture_exclusion.take_error()
+    }
+
+    fn capture_targets(&self) -> capture::Targets {
+        use capture::Target;
+        [
+            Some(Target { hwnd: self.hwnd, name: "AuraIsle 主窗口" }),
+            match &self.layering {
+                Layering::Active(layered) => Some(Target { hwnd: layered.display(), name: "AuraIsle 分层显示窗口" }),
+                _ => None,
+            },
+            None,
+            // 仅在毛玻璃底板实际可见时才纳入截图排除检查：Windows 对 WS_EX_NOREDIRECTIONBITMAP 窗口
+            // 执行 SW_HIDE 后会清零其 GetWindowDisplayAffinity，若仍检测会导致液态玻璃每帧误判并重建 WGC。
+            self.backdrop
+                .as_ref()
+                .filter(|backdrop| backdrop.is_visible())
+                .map(|backdrop| Target { hwnd: backdrop.hwnd(), name: "AuraIsle 毛玻璃底板" }),
+        ]
+    }
+
+    fn apply_capture_to_new_window(&mut self, hwnd: HWND, name: &'static str) {
+        let existing = self.capture_targets();
+        self.capture_exclusion.add(capture::Target { hwnd, name }, existing);
+    }
+
+    /// 顶栏遮挡通知或整岛时，恢复输入窗口及分层画面的层级，保留前台焦点。
+    pub fn keep_above_top_bar(&mut self, bounds:crate::display_layout::Bounds, notice:Option<(eframe::egui::Rect,f32)>) {
+        let target=if let Some((rect,ppp))=notice {
+            let mut canvas=RECT::default();
+            if unsafe{GetWindowRect(self.hwnd,&mut canvas)}.is_err() {return;}
+            let x=|v:f32|canvas.left+(v*ppp).round() as i32;
+            let y=|v:f32|canvas.top+(v*ppp).round() as i32;
+            Some(RECT{left:x(rect.left()),top:y(rect.top()),right:x(rect.right()),bottom:y(rect.bottom())})
+        } else {None};
+        let raised=unsafe{
+            top_bar_above(self.hwnd,bounds,target)
+                && SetWindowPos(self.hwnd,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE).is_ok()
+        };
+        if raised {
             if let Layering::Active(layered)=&mut self.layering {layered.sync(self.hwnd,true);}
         }
     }
@@ -537,7 +624,7 @@ impl Window {
         };
         if opaque_surface{glass_diagnostic(&format!("渲染兼容：{vendor} {renderer} {backend:?}，首帧前先按轮廓裁剪，随后切换分层窗口抗锯齿"));}
         watch_drag(hwnd,cc.egui_ctx.clone());
-        Some(Self { hwnd, layering:Layering::Pending, region: (i32::MIN, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface, outline:ShapeAlpha::default() })
+        Some(Self { hwnd, capture_exclusion: capture::Exclusion::default(), layering:Layering::Pending, region: (i32::MIN, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, blur_suppressed:false, opaque_surface, outline:ShapeAlpha::default() })
     }
 
     /// 使用目标屏幕的物理坐标定位，并在缩放、岛体大小、水平位置或屏幕连接变化后重新校正。
@@ -545,10 +632,13 @@ impl Window {
     /// `shift` 是 OLED 像素偏移的位移（物理像素），按展开面板的屏幕余量收窄后叠加在不贴边的一轴上。
     pub fn place_on_display(&self, scale:f32, bounds:crate::display_layout::Bounds, offset:f32, dock:crate::model::Dock, shift:(i32,i32))->bool {
         unsafe {
-            // 顶部：水平居中 + 水平偏移；左右：贴边 + 竖直偏移，画布换成竖向的大小。
+            // 上下：水平居中 + 水平偏移；左右：贴边 + 竖直偏移，画布换成竖向的大小。
             let origin=if dock.is_side() {
                 crate::display_layout::side_origin(bounds,dock,(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H),crate::side_dock::SIDE_HALF_EXTENT,scale,offset)
-            } else {crate::display_layout::island_origin_offset(bounds,crate::app::WIN_W+crate::app::LEFT_PAD*2.0,scale,offset)};  // [ai-status-mod] 画布加宽后岛体仍在屏幕正中
+            } else {
+                crate::display_layout::island_origin_offset(bounds,crate::app::WIN_W+crate::app::LEFT_PAD*2.0,scale,offset)
+                    .map(|(x,y)|(x,if dock==crate::model::Dock::Bottom {bounds.bottom-(crate::app::WIN_H*scale).round() as i32}else{y}))
+            };  // [ai-status-mod] 画布加宽后岛体仍在屏幕正中
             let Some((x,y))=origin else{return false;};
             let (back,forth)=crate::display_layout::shift_slack(bounds,scale,if dock.is_side() {crate::side_dock::SIDE_HALF_EXTENT} else {crate::display_layout::ISLAND_HALF_EXTENT},offset,dock);
             let (dx,dy)=(shift.0.clamp(-back,forth),shift.1.clamp(-back,forth));
@@ -579,11 +669,28 @@ impl Window {
             let real=crate::layered::has_real_alpha(size,rgba) && outline_test()!=Some(true);
             if !real && self.outline.polygons.is_empty() {return false;}
             match crate::layered::Layered::new() {
-                Ok(layered)=>{
-                    self.outline.active=!real;
-                    glass_diagnostic(if real {"渲染兼容：已切换为分层窗口逐像素透明（边缘抗锯齿）"}
-                        else {"渲染兼容：读回的画面没有透明通道，按岛体轮廓补算边缘透明度（分层窗口，边缘抗锯齿）"});
-                    self.layering=Layering::Active(layered);
+                Ok(mut layered)=>{
+                    let target = capture::Target { hwnd: layered.display(), name: "AuraIsle 分层显示窗口" };
+                    self.apply_capture_to_new_window(target.hwnd, target.name);
+                    let targets = self.capture_targets();
+                    let hwnd = self.hwnd;
+                    let frame=if real {rgba} else {self.outline.apply(size,rgba)};
+                    match self.capture_exclusion.render(targets, Some(target), || layered.present(hwnd, size, frame)) {
+                        Ok(true)=>{
+                            self.outline.active=!real;
+                            glass_diagnostic(if real {"渲染兼容：已切换为分层窗口逐像素透明（边缘抗锯齿）"}
+                                else {"渲染兼容：读回的画面没有透明通道，按岛体轮廓补算边缘透明度（分层窗口，边缘抗锯齿）"});
+                            self.layering=Layering::Active(layered);
+                            return true;
+                        }
+                        Ok(false)=>return false,
+                        Err(error)=>{
+                            layered.detach(self.hwnd);
+                            glass_diagnostic(&format!("渲染兼容：首帧无法交给分层窗口，回到轮廓裁剪：{error:?}"));
+                            self.layering=Layering::Unavailable;
+                            return false;
+                        }
+                    }
                 }
                 Err(error)=>{
                     glass_diagnostic(&format!("渲染兼容：分层显示窗口创建失败：{error:?}"));
@@ -591,9 +698,11 @@ impl Window {
                 }
             }
         }
+        let targets = self.capture_targets();
+        let hwnd = self.hwnd;
         let Layering::Active(layered)=&mut self.layering else {return false};
         let frame=if self.outline.active {self.outline.apply(size,rgba)} else {rgba};
-        match layered.present(self.hwnd,size,frame) {
+        match self.capture_exclusion.render(targets, None, || layered.present(hwnd, size, frame)) {
             Ok(changed)=>changed,
             Err(error)=>{
                 glass_diagnostic(&format!("渲染兼容：分层窗口不可用，回到轮廓裁剪：{error:?}"));
@@ -609,6 +718,10 @@ impl Window {
         let mut r=RECT::default();
         unsafe { GetWindowRect(self.hwnd,&mut r).ok()?; }
         Some(eframe::egui::pos2(r.left as f32/scale,r.top as f32/scale))
+    }
+
+    pub fn take_display_change(&self) -> bool {
+        DISPLAY_CHANGED.swap(false, Ordering::Relaxed)
     }
 
     pub fn browser_at_top(&mut self,settings:&crate::model::Settings)->Option<bool> {
@@ -653,12 +766,13 @@ impl Window {
         // 毛玻璃：合成引擎的模糊块贴合岛体轮廓，窗口区域仍用矩形（含阴影与拖放感应区）。
         let _ = capture;
         let layered_alpha=matches!(self.layering,Layering::Active(_)) && !self.outline.active;
-        match glass.filter(|g|!g.is_empty() && !self.blur_unavailable && (!self.opaque_surface || layered_alpha) && compositor_blur_allowed()) {
+        match glass.filter(|g|!g.is_empty() && !self.blur_suppressed && !self.blur_unavailable && (!self.opaque_surface || layered_alpha) && compositor_blur_allowed()) {
             Some(shapes) => {
                 if self.backdrop.is_none() {
                     match crate::composition::Backdrop::new() {
                         Ok(backdrop) => {
                             glass_diagnostic("合成引擎模糊底板已创建");
+                            self.apply_capture_to_new_window(backdrop.hwnd(), "AuraIsle 毛玻璃底板");
                             self.backdrop = Some(backdrop);
                         }
                         Err(error) => {
@@ -667,9 +781,16 @@ impl Window {
                         }
                     }
                 }
+                let mut shown_hwnd = None;
                 if let Some(backdrop) = &mut self.backdrop {
+                    let was_visible = backdrop.is_visible();
                     match backdrop.show(self.hwnd, &crate::app::blur_pieces(shapes, ppp)) {
-                        Ok(()) => self.blur = true,
+                        Ok(()) => {
+                            self.blur = true;
+                            if !was_visible {
+                                shown_hwnd = Some(backdrop.hwnd());
+                            }
+                        }
                         Err(error) => {
                             glass_diagnostic(&format!("模糊层更新失败：{error:?}"));
                             backdrop.hide();
@@ -677,6 +798,9 @@ impl Window {
                             self.blur_unavailable = true;
                         }
                     }
+                }
+                if let Some(hwnd) = shown_hwnd {
+                    self.apply_capture_to_new_window(hwnd, "AuraIsle 毛玻璃底板");
                 }
             }
             None => {
@@ -756,7 +880,7 @@ mod tests {
             let hwnd=CreateWindowExW(WS_EX_TOOLWINDOW,windows::core::w!("STATIC"),windows::core::w!(""),WS_POPUP,-10000,-10000,px(400.0),px(200.0),None,None,None,None).unwrap();
             let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
             {
-                let mut native=Window{hwnd,layering:Layering::Unavailable,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable,opaque_surface:surface_needs_outline_clip(backend,vendor,renderer),outline:ShapeAlpha::default()};
+                let mut native=Window{hwnd,layering:Layering::Unavailable,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,capture_exclusion:capture::Exclusion::default(),blur:false,blur_unavailable,blur_suppressed:false,opaque_surface:surface_needs_outline_clip(backend,vendor,renderer),outline:ShapeAlpha::default()};
                 let shapes=[crate::app::GlassShape::Round(eframe::egui::Rect::from_min_max(eframe::egui::pos2(80.0,60.0),eframe::egui::pos2(320.0,160.0)),25.0)];
                 native.update((0.0,0.0,400.0,200.0),(80.0,60.0,240.0,100.0),None,None,Some(&shapes),ppp,false,false);
                 let region=CreateRectRgn(0,0,0,0);
@@ -838,6 +962,118 @@ mod tests {
     }
 
     #[test]
+    fn top_bar_mode_restores_z_order_without_raising_over_unrelated_windows(){
+        let _guard=NATIVE_STATE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        struct TestWindow(HWND);
+        impl Drop for TestWindow {fn drop(&mut self){unsafe{let _=DestroyWindow(self.0);}}}
+        unsafe fn above(first:HWND,second:HWND)->bool {
+            let mut current=first;
+            while let Ok(next)=GetWindow(current,GW_HWNDNEXT){if next==second{return true;}current=next;}
+            false
+        }
+        unsafe {
+            let bounds=crate::display_layout::Bounds{left:-10480,top:-10000,right:-8560,bottom:-8920};
+            let flags=SWP_NOACTIVATE|SWP_SHOWWINDOW;
+            let create=||TestWindow(CreateWindowExW(WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW|WS_EX_TOPMOST,windows::core::w!("STATIC"),windows::core::w!(""),WS_POPUP|WS_VISIBLE,-10000,-10000,416,140,None,None,None,None).unwrap());
+            for layered in [false,true] {
+                let island=create();let cover=create();
+                let mut native=Window{hwnd:island.0,layering:Layering::Pending,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,capture_exclusion:capture::Exclusion::default(),blur:false,blur_unavailable:false,blur_suppressed:false,opaque_surface:false,outline:ShapeAlpha::default()};
+                if layered {
+                    let mut display=crate::layered::Layered::new().unwrap();
+                    display.present(island.0,[416,140],&vec![0;416*140*4]).unwrap();
+                    native.layering=Layering::Active(display);
+                }
+                let display=match &native.layering {Layering::Active(layered)=>layered.display(),_=>island.0};
+                let foreground=GetForegroundWindow();
+                SetWindowPos(cover.0,HWND_TOPMOST,bounds.left,bounds.top,1920,32,flags).unwrap();
+                assert!(top_bar_above(display,bounds,None),"复现顶栏遮挡，兼容渲染={layered}");
+                native.keep_above_top_bar(bounds,None);
+                assert!(!top_bar_above(display,bounds,None),"收起时也应恢复实际层级，兼容渲染={layered}");
+                assert_eq!(GetForegroundWindow(),foreground,"置顶不能抢走输入焦点");
+                for (x,y,w,h) in [(-10000,-10000,400,140),(-10480,-10000,1920,300),(-10480,-10000,1920,1080),(-10480,-9600,1920,32),(-12400,-10000,1920,32)] {
+                    SetWindowPos(cover.0,HWND_TOPMOST,x,y,w,h,flags).unwrap();
+                    assert!(!top_bar_above(display,bounds,None),"普通弹窗、全屏窗口和其他屏幕不触发顶栏适配");
+                    native.keep_above_top_bar(bounds,None);
+                    assert!(above(cover.0,display),"不应越过无关弹窗争抢置顶");
+                }
+                SetWindowPos(cover.0,HWND_TOPMOST,bounds.left,bounds.top,1920,32,flags).unwrap();
+                let _=ShowWindow(cover.0,SW_HIDE);
+                assert!(!top_bar_above(display,bounds,None),"隐藏的顶栏不触发抬高");
+            }
+        }
+    }
+
+    #[test]
+    fn collapsed_notice_restores_clicks_when_the_top_bar_covers_it() {
+        let _guard=NATIVE_STATE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        struct TestWindow(HWND);
+        impl Drop for TestWindow {fn drop(&mut self){unsafe{let _=DestroyWindow(self.0);}}}
+
+        unsafe {
+            use eframe::egui::{Pos2,Rect};
+            // 屏幕外的可见窗口也参与命中测试，不遮挡实际桌面或移动鼠标。
+            let bounds=crate::display_layout::Bounds{left:-12000,top:-10000,right:-10080,bottom:-8920};
+            let (left,top)=(bounds.left+900,bounds.top);
+            let create=|x,w,h|TestWindow(CreateWindowExW(WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW|WS_EX_TOPMOST,
+                windows::core::w!("BUTTON"),windows::core::w!(""),WS_POPUP|WS_VISIBLE,x,top,w,h,None,None,None,None).unwrap());
+            let find=|x,y|WindowFromPoint(POINT{x:left+x,y:top+y});
+            let flags=SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE;
+            let region=(0.0,0.0,300.0,80.0);
+            let empty=(0.0,0.0,0.0,0.0);
+            let notice=(100.0,12.0,160.0,20.0);
+            let target=Rect::from_min_max(Pos2::new(100.0,12.0),Pos2::new(260.0,32.0));
+            let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
+
+            for layered in [false,true] {
+                let island=create(left,450,120);
+                let cover=create(bounds.left,1920,48);
+                SetWindowSubclass(island.0,Some(subclass),SUBCLASS_ID,0).unwrap();
+                let mut native=Window{hwnd:island.0,layering:Layering::Pending,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,capture_exclusion:capture::Exclusion::default(),blur:false,blur_unavailable:false,blur_suppressed:false,opaque_surface:false,outline:ShapeAlpha::default()};
+                if layered {
+                    let mut display=crate::layered::Layered::new().unwrap();
+                    assert!(display.present(island.0,[450,120],&vec![255;450*120*4]).unwrap());
+                    native.layering=Layering::Active(display);
+                }
+
+                for compact in [false,true] {
+                    let (main_hit,notice_hit)=if compact {(empty,Some(notice))} else {(notice,None)};
+                    // 模拟面板收起时，普通通知更新主命中区，紧凑通知使用独立命中区。
+                    native.update(region,main_hit,notice_hit,None,None,1.5,false,false);
+                    // 窄顶栏覆盖主窗口左侧，但到不了按 150% 换算后的通知。
+                    SetWindowPos(cover.0,HWND_TOPMOST,bounds.left,top,1024,48,SWP_NOACTIVATE).unwrap();
+                    native.keep_above_top_bar(bounds,Some((target,1.5)));
+                    let short_bar_stayed_above=top_bar_above(island.0,bounds,None);
+
+                    SetWindowPos(cover.0,HWND_TOPMOST,bounds.left,top,1920,48,SWP_NOACTIVATE).unwrap();
+                    let obscured=find(255,33);
+                    let foreground=GetForegroundWindow();
+                    native.keep_above_top_bar(bounds,Some((target,1.5)));
+                    let clickable=find(255,33);
+                    let outside=find(40,33);
+                    let foreground_after=GetForegroundWindow();
+
+                    SetWindowPos(cover.0,HWND_TOPMOST,0,0,0,0,flags).unwrap();
+                    let obscured_again=find(255,33);
+                    native.keep_above_top_bar(bounds,Some((target,1.5)));
+                    let clickable_again=find(255,33);
+                    native.update(region,empty,None,None,None,1.5,false,false);
+                    let dismissed=find(255,33);
+                    *hit().lock().unwrap_or_else(|e|e.into_inner())=saved.clone();
+
+                    assert!(short_bar_stayed_above,"通知按 150% 换成物理坐标后没有被短顶栏挡住，层级应保持");
+                    assert_eq!(obscured,cover.0,"顶栏在前时按钮被挡，兼容渲染={layered}，紧凑通知={compact}");
+                    assert_eq!(clickable,island.0,"恢复层级后应命中负责交互的主窗口，兼容渲染={layered}，紧凑通知={compact}");
+                    assert_eq!(outside,cover.0,"通知外仍应命中任务栏");
+                    assert_eq!(foreground_after,foreground,"恢复通知的交互不能抢走焦点");
+                    assert_eq!(obscured_again,cover.0,"任务栏重新置顶后应再次形成遮挡");
+                    assert_eq!(clickable_again,island.0,"同一条通知应能恢复二次遮挡");
+                    assert_eq!(dismissed,cover.0,"通知关闭后原位置应恢复点穿");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn expanding_raises_the_island_without_activating_it(){
         let _guard=NATIVE_STATE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
         struct TestWindow(HWND);
@@ -860,7 +1096,7 @@ mod tests {
             assert!(above(cover.0,island.0),"先复现其他窗口盖住岛体");
             let foreground=GetForegroundWindow();
             let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
-            let mut native=Window{hwnd:island.0,layering:Layering::Unavailable,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable:false,opaque_surface:false,outline:ShapeAlpha::default()};
+            let mut native=Window{hwnd:island.0,layering:Layering::Unavailable,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,capture_exclusion:capture::Exclusion::default(),blur:false,blur_unavailable:false,blur_suppressed:false,opaque_surface:false,outline:ShapeAlpha::default()};
             let update=|native:&mut Window,expanded|native.update((0.0,0.0,416.0,140.0),(0.0,0.0,416.0,140.0),None,None,None,1.0,false,expanded);
             update(&mut native,true);
             assert!(above(island.0,cover.0),"展开时必须重新抬高实际窗口层级，不能只检查置顶标记");

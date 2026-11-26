@@ -48,6 +48,33 @@ pub fn reset_course_style(cfg: &mut Config) {
     cfg.course_show_weekend = d.course_show_weekend;
 }
 
+/// 恢复 轻九九九（@cayww）社区液态玻璃的默认光学参数。
+pub fn reset_liquid_glass_params(cfg: &mut Config) {
+    let d = Config::default();
+    cfg.lg_refract = d.lg_refract;
+    cfg.lg_chroma = d.lg_chroma;
+    cfg.lg_blur = d.lg_blur;
+    cfg.lg_band = d.lg_band;
+    cfg.lg_edge_width = d.lg_edge_width;
+    cfg.lg_edge_opacity = d.lg_edge_opacity;
+    cfg.lg_morph = d.lg_morph;
+}
+
+impl Config {
+    /// 打包传给 `cayww.liquid-glass` 着色器 `params[0..7]` 的 32 个浮点参数。
+    pub fn liquid_glass_params(&self) -> [f32; 32] {
+        let mut p = [0.0f32; 32];
+        p[0] = self.lg_refract.clamp(0.0, 120.0);
+        p[1] = self.lg_chroma.clamp(0.0, 30.0);
+        p[2] = self.lg_blur.clamp(0.0, 4.0);
+        p[3] = self.lg_band.clamp(10.0, 140.0);
+        p[4] = self.lg_edge_width.clamp(0.0, 4.0);
+        p[5] = self.lg_edge_opacity.clamp(0.0, 1.0);
+        p[6] = self.lg_morph.clamp(0.0, 3.0);
+        p
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// 总开关。
@@ -142,6 +169,20 @@ pub struct Config {
     /// 播放频率（Plays）：0 持续常亮, 1 每 15 秒, 2 每 30 秒, 3 每 60 秒。
     pub border_interval: u8,
     pub liquid_glass_mode: u8,
+    /// @cayww 液态玻璃折射强度（0..=120 px，默认 48）。
+    pub lg_refract: f32,
+    /// @cayww 液态玻璃色散强度（0..=30 px，默认 8）。
+    pub lg_chroma: f32,
+    /// @cayww 液态玻璃内部模糊（0.0..=4.0 px，默认 1.5）。
+    pub lg_blur: f32,
+    /// @cayww 液态玻璃折射带宽（10..=140 px，默认 87）。
+    pub lg_band: f32,
+    /// @cayww 液态玻璃白边宽度（0.0..=4.0 px，默认 1.5）。
+    pub lg_edge_width: f32,
+    /// @cayww 液态玻璃白边不透明度（0.0..=1.0，默认 0.9）。
+    pub lg_edge_opacity: f32,
+    /// @cayww 液态玻璃展开形变系数（0.0..=3.0，默认 1.0）。
+    pub lg_morph: f32,
     /// 音乐播放器样式切换：0 = 经典默认，1 = 灵动音律（封面流光 + 动态频谱 + 歌词同行）。
     pub music_ui_style: u8,
     pub music_show_ai_status: bool,
@@ -320,6 +361,12 @@ pub struct Config {
     pub face_stroke_alpha: u8,
     pub msg_island_filter: u8,
     pub minimal_time_pill: bool,
+    /// 双击岛体临时避让开关（开启后双击灵动岛可进入/退出临时极简避让状态）。
+    pub temp_avoid_enabled: bool,
+    /// 全屏时是否使用临时极简避让替代完全隐藏。
+    pub temp_avoid_fullscreen: bool,
+    /// 临时避让状态下是否继续在极简胶囊中显示时间。
+    pub temp_avoid_show_time: bool,
     pub msg_hub_order: [u8; 3],
     pub clipboard_page_visible: bool,
     pub clip_filter_tab: u8,
@@ -544,6 +591,13 @@ impl Default for Config {
             border_plays_on: 0,
             border_interval: 0,
             liquid_glass_mode: 0,
+            lg_refract: 48.0,
+            lg_chroma: 8.0,
+            lg_blur: 1.5,
+            lg_band: 87.0,
+            lg_edge_width: 1.5,
+            lg_edge_opacity: 0.9,
+            lg_morph: 1.0,
             music_ui_style: 6,
             music_show_ai_status: false,
             lyric_island_time_capsule: true,
@@ -643,6 +697,9 @@ impl Default for Config {
             face_stroke_alpha: 255,
             msg_island_filter: 0,
             minimal_time_pill: true,
+            temp_avoid_enabled: true,
+            temp_avoid_fullscreen: false,
+            temp_avoid_show_time: true,
             msg_hub_order: [0, 1, 2],
             clipboard_page_visible: true,
             clip_filter_tab: 0,
@@ -930,6 +987,13 @@ impl Config {
             border_plays_on: i64_or(field(&v, "border_plays_on"), d.border_plays_on as i64).clamp(0, 2) as u8,
             border_interval: i64_or(field(&v, "border_interval"), d.border_interval as i64).clamp(0, 3) as u8,
             liquid_glass_mode: i64_or(field(&v, "liquid_glass_mode"), d.liquid_glass_mode as i64).clamp(0, 1) as u8,
+            lg_refract: f64_or(field(&v, "lg_refract"), d.lg_refract as f64).clamp(0.0, 120.0) as f32,
+            lg_chroma: f64_or(field(&v, "lg_chroma"), d.lg_chroma as f64).clamp(0.0, 30.0) as f32,
+            lg_blur: f64_or(field(&v, "lg_blur"), d.lg_blur as f64).clamp(0.0, 4.0) as f32,
+            lg_band: f64_or(field(&v, "lg_band"), d.lg_band as f64).clamp(10.0, 140.0) as f32,
+            lg_edge_width: f64_or(field(&v, "lg_edge_width"), d.lg_edge_width as f64).clamp(0.0, 4.0) as f32,
+            lg_edge_opacity: f64_or(field(&v, "lg_edge_opacity"), d.lg_edge_opacity as f64).clamp(0.0, 1.0) as f32,
+            lg_morph: f64_or(field(&v, "lg_morph"), d.lg_morph as f64).clamp(0.0, 3.0) as f32,
             music_ui_style: {
                 if i64_or(field(&v, "v"), 1) < 3 {
                     6
@@ -1077,6 +1141,9 @@ impl Config {
             face_stroke_alpha: i64_or(field(&v, "face_stroke_alpha"), d.face_stroke_alpha as i64).clamp(0, 255) as u8,
             msg_island_filter: i64_or(field(&v, "msg_island_filter"), d.msg_island_filter as i64).clamp(0, 10) as u8,
             minimal_time_pill: bool_or(field(&v, "minimal_time_pill"), d.minimal_time_pill),
+            temp_avoid_enabled: bool_or(field(&v, "temp_avoid_enabled"), d.temp_avoid_enabled),
+            temp_avoid_fullscreen: bool_or(field(&v, "temp_avoid_fullscreen"), d.temp_avoid_fullscreen),
+            temp_avoid_show_time: bool_or(field(&v, "temp_avoid_show_time"), d.temp_avoid_show_time),
             msg_hub_order: v.get("msg_hub_order").and_then(|a| a.as_array()).and_then(|arr| {
                 if arr.len() == 3 {
                     Some([
@@ -1362,6 +1429,9 @@ impl Config {
             head.insert("face_stroke_alpha".to_owned(), json!(self.face_stroke_alpha));
             head.insert("msg_island_filter".to_owned(), json!(self.msg_island_filter));
             head.insert("minimal_time_pill".to_owned(), json!(self.minimal_time_pill));
+            head.insert("temp_avoid_enabled".to_owned(), json!(self.temp_avoid_enabled));
+            head.insert("temp_avoid_fullscreen".to_owned(), json!(self.temp_avoid_fullscreen));
+            head.insert("temp_avoid_show_time".to_owned(), json!(self.temp_avoid_show_time));
             head.insert("msg_hub_order".to_owned(), json!(self.msg_hub_order));
             head.insert("clipboard_page_visible".to_owned(), json!(self.clipboard_page_visible));
             head.insert("clip_filter_tab".to_owned(), json!(self.clip_filter_tab));
@@ -1481,6 +1551,13 @@ impl Config {
             head.insert("border_plays_on".to_owned(), json!(self.border_plays_on));
             head.insert("border_interval".to_owned(), json!(self.border_interval));
             head.insert("liquid_glass_mode".to_owned(), json!(self.liquid_glass_mode));
+            head.insert("lg_refract".to_owned(), json!(self.lg_refract));
+            head.insert("lg_chroma".to_owned(), json!(self.lg_chroma));
+            head.insert("lg_blur".to_owned(), json!(self.lg_blur));
+            head.insert("lg_band".to_owned(), json!(self.lg_band));
+            head.insert("lg_edge_width".to_owned(), json!(self.lg_edge_width));
+            head.insert("lg_edge_opacity".to_owned(), json!(self.lg_edge_opacity));
+            head.insert("lg_morph".to_owned(), json!(self.lg_morph));
             head.insert("music_ui_style".to_owned(), json!(self.music_ui_style));
             head.insert("music_auto_hide_when_idle".to_owned(), json!(self.music_auto_hide_when_idle));
             head.insert("win_theme".to_owned(), json!(self.win_theme));
@@ -1801,7 +1878,9 @@ pub fn default_open_url(agent: &str) -> &'static str {
         "https://claude.ai/new"
     } else if k.contains("codex") || k.contains("openai") || k.contains("chatgpt") {
         "https://chatgpt.com/"
-    } else if k.contains("gemini") || k.contains("antigravity") {
+    } else if k.contains("antigravity") || k == "agy" {
+        "https://antigravity.google/"
+    } else if k.contains("gemini") {
         "https://gemini.google.com/app"
     } else if k.contains("deepseek") || k == "dsh" {
         "https://chat.deepseek.com/"

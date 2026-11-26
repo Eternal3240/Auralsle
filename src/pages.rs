@@ -445,6 +445,12 @@ impl App {
         let (bh, bpress) = c.hover_t(&bar);
         let th = lerp(4.2, 6.2, if has { bh.max(bpress) } else { 0.0 });
         let _ = (bh, bpress, th);
+        #[cfg(windows)]
+        let glass_ctrl = self.glass_controls_ready();
+        #[cfg(windows)]
+        if glass_ctrl && has {
+            c.material_control(&bar, c.rect(bx + bw * frac - 12.0, by - 9.0, 24.0, 18.0), 9.0, crate::material::ControlRole::Seek);
+        }
         paint_themed_music_progress_bar(c, bx, by, bw, frac, mix(accent_a, accent_b, 0.35), np.playing, self.t);
         if bar.clicked() || bar.drag_stopped() {
             if let Some(pos) = seek_position {
@@ -465,6 +471,10 @@ impl App {
         // 播控坞左端：歌词重匹按钮 [词] (x = 128..158)
         let lyr_r = c.hit(126.0, y - 11.0, 32.0, 22.0, "m-lyr-ei");
         let (lh, _) = c.hover_t(&lyr_r);
+        #[cfg(windows)]
+        if glass_ctrl {
+            c.material_control(&lyr_r, c.rect(128.0, y - 8.5, 28.0, 17.0), 8.5, crate::material::ControlRole::Lyric);
+        }
         if lh > 0.01 {
             c.fill(128.0, y - 8.5, 28.0, 17.0, 8.5, crate::auralsle_music::music_pause_pill_fill(accent_a, lh, false));
         }
@@ -478,17 +488,29 @@ impl App {
         let prev_r = c.hit(176.0, y - 11.5, 36.0, 23.0, "m-prev-ei");
         let (ph, pp) = c.hover_t(&prev_r);
         let pmag = crate::auralsle_ai_status::ui::magnet_offset(cur_local, Pos2::new(194.0, y), 24.0, 2.8);
+        #[cfg(windows)]
+        if glass_ctrl {
+            c.material_circle_with_role(&prev_r, 194.0 + pmag.x, y + pmag.y, 10.5, crate::material::ControlRole::Prev);
+        }
         if ph > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(ph), 194.0 + pmag.x, y + pmag.y, 10.0, accent_a, ph, false); }
         paint::skip(&c.scaled(194.0 + pmag.x, y + pmag.y, 1.0 - 0.1 * pp), 194.0 + pmag.x, y + pmag.y, -1.0, ic);
 
         let play_resp = c.hit(216.0, y - 11.5, 52.0, 23.0, "m-play-ei");
         let (play_hov, play_press) = c.hover_t(&play_resp);
         let c_mag = crate::auralsle_ai_status::ui::magnet_offset(cur_local, Pos2::new(242.0, y), 26.0, 2.6);
+        #[cfg(windows)]
+        if glass_ctrl {
+            c.material_control(&play_resp, c.rect(242.0 + c_mag.x - 24.0, y + c_mag.y - 9.5, 48.0, 19.0), 9.5, crate::material::ControlRole::Play);
+        }
         paint_music_play_button(c, 242.0 + c_mag.x, y + c_mag.y, 48.0, 19.0, play_hov, play_press, playing_t, accent_a, 11.2);
 
         let next_r = c.hit(272.0, y - 11.5, 36.0, 23.0, "m-next-ei");
         let (nh, np_p) = c.hover_t(&next_r);
         let nmag = crate::auralsle_ai_status::ui::magnet_offset(cur_local, Pos2::new(290.0, y), 24.0, 2.8);
+        #[cfg(windows)]
+        if glass_ctrl {
+            c.material_circle_with_role(&next_r, 290.0 + nmag.x, y + nmag.y, 10.5, crate::material::ControlRole::Next);
+        }
         if nh > 0.01 { crate::auralsle_music::paint_music_trigger_circle(&c.faded(nh), 290.0 + nmag.x, y + nmag.y, 10.0, accent_a, nh, false); }
         paint::skip(&c.scaled(290.0 + nmag.x, y + nmag.y, 1.0 - 0.1 * np_p), 290.0 + nmag.x, y + nmag.y, 1.0, ic);
 
@@ -501,6 +523,10 @@ impl App {
         // 播控坞右端：内嵌音量喇叭与百分比 (x = 334..376)
         let vol_r = c.hit(332.0, y - 11.5, 44.0, 23.0, "m-vol-ei");
         let (vh, vp) = c.hover_t(&vol_r);
+        #[cfg(windows)]
+        if glass_ctrl {
+            c.material_control(&vol_r, c.rect(334.0, y - 8.5, 40.0, 17.0), 8.5, crate::material::ControlRole::Volume);
+        }
         if vh > 0.01 { c.fill(334.0, y - 8.5, 40.0, 17.0, 8.5, crate::auralsle_music::music_pause_pill_fill(accent_a, vh, false)); }
         let (volume, muted) = self.music_volume_ui.unwrap_or((100, false));
         paint::speaker(&c.scaled(346.0, y, 1.0 - 0.08 * vp), 346.0, y, muted, ic);
@@ -1654,6 +1680,12 @@ impl App {
         let bh=if has {bh}else{0.0};
         let th=lerp(3.5,5.0,bh);
         c.fill(bx,by-th/2.0,bw,th,th/2.0,if has {Color32::from_gray(90)}else{theme::TRACK});
+        #[cfg(windows)]
+        let glass_ctrl = self.glass_controls_ready();
+        #[cfg(windows)]
+        if glass_ctrl && has {
+            c.material_control(&bar, c.rect(bx + bw * frac - 14.0, by - 10.0, 28.0, 20.0), 10.0, crate::material::ControlRole::Seek);
+        }
         if self.settings.skin==crate::model::Skin::Fluid {
             let head=bx+bw*frac;
             let hot=if bar.is_pointer_button_down_on(){1.0}else if np.playing{0.62}else{0.45};
@@ -1693,10 +1725,22 @@ impl App {
             (response,c.shifted(mag.x, mag.y).scaled(x,y,1.0-0.1*pressed))
         };
         let (lyrics_button,lyrics_card)=btn(74.0,26.0,"m-lyr");
+        #[cfg(windows)]
+        if glass_ctrl {
+            c.material_circle_with_role(&lyrics_button, 74.0, y, 13.0, crate::material::ControlRole::Lyric);
+        }
         lyrics_card.text(74.0,y+5.0,"词",14.0,W::Semibold,if !has {ic}else if self.show_lyrics {theme::WHITE}else{theme::GRAY},H::Center);
         let (previous,previous_card)=btn(162.0,30.0,"m-prev");
+        #[cfg(windows)]
+        if glass_ctrl {
+            c.material_circle_with_role(&previous, 162.0, y, 14.0, crate::material::ControlRole::Prev);
+        }
         paint::skip(&previous_card,162.0,y,-1.0,ic);
         let (play,play_card)=btn(210.5,30.0,"m-play");
+        #[cfg(windows)]
+        if glass_ctrl {
+            c.material_circle_with_role(&play, 210.5, y, 15.0, crate::material::ControlRole::Play);
+        }
         if cfg!(test) {
             paint::play_pause(&play_card,211.0,y,15.0,playing_t,ic);
         } else {
@@ -1704,8 +1748,16 @@ impl App {
             paint_music_play_button(c, 211.0, y, 30.0, 24.0, p_hov, p_press, playing_t, classic_acc_a, 13.0);
         }
         let (next,next_card)=btn(258.0,30.0,"m-next");
+        #[cfg(windows)]
+        if glass_ctrl {
+            c.material_circle_with_role(&next, 258.0, y, 14.0, crate::material::ControlRole::Next);
+        }
         paint::skip(&next_card,258.0,y,1.0,ic);
         let (volume_button,volume_card)=btn(367.0,26.0,"m-volume");
+        #[cfg(windows)]
+        if glass_ctrl {
+            c.material_circle_with_role(&volume_button, 367.0, y, 13.0, crate::material::ControlRole::Volume);
+        }
         let (volume,muted)=self.music_volume_ui.unwrap_or((0,false));
         paint::speaker(&volume_card,367.0,y,muted,if self.music_volume_ui.is_some(){ic}else{theme::GRAY});
         let hint=if self.music_volume_ui.is_some(){format!("音乐应用音量 {volume}%{} · 点击展开 · 滚轮调节",if muted{"（已静音）"}else{""})}else{"暂无可调节的音乐音频会话".into()};
@@ -2060,10 +2112,16 @@ impl App {
         }
     }
 
+    pub(crate) fn music_volume_bounds(&self)->Rect {
+        // 顶栏固定时浮条靠在扬声器左侧，给图钉留下完整热区。
+        MUSIC_VOLUME_RECT.translate(egui::vec2(-43.0,27.0)*self.hold_slot)
+    }
+
     pub(crate) fn draw_music_volume(&mut self,c:&Card,cmds:&mut Vec<Cmd>){
         let ctx=c.ui.ctx();
+        let placed=self.music_volume_bounds();
         let bounds=MUSIC_VOLUME_RECT;
-        let panel=c.rect(bounds.min.x,bounds.min.y,bounds.width(),bounds.height());
+        let panel=c.rect(placed.min.x,placed.min.y,placed.width(),placed.height());
         let trigger=c.rect(354.0,106.0,26.0,24.0);
         if self.music_volume_open && ctx.input(|i|i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p|!panel.contains(p) && !trigger.contains(p))){
             self.music_volume_open=false;
@@ -2071,7 +2129,7 @@ impl App {
         let a=ctx.animate_bool_with_time(egui::Id::new("music-volume-open"),self.music_volume_open,0.12);
         let Some((volume,muted))=self.music_volume_ui else{return;};
         if a<0.01{return;}
-        let popup=c.faded(a);
+        let popup=c.shifted(placed.min.x-bounds.min.x,placed.min.y-bounds.min.y).faded(a);
         let popup=if self.music_volume_open{popup}else{popup.ghost()};
         // 浮条最后绘制并占据整块命中区域，防止点击穿到后面的翻页按钮。
         popup.hit(bounds.min.x,bounds.min.y,bounds.width(),bounds.height(),"m-volume-surface");
@@ -2130,7 +2188,10 @@ impl App {
                     theme::GRAY
                 };
                 let row=col.faded((1.0-distance.abs()*0.35).clamp(0.0,1.0));
-                let mut job=egui::text::LayoutJob::simple(line.text.clone(),row.font(if active {12.0}else{10.0},if active {W::Semibold}else{W::Regular}),ink,132.0*c.s);
+                let font=row.font(if active {12.0}else{10.0},if active {W::Semibold}else{W::Regular});
+                // 维语等从右往左的歌词：先按阅读顺序分行再逐行转换（#200）。
+                let text=crate::rtl_text::display_wrapped(&line.text,132.0*c.s,|s|row.painter.layout_no_wrap(s.to_owned(),font.clone(),ink).size().x).into_owned();
+                let mut job=egui::text::LayoutJob::simple(text,font,ink,132.0*c.s);
                 job.wrap.max_rows=if active {3}else{1};
                 job.wrap.break_anywhere=true;
                 let galley=row.painter.layout_job(job);
@@ -3413,7 +3474,7 @@ impl App {
 
         let slot_filter_id = egui::Id::new(("fly-msg-slot-filter", cur_src));
         let mut slot_filter = if cur_src == 1 || cur_src == 2 {
-            ctx_msg.data(|d| d.get_temp::<u8>(slot_filter_id)).unwrap_or(0).min(2)
+            ctx_msg.data(|d| d.get_temp::<u8>(slot_filter_id)).unwrap_or(0).min(4)
         } else {
             0
         };
@@ -3421,6 +3482,8 @@ impl App {
         if cur_src == 1 || cur_src == 2 {
             let mut main_cnt = 0usize;
             let mut clone_cnt = 0usize;
+            let mut pc_cnt = 0usize;
+            let mut mirror_cnt = 0usize;
             for r in &self.notification_log.items {
                 let matched = if cur_src == 1 {
                     r.app_name.contains("微信") || r.app_id.contains("wechat") || r.app_id.contains("weixin") || r.body.contains("微信")
@@ -3433,21 +3496,28 @@ impl App {
                     } else {
                         main_cnt += 1;
                     }
+                    if is_mirrored_notification_record(r) {
+                        mirror_cnt += 1;
+                    } else {
+                        pc_cnt += 1;
+                    }
                 }
             }
             let total_cnt = main_cnt + clone_cnt;
             let chips = [
                 (0u8, format!("全部({total_cnt})")),
+                (4u8, format!("电脑({pc_cnt})")),
+                (3u8, format!("手机({mirror_cnt})")),
                 (1u8, format!("主应用({main_cnt})")),
                 (2u8, format!("分身({clone_cnt})")),
             ];
             let mut sx = 40.0_f32;
             for (fid, label) in chips {
-                let cw = (c.text_w(&label, 8.6, W::Semibold) + 14.0).clamp(44.0, 96.0);
+                let cw = (c.text_w(&label, 8.2, W::Semibold) + 12.0).clamp(40.0, 76.0);
                 let active = slot_filter == fid;
                 let hit = c.hit(sx, 41.5, cw, 16.0, ("fly-msg-slot-chip", cur_src, fid));
                 let bg = if active {
-                    if fid == 2 {
+                    if fid == 2 || fid == 3 {
                         Color32::from_rgba_unmultiplied(16, 185, 129, 64)
                     } else {
                         Color32::from_white_alpha(30)
@@ -3459,7 +3529,7 @@ impl App {
                 };
                 c.fill(sx, 41.5, cw, 16.0, 6.0, bg);
                 if active {
-                    let bcol = if fid == 2 {
+                    let bcol = if fid == 2 || fid == 3 {
                         Color32::from_rgb(52, 211, 153)
                     } else {
                         crate::auralsle_ai_status::plugins::active_accent_color()
@@ -3467,19 +3537,27 @@ impl App {
                     c.stroke(sx, 41.5, cw, 16.0, 6.0, 0.8, bcol.gamma_multiply(0.85));
                 }
                 let tcol = if active { theme::WHITE } else { theme::GRAY };
-                c.text(sx + cw * 0.5, 52.3, &label, 8.4, if active { W::Bold } else { W::Semibold }, tcol, H::Center);
+                c.text(sx + cw * 0.5, 52.3, &label, 8.1, if active { W::Bold } else { W::Semibold }, tcol, H::Center);
                 if hit.clicked() && slot_filter != fid {
                     slot_filter = fid;
                     ctx_msg.data_mut(|d| d.insert_temp(slot_filter_id, fid));
                 }
-                sx += cw + 6.0;
+                sx += cw + 4.5;
             }
             list_top = 62.0;
         }
 
         // 收集当前分栏的消息列表（带帧间缓存：仅当通知数/邮件数/分栏/主分身筛选变化时重建，滑动列表时零分配！）
-        // Row: (title, body, time_str, unread_opt, mail_opt, slot_tag: Option<(&'static str, bool)>)
-        type MsgRowTuple = (String, String, String, Option<crate::app::Unread>, Option<(String, u32)>, Option<(&'static str, bool)>);
+        // Row: (title, body, time_str, unread_opt, mail_opt, slot_tag, source_tag)
+        type MsgRowTuple = (
+            String,
+            String,
+            String,
+            Option<crate::app::Unread>,
+            Option<(String, u32)>,
+            Option<(&'static str, bool)>,
+            Option<(&'static str, bool)>,
+        );
         static MSG_ROWS_CACHE: std::sync::OnceLock<std::sync::Mutex<((usize, u8, usize, i64, usize, u32), Vec<MsgRowTuple>)>> = std::sync::OnceLock::new();
         let notif_len = self.notification_log.items.len();
         let last_notif_ts = self.notification_log.items.first().map(|r| r.at).unwrap_or(0);
@@ -3495,7 +3573,12 @@ impl App {
                     for r in &self.notification_log.items {
                         if r.app_name.contains("微信") || r.app_id.contains("wechat") || r.app_id.contains("weixin") || r.body.contains("微信") {
                             let is_clone = is_clone_notification_record(r);
-                            if (slot_filter == 1 && is_clone) || (slot_filter == 2 && !is_clone) {
+                            let is_mirror = is_mirrored_notification_record(r);
+                            if (slot_filter == 1 && is_clone)
+                                || (slot_filter == 2 && !is_clone)
+                                || (slot_filter == 3 && !is_mirror)
+                                || (slot_filter == 4 && is_mirror)
+                            {
                                 continue;
                             }
                             let t_str = chrono::DateTime::from_timestamp(r.at, 0)
@@ -3507,28 +3590,33 @@ impl App {
                                 r.title.strip_prefix("微信 · ").map(str::to_owned).unwrap_or_else(|| r.title.clone())
                             };
                             let body = r.body.split_once(':').or_else(|| r.body.split_once('：')).map(|(_, b)| b.trim().to_owned()).unwrap_or_else(|| r.body.clone());
-                            built.push((title, body, t_str, Some(self.latest_unread(crate::app::Messenger::Wechat)), None, notification_record_slot_tag(r)));
+                            built.push((title, body, t_str, Some(self.latest_unread(crate::app::Messenger::Wechat)), None, notification_record_slot_tag(r), Some(notification_record_source_badge(r))));
                         }
                     }
                 } else if cur_src == 2 {
                     for r in &self.notification_log.items {
                         if is_strict_qq_chat_record(r) {
                             let is_clone = is_clone_notification_record(r);
-                            if (slot_filter == 1 && is_clone) || (slot_filter == 2 && !is_clone) {
+                            let is_mirror = is_mirrored_notification_record(r);
+                            if (slot_filter == 1 && is_clone)
+                                || (slot_filter == 2 && !is_clone)
+                                || (slot_filter == 3 && !is_mirror)
+                                || (slot_filter == 4 && is_mirror)
+                            {
                                 continue;
                             }
                             let t_str = chrono::DateTime::from_timestamp(r.at, 0)
                                 .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
                                 .unwrap_or_else(|| "刚刚".into());
                             let title = r.title.strip_prefix("QQ · ").map(str::to_owned).unwrap_or_else(|| r.title.clone());
-                            built.push((title, r.body.clone(), t_str, Some(self.latest_unread(crate::app::Messenger::Qq)), None, notification_record_slot_tag(r)));
+                            built.push((title, r.body.clone(), t_str, Some(self.latest_unread(crate::app::Messenger::Qq)), None, notification_record_slot_tag(r), Some(notification_record_source_badge(r))));
                         }
                     }
                 } else {
                     for m in self.mail_rows().into_iter().take(24) {
                         let disp = self.display_mail(&m);
                         let t_short = disp.time.rsplit(' ').next().unwrap_or(&disp.time).to_string();
-                        built.push((disp.from, disp.subject, t_short, None, Some((m.account.clone(), m.uid)), None));
+                        built.push((disp.from, disp.subject, t_short, None, Some((m.account.clone(), m.uid)), None, None));
                     }
                 }
                 guard.0 = cache_key;
@@ -3542,9 +3630,13 @@ impl App {
             c.seg((40.0, line_y), (376.0, line_y), 0.7, Color32::from_white_alpha(18));
             let empty_title = match (cur_src, slot_filter) {
                 (1, 2) => "暂无微信分身历史消息",
+                (1, 3) => "暂无微信手机镜像消息",
+                (1, 4) => "暂无微信电脑通知消息",
                 (1, 1) => "暂无微信主应用历史消息",
                 (1, _) => "暂无微信历史消息",
                 (2, 2) => "暂无 QQ 分身历史消息",
+                (2, 3) => "暂无 QQ 手机镜像消息",
+                (2, 4) => "暂无 QQ 电脑通知消息",
                 (2, 1) => "暂无 QQ 主应用历史消息",
                 (2, _) => "暂无 QQ 历史消息",
                 _ => "暂无邮箱消息",
@@ -3584,7 +3676,7 @@ impl App {
             .auto_shrink([false, false])
             .show_rows(&mut content, row_h * c.s, rows.len(), |ui, range| {
                 for idx in range {
-                    let (ref title, ref body, ref time_str, unread_opt, ref mail_opt, slot_tag) = rows[idx];
+                    let (ref title, ref body, ref time_str, unread_opt, ref mail_opt, slot_tag, source_tag) = rows[idx];
                     let r_w = list_rect.width() - 10.0;
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(r_w * c.s, row_h * c.s), egui::Sense::hover());
                     let stagger = ((idx.min(5) as f32) * 0.06).min(0.30);
@@ -3598,17 +3690,23 @@ impl App {
                     if hit.hovered() {
                         rc.fill(0.0, 1.0, r_w, row_h - 2.0, 7.0, Color32::from_white_alpha(14));
                     }
-                    let badge_reserve = if let Some((tag_label, _)) = slot_tag {
-                        rc.text_w(tag_label, 7.8, W::Semibold) + 16.0
+                    let slot_reserve = if let Some((tag_label, _)) = slot_tag {
+                        rc.text_w(tag_label, 7.8, W::Semibold) + 14.0
                     } else {
                         0.0
                     };
-                    let t_fit = rc.fit(title, 11.2, W::Bold, (r_w - 52.0 - badge_reserve).max(60.0));
+                    let src_reserve = if let Some((src_label, _)) = source_tag {
+                        rc.text_w(src_label, 7.5, W::Semibold) + 12.0
+                    } else {
+                        0.0
+                    };
+                    let badge_reserve = slot_reserve + src_reserve;
+                    let t_fit = rc.fit(title, 11.2, W::Bold, (r_w - 52.0 - badge_reserve).max(52.0));
                     rc.text(4.0, 16.5, &t_fit, 11.2, W::Bold, theme::WHITE, H::Left);
+                    let mut tag_x = 4.0 + rc.text_w(&t_fit, 11.2, W::Bold) + 6.0;
                     if let Some((tag_label, is_clone)) = slot_tag {
-                        let tw = rc.text_w(&t_fit, 11.2, W::Bold);
                         let bw = rc.text_w(tag_label, 7.8, W::Semibold) + 10.0;
-                        let bx = (4.0 + tw + 6.0).min(r_w - 46.0 - bw);
+                        let bx = tag_x.min(r_w - 46.0 - src_reserve - bw);
                         let (bg_col, fg_col) = if is_clone {
                             (Color32::from_rgba_unmultiplied(16, 185, 129, 52), Color32::from_rgb(110, 231, 183))
                         } else {
@@ -3616,6 +3714,18 @@ impl App {
                         };
                         rc.fill(bx, 6.5, bw, 13.5, 4.0, bg_col);
                         rc.centered_text(bx + bw * 0.5, 13.2, tag_label, 7.8, W::Semibold, fg_col, H::Center);
+                        tag_x = bx + bw + 4.0;
+                    }
+                    if let Some((src_label, is_mirror)) = source_tag {
+                        let bw = rc.text_w(src_label, 7.5, W::Semibold) + 8.0;
+                        let bx = tag_x.min(r_w - 46.0 - bw);
+                        let (bg_col, fg_col) = if is_mirror {
+                            (Color32::from_rgba_unmultiplied(16, 185, 129, 44), Color32::from_rgb(110, 231, 183))
+                        } else {
+                            (Color32::from_rgba_unmultiplied(148, 163, 184, 36), Color32::from_rgb(203, 213, 225))
+                        };
+                        rc.fill(bx, 6.5, bw, 13.5, 4.0, bg_col);
+                        rc.centered_text(bx + bw * 0.5, 13.2, src_label, 7.5, W::Semibold, fg_col, H::Center);
                     }
                     rc.text(r_w - 4.0, 16.0, time_str, 9.2, W::Regular, theme::GRAY, H::Right);
                     let b_fit = rc.fit(body, 10.0, W::Regular, r_w - 12.0);
@@ -4814,6 +4924,18 @@ impl App {
     }
 }
 
+
+pub(crate) fn is_mirrored_notification_record(r: &crate::model::NotificationRecord) -> bool {
+    r.app_id.trim().to_ascii_lowercase().starts_with("oppo-mirror:")
+}
+
+pub(crate) fn notification_record_source_badge(r: &crate::model::NotificationRecord) -> (&'static str, bool) {
+    if is_mirrored_notification_record(r) {
+        ("手机镜像", true)
+    } else {
+        ("电脑", false)
+    }
+}
 
 pub(crate) fn is_clone_notification_record(r: &crate::model::NotificationRecord) -> bool {
     r.app_name.contains("分身")

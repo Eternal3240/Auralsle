@@ -154,8 +154,8 @@ pub enum Skin {
 
 impl Skin {
     pub const ALL: [Skin; 6] = [Skin::Classic, Skin::Cream, Skin::GlassLight, Skin::GlassDark, Skin::Fluid, Skin::LiquidGlass];
-    /// 供设置界面显示的 4 套正式皮肤（毛玻璃·浅与毛玻璃·深合并为统一的「毛玻璃」）。
-    pub const UI_SKINS: [Skin; 4] = [Skin::Classic, Skin::Cream, Skin::GlassDark, Skin::Fluid];
+    /// 供设置界面显示的 5 套正式皮肤（含 轻九九九 `@cayww` 液态玻璃材质）。
+    pub const UI_SKINS: [Skin; 5] = [Skin::Classic, Skin::Cream, Skin::GlassDark, Skin::Fluid, Skin::LiquidGlass];
     pub fn key(self) -> &'static str {
         match self { Self::Classic => "classic", Self::Fluid => "fluid", Self::Cream => "cream", Self::GlassLight => "glass_light", Self::GlassDark => "glass", Self::LiquidGlass => "liquid_glass" }
     }
@@ -179,7 +179,7 @@ impl Skin {
             Self::Cream => "暖白底配橙色强调。",
             Self::GlassLight => "浅色磨砂，透出桌面，自动适配明暗。",
             Self::GlassDark => "深色磨砂，透出桌面，自动适配明暗。",
-            Self::LiquidGlass => "Apple 液态玻璃：外圈折射受光，中心通透。",
+            Self::LiquidGlass => "轻九九九（@cayww）社区液态玻璃：真实桌面折射、色散、霜化与弹性控件玻璃。",
         }
     }
     pub fn is_glass(self) -> bool { matches!(self, Self::GlassLight | Self::GlassDark | Self::LiquidGlass) }
@@ -214,27 +214,28 @@ impl IslandShape {
     }
 }
 
-/// 岛体停靠的屏幕边缘：顶部为横向刘海 / 胶囊，左右两侧为竖向排列。
+/// 岛体停靠的屏幕边缘：上下为横向刘海 / 胶囊，左右两侧为竖向排列。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Dock {
     #[default]
     Top,
+    Bottom,
     Left,
     Right,
 }
 
 impl Dock {
-    pub const ALL: [Dock; 3] = [Dock::Top, Dock::Left, Dock::Right];
+    pub const ALL: [Dock; 4] = [Dock::Top, Dock::Bottom, Dock::Left, Dock::Right];
     pub fn key(self) -> &'static str {
-        match self { Self::Top => "top", Self::Left => "left", Self::Right => "right" }
+        match self { Self::Top => "top", Self::Bottom => "bottom", Self::Left => "left", Self::Right => "right" }
     }
     pub fn parse(value: &str) -> Self {
-        match value { "left" => Self::Left, "right" => Self::Right, _ => Self::Top }
+        match value { "bottom" => Self::Bottom, "left" => Self::Left, "right" => Self::Right, _ => Self::Top }
     }
     pub fn label(self) -> &'static str {
-        match self { Self::Top => "顶部", Self::Left => "左侧", Self::Right => "右侧" }
+        match self { Self::Top => "顶部", Self::Bottom => "底部", Self::Left => "左侧", Self::Right => "右侧" }
     }
-    pub fn is_side(self) -> bool { self != Self::Top }
+    pub fn is_side(self) -> bool { matches!(self, Self::Left | Self::Right) }
 }
 
 /// 岛体大小（百分比）的范围与步进。
@@ -247,6 +248,35 @@ pub const ISLAND_OFFSET_MAX: i32 = 100;
 pub fn island_size_value(value: u32) -> u32 {
     let value = value.clamp(ISLAND_SIZE_MIN, ISLAND_SIZE_MAX);
     (value + ISLAND_SIZE_STEP / 2) / ISLAND_SIZE_STEP * ISLAND_SIZE_STEP
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ResidentDate {
+    #[default]
+    Off,
+    Gregorian,
+    LunarOnly,
+    Lunar,
+}
+
+impl ResidentDate {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Gregorian => "gregorian",
+            Self::LunarOnly => "lunar-only",
+            Self::Lunar => "lunar",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "gregorian" => Self::Gregorian,
+            "lunar-only" => Self::LunarOnly,
+            "lunar" => Self::Lunar,
+            _ => Self::Off,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -272,14 +302,24 @@ pub struct Settings {
     pub visible_pages: [bool; 10],  // [ai-status-mod] 第 10 页 = 插件
     pub page_order: [usize; 10],  // [ai-status-mod]
     pub show_clock: bool,
+    pub resident_date: ResidentDate,
     pub show_battery: bool,
     pub show_weather: bool,
+    pub show_performance: bool,
+    pub performance_bar: crate::performance::BarStyle,
+    pub performance_metrics: u16,
+    pub performance_view: crate::performance::View,
     pub clock_12h: bool,
     pub clock_period: u8,
     pub clock_seconds: bool,
     pub resident_order: Vec<usize>,
     pub system_hud: bool,
     pub bluetooth_notifications: bool,
+    pub show_bluetooth: bool,
+    pub bluetooth_pinned: Vec<String>,
+    pub bluetooth_resident_style: u8,
+    pub bluetooth_resident_custom: bool,
+    pub bluetooth_battery_notifications: bool,
     pub read_notifications:bool,
     pub wechat_notifications:bool,
     pub wecom_notifications:bool,
@@ -296,11 +336,14 @@ pub struct Settings {
     /// 大胶囊展开为主岛的方式：0 = 点击胶囊展开，1 = 鼠标放上去自动展开。
     pub island_open_mode: u8,
     pub notifications: bool,
+    /// 岛上提醒的同时发一条 Windows 系统通知（默认开启）；关闭后只在岛上提醒。
+    pub system_notify: bool,
     pub sound: bool,
     pub lyrics_enabled:bool,
     pub island_lyrics:bool,
     pub lyric_delay_ms:i32,
     pub hide_fullscreen: bool,
+    pub exclude_from_capture: bool,
     /// 启用顶栏适配，按显示方式避让顶栏或保持岛体在顶栏上方。
     pub avoid_top_bar: bool,
     pub top_bar_on_top: bool,
@@ -320,7 +363,9 @@ pub struct Settings {
     /// v0.5.5 邮件提醒：总开关、验证码高亮、轮询间隔（秒）、会议提前量（分钟）。
     pub mail_enabled: bool,
     pub mail_sync_operations:bool,
+    pub mail_code_only_notifications: bool,
     pub mail_code: bool,
+    pub mail_code_popup: bool,
     pub mail_code_hide_seconds:u32,
     pub mail_interval: u32,
     pub mail_ics: u32,
@@ -345,7 +390,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_clock: true, show_battery: true, show_weather: true, clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, unread_dot:false, notification_preview:false, alert_duration_secs: 5, island_open_mode: 0, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_clock: true, resident_date: ResidentDate::Off, show_battery: true, show_weather: true, show_performance: false, performance_bar: Default::default(), performance_metrics: 7, performance_view: Default::default(), clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, show_bluetooth: true, bluetooth_pinned: Vec::new(), bluetooth_resident_style: 0, bluetooth_resident_custom: false, bluetooth_battery_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, unread_dot:false, notification_preview:false, alert_duration_secs: 5, island_open_mode: 0, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, exclude_from_capture: false, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code_only_notifications: false, mail_code: true, mail_code_popup: false, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
     }
 }
 
@@ -405,6 +450,9 @@ impl Settings {
                     if order.len()==6 && !order.contains(&crate::bar_layout::WEATHER) {
                         if let Some(clock)=order.iter().position(|slot|*slot==crate::bar_layout::CLOCK){order.insert(clock+1,crate::bar_layout::WEATHER);}
                     }
+                    if order.len()==7 && !order.contains(&crate::bar_layout::PERFORMANCE) {
+                        order.push(crate::bar_layout::PERFORMANCE);
+                    }
                     if crate::bar_layout::valid_order(&order){s.resident_order=order;}
                 }
                 "page_order" => {
@@ -424,7 +472,12 @@ impl Settings {
                 "clock_seconds" => s.clock_seconds = v == "1",
                 "show_battery" => s.show_battery = v != "0",
                 "show_clock" => s.show_clock = v != "0",
+                "resident_date" => s.resident_date = ResidentDate::parse(&v),
                 "show_weather" => s.show_weather = v != "0",
+                "show_performance" => s.show_performance = v != "0",
+                "performance_bar" => s.performance_bar = crate::performance::BarStyle::parse(&v),
+                "performance_metrics" => s.performance_metrics = v.parse::<u16>().unwrap_or(s.performance_metrics) & 0x1ff,
+                "performance_view" => s.performance_view = crate::performance::View::parse(&v),
                 "visible_pages" if (6..=10).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
@@ -442,12 +495,19 @@ impl Settings {
                 "island_open_mode" => s.island_open_mode = if v == "1" { 1 } else { 0 },
                 "system_hud" => s.system_hud = v != "0",
                 "bluetooth_notifications" => s.bluetooth_notifications = v != "0",
+                "show_bluetooth" => s.show_bluetooth = v != "0",
+                "bluetooth_pinned" => s.bluetooth_pinned = serde_json::from_str(&v).unwrap_or_default(),
+                "bluetooth_resident_style" => s.bluetooth_resident_style = v.parse::<u8>().unwrap_or(0).min(1),
+                "bluetooth_resident_custom" => s.bluetooth_resident_custom = v == "1",
+                "bluetooth_battery_notifications" => s.bluetooth_battery_notifications = v != "0",
                 "notifications" => s.notifications = v != "0",
+                "system_notify" => s.system_notify = v != "0",
                 "sound" => s.sound = v == "1",
                 "lyrics_enabled" => s.lyrics_enabled=v!="0",
                 "island_lyrics" => s.island_lyrics=v=="1",
                 "lyric_delay_ms" => s.lyric_delay_ms=v.parse::<i32>().unwrap_or(-350).clamp(-5000,5000),
                 "hide_fullscreen" => s.hide_fullscreen = v != "0",
+                "exclude_from_capture" => s.exclude_from_capture = v == "1",
                 "avoid_top_bar" => s.avoid_top_bar = v != "0",
                 "top_bar_on_top" => s.top_bar_on_top = v == "1",
                 "focus_minutes" => s.focus_minutes = v.parse::<u32>().unwrap_or(25).clamp(1, 180),
@@ -463,7 +523,9 @@ impl Settings {
                 "lunch_end" => s.lunch_end = v.parse::<u32>().unwrap_or(810).min(1439),
                 "mail_enabled" => s.mail_enabled = v != "0",
                 "mail_sync_operations" => s.mail_sync_operations=v=="1",
+                "mail_code_only_notifications" => s.mail_code_only_notifications = v == "1",
                 "mail_code" => s.mail_code = v != "0",
+                "mail_code_popup" => s.mail_code_popup = v == "1",
                 "mail_code_hide_seconds" => s.mail_code_hide_seconds=v.parse::<u32>().unwrap_or(60).clamp(15,300),
                 "mail_interval" => s.mail_interval = match v.parse::<u32>().unwrap_or(120) { 60 => 60, 300 => 300, _ => 120 },
                 "ignored_mail_events" => s.ignored_mail_events = serde_json::from_str(&v).unwrap_or_default(),
@@ -480,7 +542,7 @@ impl Settings {
             }
         }
         if !s.visible_pages.contains(&true) { s.visible_pages[0]=true; }
-        if !cfg!(test) && matches!(s.skin, Skin::LiquidGlass | Skin::GlassLight) {
+        if !cfg!(test) && matches!(s.skin, Skin::GlassLight) {
             s.skin = Skin::GlassDark;
         }
         // 旧版只有一个指定城市：迁移进已保存列表，升级后下拉框里能直接看到它。
@@ -517,7 +579,12 @@ impl Settings {
                 ("clock_seconds".into(), (self.clock_seconds as u8).to_string()),
                 ("show_battery".into(), (self.show_battery as u8).to_string()),
                 ("show_clock".into(), (self.show_clock as u8).to_string()),
+                ("resident_date".into(), self.resident_date.key().into()),
                 ("show_weather".into(), (self.show_weather as u8).to_string()),
+                ("show_performance".into(), (self.show_performance as u8).to_string()),
+                ("performance_bar".into(), self.performance_bar.key().into()),
+                ("performance_metrics".into(), self.performance_metrics.to_string()),
+                ("performance_view".into(), self.performance_view.key().into()),
                 ("read_notifications".into(),(self.read_notifications as u8).to_string()),
                 ("wechat_notifications".into(),(self.wechat_notifications as u8).to_string()),
                 ("wecom_notifications".into(),(self.wecom_notifications as u8).to_string()),
@@ -531,12 +598,19 @@ impl Settings {
                 ("island_open_mode".into(), self.island_open_mode.to_string()),
                 ("system_hud".into(), (self.system_hud as u8).to_string()),
                 ("bluetooth_notifications".into(), (self.bluetooth_notifications as u8).to_string()),
+                ("show_bluetooth".into(), (self.show_bluetooth as u8).to_string()),
+                ("bluetooth_pinned".into(), serde_json::to_string(&self.bluetooth_pinned).unwrap()),
+                ("bluetooth_resident_style".into(), self.bluetooth_resident_style.to_string()),
+                ("bluetooth_resident_custom".into(), (self.bluetooth_resident_custom as u8).to_string()),
+                ("bluetooth_battery_notifications".into(), (self.bluetooth_battery_notifications as u8).to_string()),
                 ("notifications".into(), (self.notifications as u8).to_string()),
+                ("system_notify".into(), (self.system_notify as u8).to_string()),
                 ("sound".into(), (self.sound as u8).to_string()),
                 ("lyrics_enabled".into(),(self.lyrics_enabled as u8).to_string()),
                 ("island_lyrics".into(),(self.island_lyrics as u8).to_string()),
                 ("lyric_delay_ms".into(),self.lyric_delay_ms.to_string()),
                 ("hide_fullscreen".into(), (self.hide_fullscreen as u8).to_string()),
+                ("exclude_from_capture".into(), (self.exclude_from_capture as u8).to_string()),
                 ("avoid_top_bar".into(), (self.avoid_top_bar as u8).to_string()),
                 ("top_bar_on_top".into(), (self.top_bar_on_top as u8).to_string()),
                 ("focus_minutes".into(), self.focus_minutes.to_string()),
@@ -552,7 +626,9 @@ impl Settings {
                 ("lunch_end".into(), self.lunch_end.to_string()),
                 ("mail_enabled".into(), (self.mail_enabled as u8).to_string()),
                 ("mail_sync_operations".into(),(self.mail_sync_operations as u8).to_string()),
+                ("mail_code_only_notifications".into(), (self.mail_code_only_notifications as u8).to_string()),
                 ("mail_code".into(), (self.mail_code as u8).to_string()),
+                ("mail_code_popup".into(), (self.mail_code_popup as u8).to_string()),
                 ("mail_code_hide_seconds".into(), self.mail_code_hide_seconds.to_string()),
                 ("mail_interval".into(), self.mail_interval.to_string()),
                 ("mail_ics".into(), self.mail_ics.to_string()),
@@ -935,6 +1011,38 @@ pub fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_exclusion_defaults_to_disabled_and_round_trips() {
+        let _guard = crate::ui_tests::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("auralsle-capture-settings-{}-{nonce}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("settings.txt");
+        fs::write(&path, b"hide_fullscreen=0\n").unwrap();
+
+        let previous = std::env::var_os("AURALSLE_DATA_DIR");
+        std::env::set_var("AURALSLE_DATA_DIR", &dir);
+        let mut settings = Settings::load();
+        let legacy_disabled = !settings.exclude_from_capture && !settings.hide_fullscreen;
+        settings.exclude_from_capture = true;
+        settings.save();
+        let enabled = Settings::load();
+        settings.exclude_from_capture = false;
+        settings.save();
+        let disabled = Settings::load();
+        match previous {
+            Some(previous) => std::env::set_var("AURALSLE_DATA_DIR", previous),
+            None => std::env::remove_var("AURALSLE_DATA_DIR"),
+        }
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+
+        assert!(!Settings::default().exclude_from_capture);
+        assert!(legacy_disabled);
+        assert!(enabled.exclude_from_capture && !enabled.hide_fullscreen);
+        assert!(!disabled.exclude_from_capture && !disabled.hide_fullscreen);
+    }
 
     #[test]
     fn island_appearance_values_are_normalized() {

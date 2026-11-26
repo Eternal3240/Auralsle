@@ -10,7 +10,8 @@ pub mod model;
 pub mod registry;
 
 pub use mirror::{
-    cached_icon_png, default_icon_dir, is_suppress_active, log_path, refresh_oppo_setting_status,
+    cached_icon_png, default_icon_dir, is_suppress_active, latest_main_log_path_in, log_path,
+    main_log_path, parse_dismiss_log_line, refresh_oppo_setting_status,
     restore_crash_leftover_if_needed, restore_on_normal_exit, restore_oppo_native_now,
     set_suppress_active, spawn, status_snapshot, MirrorConfig, MirrorEvent, MirrorEventKind,
     MirrorHandle, MirrorStatus, Watcher,

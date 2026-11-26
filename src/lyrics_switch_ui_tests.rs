@@ -112,3 +112,68 @@ fn native_lyrics_polling_starts_on_switch_without_waiting_for_the_old_request(){
         finish(&mut h,release);
     }
 }
+
+#[test]
+#[cfg(windows)]
+fn player_version_without_progress_shows_the_title_instead_of_frozen_lyrics(){
+    use crate::smtc::music_compat::{self as compat,Item,Support};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();lyrics_on(&mut h);
+    let media=song("kugou","红玫瑰","陈奕迅",240.0);
+    compat::set("KuGou.exe",Item::Progress,Support::Ok);
+    showing(&mut h,&media,"[00:01]第一句\n[00:05]第二句");
+    assert_eq!(h.app.island_lyric().map(|(_,line)|line),Some("第二句"));
+    // 酷狗版本读不到进度：歌词无法同步，岛上改显示歌名，不显示停住的歌词。
+    compat::set("KuGou.exe",Item::Progress,Support::Unavailable("版本不在适配表里".into()));
+    h.frame(vec![]);
+    assert!(h.app.music_lyrics_limited());
+    assert_eq!(h.app.island_lyric(),None);
+    // 拖动跳转不可用不影响歌词。
+    compat::set("KuGou.exe",Item::Progress,Support::Learned);
+    compat::set("KuGou.exe",Item::Seek,Support::Unavailable("接口不可用".into()));
+    h.frame(vec![]);
+    assert!(!h.app.music_lyrics_limited());
+    assert_eq!(h.app.island_lyric().map(|(_,line)|line),Some("第二句"));
+    compat::clear("KuGou.exe",Item::Progress);compat::clear("KuGou.exe",Item::Seek);
+    // 其他播放器不受酷狗的结论影响。
+    compat::set("KuGou.exe",Item::Progress,Support::Unavailable("x".into()));
+    showing(&mut h,&song("QQMusic.exe","旧歌","歌手",200.0),"[00:01]旧歌词\n[00:05]第二句");
+    assert!(!h.app.music_lyrics_limited());
+    compat::clear("KuGou.exe",Item::Progress);
+}
+
+#[test]
+#[cfg(windows)]
+fn song_with_system_position_keeps_lyrics_after_player_fallback_fails(){
+    use crate::smtc::music_compat::{self as compat,Item,Support};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();lyrics_on(&mut h);
+    let (release,_)=busy(&mut h);
+    compat::set("cloudmusic.exe",Item::Progress,Support::Unavailable("备用进度读取失败".into()));
+    showing(&mut h,&song("cloudmusic.exe","缺少进度的歌","歌手",0.0),"[00:01]旧歌词");
+    let without_position=h.app.island_lyric().is_none();
+    let mut next=song("cloudmusic.exe","带系统进度的歌","歌手",220.0);
+    next.sampled_at=Some(std::time::Instant::now());
+    showing(&mut h,&next,"[00:01]新歌词");
+    let with_position=h.app.island_lyric().map(|(_,line)|line.to_owned());
+    compat::clear("cloudmusic.exe",Item::Progress);
+    finish(&mut h,release);
+    assert!(without_position,"读不到当前歌曲进度时应显示歌名");
+    assert_eq!(with_position.as_deref(),Some("新歌词"));
+}
+
+#[test]
+fn artist_filled_in_later_requeries_lyrics_with_the_full_credit(){
+    // 波点：换歌后本机歌曲库约 30 秒才写入，先只有歌名，随后补上歌手和歌曲 ID。
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();lyrics_on(&mut h);
+    let (release,_)=busy(&mut h);
+    let bare=song("bodian_pc.exe","微风细雨","",229.3);
+    h.media=bare.clone();h.frame(vec![]);
+    let first=h.app.ly.pending.is_some().then(||h.app.ly.song.as_ref().map(|song|(song.title.clone(),song.artist.clone()))).flatten();
+    println!("只有歌名时排队的查询：{first:?}，key={}",h.app.ly.key);
+    let mut full=bare.clone();full.artist="邓丽君".into();full.song_id=Some(27148558);
+    h.media=full;h.frame(vec![]);
+    let second=h.app.ly.pending.is_some().then(||h.app.ly.song.as_ref().map(|song|(song.title.clone(),song.artist.clone()))).flatten();
+    println!("补上歌手后排队的查询：{second:?}，key={}",h.app.ly.key);
+    assert_eq!(second,Some(("微风细雨".into(),"邓丽君".into())),"补上歌手后要按完整署名重新查询");
+    finish(&mut h,release);
+}

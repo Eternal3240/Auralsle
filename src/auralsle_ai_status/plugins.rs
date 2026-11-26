@@ -1802,6 +1802,7 @@ pub fn active_win_palette() -> Option<crate::skin_paint::Palette> {
         lift: if wt.light { 1.0 } else { 0.56 },
         darken: if wt.light { 0.78 } else { 1.0 },
         chip: if wt.light { 0.72 } else { 1.0 },
+        glass_chrome: false,
     })
 }
 
@@ -1985,15 +1986,37 @@ pub fn eval_win_widget(id: u8, s: &sysmon::Sample, _cfg: &config::Config, _ppp: 
             };
             ("内存", format!("{:.0}%", ratio * 100.0), sub, Color32::from_rgb(52, 211, 153), Some(ratio))
         }
-        18 => ("磁盘", sysmon::rate(s.disk_read + s.disk_write), format!("已用 {}", sysmon::bytes(s.disk_used)), Color32::from_rgb(251, 191, 36), None),
-        19 => (
-            "网络",
-            format!("↓{}", sysmon::rate(s.net_rx)),
-            format!("↑{}", sysmon::rate(s.net_tx)),
-            Color32::from_rgb(34, 211, 238),
-            None,
+        18 => {
+            let disk_bps = (s.disk_read + s.disk_write).max(0.0) as f32;
+            let ratio = if disk_bps <= 1.0 {
+                0.04
+            } else {
+                ((disk_bps.log10() - 3.0) / 6.0).clamp(0.04, 1.0)
+            };
+            ("磁盘", sysmon::rate(s.disk_read + s.disk_write), format!("已用 {}", sysmon::bytes(s.disk_used)), Color32::from_rgb(251, 191, 36), Some(ratio))
+        }
+        19 => {
+            let net_bps = (s.net_rx + s.net_tx).max(0.0) as f32;
+            let ratio = if net_bps <= 1.0 {
+                0.04
+            } else {
+                ((net_bps.log10() - 3.0) / 5.5).clamp(0.04, 1.0)
+            };
+            (
+                "网络",
+                format!("↓{}", sysmon::rate(s.net_rx)),
+                format!("↑{}", sysmon::rate(s.net_tx)),
+                Color32::from_rgb(34, 211, 238),
+                Some(ratio),
+            )
+        }
+        21 => (
+            "进程",
+            format!("{}", s.processes),
+            "活跃进程".to_owned(),
+            Color32::from_rgb(148, 163, 184),
+            Some((s.processes as f32 / 600.0).clamp(0.05, 1.0)),
         ),
-        21 => ("进程", format!("{}", s.processes), "活跃进程".to_owned(), Color32::from_rgb(148, 163, 184), None),
         22 => {
             let pct = s.battery.unwrap_or(92);
             ("电量", format!("{pct}%"), if s.charging { "充电中".to_owned() } else { "放电中".to_owned() }, Color32::from_rgb(74, 222, 128), Some(pct as f32 / 100.0))
@@ -2976,6 +2999,158 @@ pub fn draw_island_page(c: &crate::paint::Card) {
     }
 }
 
+pub(crate) fn widget_sparkline_ratios(
+    wid: u8,
+    samples: &[sysmon::Sample],
+    n_pts: usize,
+    vram_total: u64,
+    fallback_ratio: f32,
+) -> Vec<f32> {
+    if n_pts == 0 {
+        return Vec::new();
+    }
+    if samples.is_empty() {
+        return vec![fallback_ratio.clamp(0.03, 0.96); n_pts];
+    }
+    let hist_len = samples.len();
+    let win_start = hist_len.saturating_sub(n_pts);
+    let win = &samples[win_start..];
+    let max_mhz = win
+        .iter()
+        .filter_map(|sm| sm.cpu_mhz)
+        .fold(0.0_f32, f32::max)
+        .max(5000.0);
+    let disk_ceil = win
+        .iter()
+        .map(|sm| (sm.disk_read + sm.disk_write).max(0.0) as f32)
+        .fold(0.0_f32, f32::max)
+        .max(512.0 * 1024.0)
+        * 1.18;
+    let net_ceil = win
+        .iter()
+        .map(|sm| (sm.net_rx + sm.net_tx).max(0.0) as f32)
+        .fold(0.0_f32, f32::max)
+        .max(128.0 * 1024.0)
+        * 1.18;
+
+    let mut out = Vec::with_capacity(n_pts);
+    for i in 0..n_pts {
+        let h_idx = hist_len.saturating_sub(n_pts - i).min(hist_len - 1);
+        let sm = &samples[h_idx];
+        let pt = match wid {
+            12 => (sm.cpu / 100.0).clamp(0.03, 0.96),
+            13 => sm
+                .cpu_mhz
+                .filter(|m| *m > 0.0)
+                .map(|m| m / max_mhz)
+                .unwrap_or_else(|| sm.cpu / 100.0)
+                .clamp(0.03, 0.96),
+            14 => sm
+                .temp_c
+                .map(|t| t / 100.0)
+                .unwrap_or(fallback_ratio)
+                .clamp(0.03, 0.96),
+            15 => sm
+                .gpu
+                .map(|g| g / 100.0)
+                .unwrap_or(fallback_ratio)
+                .clamp(0.03, 0.96),
+            16 => {
+                if vram_total > 0 {
+                    sm.vram.unwrap_or(0) as f32 / vram_total as f32
+                } else if sm.vram_shared.unwrap_or(0) > 0 && sm.mem_total > 0 {
+                    sm.vram_shared.unwrap_or(0) as f32 / (sm.mem_total as f32 * 0.5).max(1.0)
+                } else {
+                    sm.gpu.map(|g| g / 100.0).unwrap_or(fallback_ratio)
+                }
+                .clamp(0.03, 0.96)
+            }
+            17 => {
+                if sm.mem_total > 0 {
+                    (sm.mem_used as f32 / sm.mem_total as f32).clamp(0.03, 0.96)
+                } else {
+                    fallback_ratio.clamp(0.03, 0.96)
+                }
+            }
+            18 => {
+                let r = (sm.disk_read + sm.disk_write).max(0.0) as f32;
+                if r <= 1.0 {
+                    0.03
+                } else {
+                    (0.04 + 0.86 * (r / disk_ceil)).clamp(0.04, 0.92)
+                }
+            }
+            19 => {
+                let r = (sm.net_rx + sm.net_tx).max(0.0) as f32;
+                if r <= 1.0 {
+                    0.03
+                } else {
+                    (0.04 + 0.86 * (r / net_ceil)).clamp(0.04, 0.92)
+                }
+            }
+            21 => (sm.processes as f32 / 600.0).clamp(0.05, 0.95),
+            22 => sm
+                .battery
+                .map(|b| b as f32 / 100.0)
+                .unwrap_or(fallback_ratio)
+                .clamp(0.03, 0.96),
+            _ => fallback_ratio.clamp(0.03, 0.96),
+        };
+        out.push(pt);
+    }
+    out
+}
+
+fn fit_card_bottom_pair(
+    c: &crate::paint::Card,
+    main_val: &str,
+    value_sz: f32,
+    sub_str: &str,
+    sub_sz: f32,
+    usable_w: f32,
+    show_value: bool,
+    show_sub: bool,
+) -> (String, f32, String, f32) {
+    use crate::theme::W;
+    if !show_sub || sub_str.is_empty() {
+        return (
+            if show_value { c.fit(main_val, value_sz, W::Bold, usable_w) } else { String::new() },
+            value_sz,
+            String::new(),
+            sub_sz,
+        );
+    }
+    if !show_value || main_val.is_empty() {
+        return (
+            String::new(),
+            value_sz,
+            c.fit(sub_str, sub_sz, W::Semibold, usable_w),
+            sub_sz,
+        );
+    }
+    let gap = 6.0_f32;
+    let mut cur_val_sz = value_sz;
+    let mut cur_sub_sz = sub_sz;
+    let val_w = c.text_w(main_val, cur_val_sz, W::Bold);
+    let sub_w = c.text_w(sub_str, cur_sub_sz, W::Semibold);
+    if val_w + gap + sub_w <= usable_w {
+        return (main_val.to_owned(), cur_val_sz, sub_str.to_owned(), cur_sub_sz);
+    }
+    let min_val_sz = (value_sz * 0.72).max(9.8);
+    let avail_for_val = (usable_w - gap - sub_w).max(usable_w * 0.48);
+    cur_val_sz = (value_sz * (avail_for_val / val_w.max(1.0))).clamp(min_val_sz, value_sz);
+    if c.text_w(main_val, cur_val_sz, W::Bold) + gap + sub_w > usable_w {
+        cur_sub_sz = (sub_sz * 0.84).max(7.6);
+    }
+    let sub_need = c.text_w(sub_str, cur_sub_sz, W::Semibold).min(usable_w * 0.46);
+    let val_budget = (usable_w - sub_need - gap).max(usable_w * 0.50);
+    let drawn_val = c.fit(main_val, cur_val_sz, W::Bold, val_budget);
+    let actual_val_w = c.text_w(&drawn_val, cur_val_sz, W::Bold);
+    let sub_budget = (usable_w - actual_val_w - gap).max(24.0);
+    let drawn_sub = c.fit(sub_str, cur_sub_sz, W::Semibold, sub_budget);
+    (drawn_val, cur_val_sz, drawn_sub, cur_sub_sz)
+}
+
 /// [Shadcn UI 新版插件岛 (`plugin_ui_mode == 0`, 需求 14)]：
 /// 遵循 https://ui.shadcn.com/ Dashboard & Bento Telemetry Card 规范：
 /// - 零顶栏文字冲突：顶栏不叠加任何进程/开机时长散字，翻页胶囊严格置于 `x = 304..342` 安全区；
@@ -3074,11 +3249,12 @@ pub fn draw_shadcn_plugin_island_page(
         }
     }
 
+    let hw = crate::graphics::probe_gpu_hardware_info();
+    let vram_total = hw.adapter_vram_bytes;
     let samples = sysmon::history();
     let cpu_col = Color32::from_rgb(56, 189, 248);
     let gpu_col = Color32::from_rgb(168, 85, 247);
     let muted = Color32::from_rgb(161, 161, 170);
-    let gpu_pct = s.gpu.unwrap_or(18.0).clamp(0.0, 100.0);
 
     let f_scale = (cfg.plugin_font_scale.clamp(75, 130) as f32) / 100.0;
     let card_rad = (cfg.plugin_card_radius.clamp(4, 22) as f32).max(6.0);
@@ -3163,23 +3339,10 @@ pub fn draw_shadcn_plugin_island_page(
                     c.fill(gx0, gy_top, gw, gh, 6.0, Color32::from_rgba_unmultiplied(8, 10, 15, 145));
 
                     let n_pts = 20usize;
+                    let pt_ratios = widget_sparkline_ratios(*wid, &samples, n_pts, vram_total, *ratio);
                     let mut pts = Vec::with_capacity(n_pts);
-                    let hist_len = samples.len();
-                    for i in 0..n_pts {
+                    for (i, pt_ratio) in pt_ratios.into_iter().enumerate() {
                         let px = gx0 + 2.0 + (i as f32 / (n_pts - 1) as f32) * (gw - 4.0);
-                        let pt_ratio = if hist_len > 0 {
-                            let h_idx = hist_len.saturating_sub(n_pts - i);
-                            let sm = &samples[h_idx.min(hist_len - 1)];
-                            match *wid {
-                                12 | 13 | 14 => (sm.cpu / 100.0).clamp(0.06, 0.96),
-                                16 | 17 | 18 => (sm.gpu.unwrap_or(gpu_pct) / 100.0).clamp(0.06, 0.96),
-                                15 => if sm.mem_total > 0 { (sm.mem_used as f32 / sm.mem_total as f32).clamp(0.08, 0.95) } else { 0.45 },
-                                19 | 20 => (((sm.net_rx + sm.net_tx) as f32 / (2.0 * 1024.0 * 1024.0)).clamp(0.08, 0.95)),
-                                _ => (*ratio * 0.82 + 0.08 * ((i as f32 * 0.5 + *wid as f32).sin())).clamp(0.08, 0.95),
-                            }
-                        } else {
-                            (*ratio * 0.85 + 0.10 * ((i as f32 * 0.55 + *wid as f32).sin())).clamp(0.08, 0.95)
-                        };
                         let py = gy_bot - 2.0 - pt_ratio * (gh - 5.0);
                         pts.push((px, py));
                     }
@@ -3214,25 +3377,34 @@ pub fn draw_shadcn_plugin_island_page(
                     H::Left,
                 );
             }
-            if cfg.plugin_show_value {
+            let usable_w = (card_w - 16.5).max(40.0);
+            let (drawn_val, cur_val_sz, drawn_sub, cur_sub_sz) = fit_card_bottom_pair(
+                c,
+                main_val,
+                value_sz,
+                sub_str,
+                sub_sz,
+                usable_w,
+                cfg.plugin_show_value,
+                cfg.plugin_show_sub,
+            );
+            if cfg.plugin_show_value && !drawn_val.is_empty() {
                 c.text(
                     cx + 9.0,
                     cy + card_h - 7.5,
-                    &c.fit(main_val, value_sz, W::Bold, card_w * 0.44),
-                    value_sz,
+                    &drawn_val,
+                    cur_val_sz,
                     W::Bold,
                     theme::WHITE,
                     H::Left,
                 );
             }
-            if cfg.plugin_show_sub {
-                // [修复需求 11 图5 `image_3a3307.jpg` 红框处文字过小与截断]：
-                // 增大副文本字号至 `sub_sz`（默认 9.4pt，支持自由调节），加宽右侧显示宽度至 58% 卡片宽并使用高清晰度浅灰白字色！
+            if cfg.plugin_show_sub && !drawn_sub.is_empty() {
                 c.text(
                     cx + card_w - 7.5,
                     cy + card_h - 8.0,
-                    &c.fit(sub_str, sub_sz, W::Semibold, card_w * 0.58),
-                    sub_sz,
+                    &drawn_sub,
+                    cur_sub_sz,
                     W::Semibold,
                     Color32::from_rgb(212, 214, 222),
                     H::Right,
@@ -3257,11 +3429,17 @@ pub fn draw_shadcn_plugin_island_page(
                 c.arc(cx_r, cy_r, rad, -90.0, -90.0 + sweep, 4.2, *col);
             }
             if cfg.plugin_show_value {
+                let mut r_val_sz = 10.8 * f_scale;
+                let max_rw = ring_w - 10.0;
+                let raw_rw = c.text_w(main_v, r_val_sz, W::Bold);
+                if raw_rw > max_rw {
+                    r_val_sz = (r_val_sz * (max_rw / raw_rw.max(1.0))).clamp(7.8, r_val_sz);
+                }
                 c.text(
                     cx_r,
                     cy_r + 4.5,
-                    &c.fit(main_v, 10.8 * f_scale, W::Bold, ring_w - 12.0),
-                    10.8 * f_scale,
+                    &c.fit(main_v, r_val_sz, W::Bold, max_rw),
+                    r_val_sz,
                     W::Bold,
                     theme::WHITE,
                     H::Center,
@@ -4997,4 +5175,64 @@ pub fn draw_translate_settings_page(ui: &mut egui::Ui) {
 #[allow(dead_code)]
 fn bar_y(tile_y: f32) -> f32 {
     tile_y + 42.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sparkline_maps_gpu_mem_and_dynamic_network_correctly() {
+        let mem_total = 32 * 1024 * 1024 * 1024_u64;
+        let mem_used = (mem_total as f64 * 0.59) as u64;
+        let samples: Vec<sysmon::Sample> = (0..20)
+            .map(|i| sysmon::Sample {
+                cpu: 14.0,
+                gpu: Some(12.0),
+                mem_used,
+                mem_total,
+                net_rx: ((i % 4 + 1) as f64) * 2.0 * 1024.0 * 1024.0,
+                net_tx: 445.0 * 1024.0,
+                ..Default::default()
+            })
+            .collect();
+
+        let gpu_pts = widget_sparkline_ratios(15, &samples, 20, 0, 0.12);
+        assert!(gpu_pts.iter().all(|v| (*v - 0.12).abs() < 0.01), "GPU 曲线应使用 gpu% 而非内存: {gpu_pts:?}");
+
+        let mem_pts = widget_sparkline_ratios(17, &samples, 20, 0, 0.59);
+        assert!(mem_pts.iter().all(|v| (*v - 0.59).abs() < 0.02), "内存曲线应使用内存占比而非 GPU: {mem_pts:?}");
+
+        let net_pts = widget_sparkline_ratios(19, &samples, 20, 0, 0.7);
+        let min_net = net_pts.iter().copied().fold(f32::INFINITY, f32::min);
+        let max_net = net_pts.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(max_net < 0.90, "高速网络不应顶死在 95% 天花板: {net_pts:?}");
+        assert!(max_net - min_net > 0.35, "动态量程应清晰展现网速波动: {net_pts:?}");
+    }
+
+    #[test]
+    fn sparkline_card_bottom_pair_never_truncates_network_rate() {
+        let ctx = egui::Context::default();
+        crate::theme::load_fonts(&ctx);
+        let mut rendered = false;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let card = crate::paint::Card::new(ui, egui::Pos2::ZERO, ui.max_rect());
+                let (v, _, s, _) = fit_card_bottom_pair(
+                    &card,
+                    "↓7.7 MB/s",
+                    13.8 * 1.05,
+                    "↑445 KB/s",
+                    9.4 * 1.05,
+                    (343.0 - 7.0) * 0.5 - 16.5,
+                    true,
+                    true,
+                );
+                assert_eq!(v, "↓7.7 MB/s", "下载速率不得被截断成 ...");
+                assert_eq!(s, "↑445 KB/s");
+                rendered = true;
+            });
+        });
+        assert!(rendered);
+    }
 }

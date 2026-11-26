@@ -29,6 +29,13 @@ pub enum MirrorEventKind {
         is_update: bool,
         icon_png: Option<Arc<Vec<u8>>>,
     },
+    /// 手机端已消除某条镜像通知（来自 O+ Connect `*_main.log` 的 `receiveNotificationDelete`）
+    Dismissed {
+        key: String,
+        pkg_name: String,
+    },
+    /// 手机端断开连接或清空了全部镜像通知
+    ClearedAll,
     /// O+ 通知开关抑制结果
     OppoSuppressed {
         ok: bool,
@@ -277,10 +284,45 @@ fn run(
         return;
     };
 
+    let started_at = Instant::now();
+    let mut main_watcher: Option<(PathBuf, Watcher)> =
+        main_log_path().map(|p| (p.clone(), Watcher::new(p)));
     let mut seen: HashMap<String, Instant> = HashMap::new();
     let mut last_setting_poll = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
+        if let Some(latest_main) = main_log_path() {
+            let need_switch = main_watcher
+                .as_ref()
+                .is_none_or(|(cur, _)| cur != &latest_main);
+            if need_switch {
+                let w = if main_watcher.is_none() && started_at.elapsed() < Duration::from_secs(2) {
+                    Watcher::new(latest_main.clone())
+                } else {
+                    Watcher::new_from_start(latest_main.clone())
+                };
+                main_watcher = Some((latest_main, w));
+            }
+        }
+        if let Some((_, ref mut mw)) = main_watcher {
+            for line in mw.drain_matching(|l| l.contains("[notification_sync]")) {
+                match parse_dismiss_log_line(&line) {
+                    Some(MirrorEventKind::Dismissed { key, pkg_name }) => {
+                        seen.remove(&format!("key:{}", key.trim()));
+                        send(
+                            &tx,
+                            ui_ctx.as_ref(),
+                            MirrorEventKind::Dismissed { key, pkg_name },
+                        );
+                    }
+                    Some(MirrorEventKind::ClearedAll) => {
+                        seen.clear();
+                        send(&tx, ui_ctx.as_ref(), MirrorEventKind::ClearedAll);
+                    }
+                    _ => {}
+                }
+            }
+        }
         for line in watcher.drain() {
             let Some(n) = Notification::from_log_line(&line) else {
                 continue;
@@ -357,6 +399,75 @@ pub fn log_path() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
+pub fn devicespace_dir() -> Option<PathBuf> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    Some(PathBuf::from(appdata).join("O+Connect").join("devicespace"))
+}
+
+pub fn latest_main_log_path_in(dir: &Path) -> Option<PathBuf> {
+    let rd = std::fs::read_dir(dir).ok()?;
+    let mut best: Option<(String, PathBuf)> = None;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.ends_with("_main.log") {
+            continue;
+        }
+        let owned = name.to_owned();
+        if best.as_ref().is_none_or(|(b, _)| &owned > b) {
+            best = Some((owned, p));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+pub fn main_log_path() -> Option<PathBuf> {
+    latest_main_log_path_in(&devicespace_dir()?)
+}
+
+fn extract_pkg_from_android_key(raw_key: &str) -> Option<String> {
+    let parts: Vec<&str> = raw_key.split('|').map(str::trim).collect();
+    if let Some(p1) = parts.get(1) {
+        if !p1.is_empty() && !p1.starts_with("g:") && p1.contains('.') {
+            return Some((*p1).to_owned());
+        }
+    }
+    for p in parts {
+        if !p.is_empty() && !p.starts_with("g:") && p.contains('.') && !p.chars().all(|c| c.is_ascii_digit()) {
+            return Some(p.to_owned());
+        }
+    }
+    None
+}
+
+pub fn parse_dismiss_log_line(line: &str) -> Option<MirrorEventKind> {
+    if !line.contains("[notification_sync]") {
+        return None;
+    }
+    if line.contains("All notifications have been cleared") {
+        return Some(MirrorEventKind::ClearedAll);
+    }
+    const MARKER: &str = "receiveNotificationDelete key = ";
+    let idx = line.find(MARKER)?;
+    let raw_key = line[idx + MARKER.len()..].trim();
+    if raw_key.is_empty() {
+        return None;
+    }
+    let pkg_name = extract_pkg_from_android_key(raw_key)?;
+    if pkg_name.starts_with("android.") {
+        return None;
+    }
+    Some(MirrorEventKind::Dismissed {
+        key: raw_key.to_owned(),
+        pkg_name,
+    })
+}
+
 /// 增量读取，支持文件轮转/截断与半行缓冲（若末尾尚未写完 `\n`，下次再继续读）。
 pub struct Watcher {
     path: PathBuf,
@@ -375,6 +486,10 @@ impl Watcher {
     }
 
     pub fn drain(&mut self) -> Vec<String> {
+        self.drain_matching(|line| line.contains("ShowToast Data received:"))
+    }
+
+    pub fn drain_matching(&mut self, mut pred: impl FnMut(&str) -> bool) -> Vec<String> {
         let mut out = Vec::new();
         let Ok(mut f) = std::fs::File::open(&self.path) else {
             return out;
@@ -403,7 +518,7 @@ impl Watcher {
             let rest = self.carry[last_nl + 1..].to_owned();
             self.carry = rest;
             for line in complete.lines() {
-                if line.contains("ShowToast Data received:") {
+                if pred(line) {
                     out.push(line.to_string());
                 }
             }
@@ -530,5 +645,39 @@ mod tests {
         set_suppress_active(false);
         assert!(!is_suppress_active());
         assert!(default_icon_dir().ends_with("icon-cache"));
+    }
+
+    #[test]
+    fn parses_main_log_dismiss_and_clear_all_and_picks_latest_main_log() {
+        let single = "2026-11-24 09:50:12.111 [INFO] [notification_sync]  receiveNotificationDelete key = 0|com.tencent.mm|-1001613992|null|10682";
+        match parse_dismiss_log_line(single) {
+            Some(MirrorEventKind::Dismissed { key, pkg_name }) => {
+                assert_eq!(key, "0|com.tencent.mm|-1001613992|null|10682");
+                assert_eq!(pkg_name, "com.tencent.mm");
+            }
+            other => panic!("expected Dismissed, got {other:?}"),
+        }
+
+        let summary = "2026-11-24 09:51:00.000 [notification_sync]  receiveNotificationDelete key = 0|com.max.xiaoheihe|0|0|com.max.xiaoheihe|g:Aggregate_AlertingSection|10410|extra";
+        match parse_dismiss_log_line(summary) {
+            Some(MirrorEventKind::Dismissed { pkg_name, .. }) => assert_eq!(pkg_name, "com.max.xiaoheihe"),
+            other => panic!("expected summary Dismissed, got {other:?}"),
+        }
+
+        assert!(parse_dismiss_log_line("2026-11-24 [notification_sync]  receiveNotificationDelete key = 0|android.app|1|null|1000").is_none());
+        assert!(matches!(
+            parse_dismiss_log_line("2026-11-24 [notification_sync] All notifications have been cleared before exit."),
+            Some(MirrorEventKind::ClearedAll)
+        ));
+
+        let dir = std::env::temp_dir().join(format!("auralsle-oppo-main-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("2026-11-23_main.log"), "old").unwrap();
+        std::fs::write(dir.join("2026-11-24_main.log"), "new").unwrap();
+        std::fs::write(dir.join("other.log"), "ignored").unwrap();
+        let latest = latest_main_log_path_in(&dir).unwrap();
+        assert_eq!(latest.file_name().and_then(|s| s.to_str()), Some("2026-11-24_main.log"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

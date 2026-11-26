@@ -627,6 +627,13 @@ fn resolve_local_app_icon_image(app_id: &str, app_name: &str) -> Option<ColorIma
 
     let s = format!("{} {}", app_id, app_name).to_lowercase();
 
+    // Antigravity 优先读取本机软件自带的彩色原版图标（与岛上 AI 状态图标保持完全一致）
+    if s.contains("antigravity") || s.split(|c: char| !c.is_alphanumeric()).any(|w| w == "agy") {
+        if let Some(img) = load_antigravity_software_icon_image(64) {
+            return Some(img);
+        }
+    }
+
     // 1. 先查已记忆的 app_paths
     let cfg = crate::auralsle_ai_status::config::get();
     for (k, p) in &cfg.app_paths {
@@ -675,6 +682,10 @@ fn resolve_local_app_icon_image(app_id: &str, app_name: &str) -> Option<ColorIma
         exe_candidates.insert(1, "codebuddy.exe".into());
         lnk_keywords.push("workbuddy".into());
         lnk_keywords.push("codebuddy".into());
+    }
+    if s.contains("antigravity") {
+        exe_candidates.insert(0, "antigravity.exe".into());
+        lnk_keywords.push("antigravity".into());
     }
     if s.contains("cursor") {
         exe_candidates.insert(0, "cursor.exe".into());
@@ -1190,6 +1201,269 @@ pub fn extract_app_icon_texture(
     None
 }
 
+/// 将任意透明背景图标裁切到紧凑边界并按 8% 安全留白居中缩放为目标正方形尺寸。
+pub(crate) fn crop_and_resize_rgba(rgba: &image::RgbaImage, target_px: u32) -> Option<ColorImage> {
+    let (mut min_x, mut min_y) = (u32::MAX, u32::MAX);
+    let (mut max_x, mut max_y) = (0u32, 0u32);
+    for (x, y, px) in rgba.enumerate_pixels() {
+        if px[3] > 12 {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    if min_x > max_x || min_y > max_y {
+        return None;
+    }
+    let crop_w = max_x - min_x + 1;
+    let crop_h = max_y - min_y + 1;
+    let side = crop_w.max(crop_h);
+    let pad = ((side as f32) * 0.08).round() as u32;
+    let canvas = (side + pad * 2).max(1);
+    let mut square = image::RgbaImage::new(canvas, canvas);
+    let dx = pad + (side - crop_w) / 2;
+    let dy = pad + (side - crop_h) / 2;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let p = *rgba.get_pixel(x, y);
+            square.put_pixel(dx + (x - min_x), dy + (y - min_y), p);
+        }
+    }
+    let px = target_px.max(16);
+    let resized = image::imageops::resize(&square, px, px, image::imageops::FilterType::Lanczos3);
+    Some(ColorImage::from_rgba_unmultiplied(
+        [px as usize, px as usize],
+        resized.as_raw(),
+    ))
+}
+
+#[allow(dead_code)]
+pub(crate) fn crop_and_resize_icon_rgba(bytes: &[u8], target_px: u32) -> Option<ColorImage> {
+    let rgba = image::load_from_memory(bytes).ok()?.to_rgba8();
+    crop_and_resize_rgba(&rgba, target_px)
+}
+
+#[cfg(windows)]
+fn is_antigravity_root(dir: &Path) -> bool {
+    dir.is_dir()
+        && (dir.join("Antigravity.exe").is_file()
+            || dir.join("resources").join("app").join("icon.png").is_file()
+            || dir
+                .join("resources")
+                .join("app")
+                .join("resources")
+                .join("win32")
+                .join("code.ico")
+                .is_file())
+}
+
+#[cfg(windows)]
+fn antigravity_dir_from_path(path: &Path) -> Option<PathBuf> {
+    if is_antigravity_root(path) {
+        return Some(path.to_path_buf());
+    }
+    if let Some(parent) = path.parent() {
+        if is_antigravity_root(parent) {
+            return Some(parent.to_path_buf());
+        }
+        if let Some(grand) = parent.parent() {
+            if is_antigravity_root(grand) {
+                return Some(grand.to_path_buf());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn find_antigravity_install_dir() -> Option<PathBuf> {
+    use windows::{
+        core::PWSTR,
+        Win32::{
+            Foundation::CloseHandle,
+            System::{
+                Diagnostics::ToolHelp::{
+                    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+                    TH32CS_SNAPPROCESS,
+                },
+                Threading::{
+                    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+                    PROCESS_QUERY_LIMITED_INFORMATION,
+                },
+            },
+        },
+    };
+
+    // 1. 已记忆的 app_paths
+    let cfg = crate::auralsle_ai_status::config::get();
+    for (k, p) in &cfg.app_paths {
+        let kl = k.to_ascii_lowercase();
+        if kl.contains("antigravity") || kl == "agy" {
+            if let Some(dir) = antigravity_dir_from_path(Path::new(p)) {
+                return Some(dir);
+            }
+        }
+    }
+
+    // 2. 正在运行的 Antigravity.exe 进程路径
+    unsafe {
+        if let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            let mut ok = Process32FirstW(snap, &mut entry).is_ok();
+            while ok {
+                let len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let exe_name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                if exe_name.eq_ignore_ascii_case("antigravity.exe") && entry.th32ProcessID != 0 {
+                    if let Ok(proc) =
+                        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, entry.th32ProcessID)
+                    {
+                        let mut buf = [0u16; 2048];
+                        let mut sz = buf.len() as u32;
+                        let got = QueryFullProcessImageNameW(
+                            proc,
+                            PROCESS_NAME_WIN32,
+                            PWSTR(buf.as_mut_ptr()),
+                            &mut sz,
+                        )
+                        .is_ok();
+                        let _ = CloseHandle(proc);
+                        if got && sz > 0 {
+                            let full =
+                                PathBuf::from(String::from_utf16_lossy(&buf[..sz as usize]));
+                            if let Some(dir) = antigravity_dir_from_path(&full) {
+                                let _ = CloseHandle(snap);
+                                return Some(dir);
+                            }
+                        }
+                    }
+                }
+                ok = Process32NextW(snap, &mut entry).is_ok();
+            }
+            let _ = CloseHandle(snap);
+        }
+    }
+
+    // 3. 常见安装目录
+    for var in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"] {
+        if let Ok(base) = std::env::var(var) {
+            let base = PathBuf::from(base);
+            let candidates = if var == "LOCALAPPDATA" {
+                vec![base.join("Programs").join("Antigravity"), base.join("Antigravity")]
+            } else {
+                vec![base.join("Antigravity")]
+            };
+            for candidate in candidates {
+                if is_antigravity_root(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    // 4. PATH 中的 antigravity.exe / antigravity.cmd / agy.cmd
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for entry in std::env::split_paths(&path_var) {
+            if let Some(dir) = antigravity_dir_from_path(&entry) {
+                return Some(dir);
+            }
+            for bin in ["Antigravity.exe", "antigravity.cmd", "agy.cmd"] {
+                let candidate = entry.join(bin);
+                if candidate.is_file() {
+                    if let Some(dir) = antigravity_dir_from_path(&candidate) {
+                        return Some(dir);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(windows)]
+fn discover_antigravity_icon_rgba() -> Option<image::RgbaImage> {
+    let dir = find_antigravity_install_dir()?;
+    let candidates = [
+        dir.join("resources").join("app").join("icon.png"),
+        dir.join("resources")
+            .join("app")
+            .join("resources")
+            .join("win32")
+            .join("code.ico"),
+    ];
+    for asset in candidates {
+        if asset.is_file() {
+            if let Ok(bytes) = std::fs::read(&asset) {
+                if let Ok(dyn_img) = image::load_from_memory(&bytes) {
+                    return Some(dyn_img.to_rgba8());
+                }
+            }
+        }
+    }
+    let exe = dir.join("Antigravity.exe");
+    if exe.is_file() {
+        if let Some(img) = shell_icon(&exe) {
+            let [w, h] = img.size;
+            let raw: Vec<u8> = img
+                .pixels
+                .iter()
+                .flat_map(|c| c.to_srgba_unmultiplied())
+                .collect();
+            if !is_generic_windows_exe_icon(&raw, w, h) {
+                if let Some(rgba) = image::RgbaImage::from_raw(w as u32, h as u32, raw) {
+                    return Some(rgba);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 直接读取本机已安装的 Gemini Antigravity 软件官方图标，在测试或非 Windows 下返回 None。
+pub fn load_antigravity_software_icon_image(target_px: u32) -> Option<ColorImage> {
+    if cfg!(test) {
+        return None;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = target_px;
+        None
+    }
+    #[cfg(windows)]
+    {
+        use std::sync::{Mutex, OnceLock};
+        use std::time::{Duration, Instant};
+
+        static CACHE: OnceLock<Mutex<Option<(Instant, Option<image::RgbaImage>)>>> =
+            OnceLock::new();
+        let lock = CACHE.get_or_init(|| Mutex::new(None));
+        if let Ok(guard) = lock.lock() {
+            if let Some((checked_at, cached)) = guard.as_ref() {
+                if let Some(rgba) = cached {
+                    return crop_and_resize_rgba(rgba, target_px);
+                }
+                if checked_at.elapsed() < Duration::from_secs(30) {
+                    return None;
+                }
+            }
+        }
+
+        let discovered = discover_antigravity_icon_rgba();
+        if let Ok(mut guard) = lock.lock() {
+            *guard = Some((Instant::now(), discovered.clone()));
+        }
+        discovered.and_then(|rgba| crop_and_resize_rgba(&rgba, target_px))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1242,5 +1516,23 @@ mod tests {
         let ctx = egui::Context::default();
         assert!(extract_app_icon_texture(&ctx, "com.oplus.devicespace", "OPPO 互联").is_none());
         assert!(extract_app_icon_texture(&ctx, "nonexistent.app.id.xyz", "NoSuchApp").is_none());
+    }
+
+    #[test]
+    fn crop_and_resize_icon_rgba_centers_tight_bounds_with_padding() {
+        let mut rgba = image::RgbaImage::new(64, 64);
+        for y in 4..24 {
+            for x in 36..56 {
+                rgba.put_pixel(x, y, image::Rgba([66, 133, 244, 255]));
+            }
+        }
+        let mut png_bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(rgba)
+            .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .unwrap();
+        let out = crop_and_resize_icon_rgba(&png_bytes, 32).unwrap();
+        assert_eq!(out.size, [32, 32]);
+        assert!(out.pixels[16 * 32 + 16].a() > 0, "居中区域应保留实体像素");
+        assert_eq!(out.pixels[0].a(), 0, "边缘应保留透明留白");
     }
 }

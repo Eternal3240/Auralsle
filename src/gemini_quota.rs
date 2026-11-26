@@ -24,7 +24,7 @@ pub fn parse(value:&Value)->Result<Snapshot,String>{
         Some(Window{label:label.into(),seconds:Some(seconds),remaining:(100.0-used*100.0).clamp(0.0,100.0) as f32,reset:super::reset(&pool["gxu"]["windowRefreshesAt"]),amount:None})
     }).collect::<Vec<_>>();
     if windows.is_empty(){return Err("此 Google 账号暂未提供 Gemini 订阅额度".into());}
-    Ok(Snapshot{kiro:None,relay:None,credits:None,wallet:None,plan:if usage["subscriptionTier"]=="TIER1"{"AI Pro"}else{""}.into(),windows,extra:vec![],at:chrono::Utc::now().timestamp()})
+    Ok(Snapshot{kiro:None,relay:None,credits:None,wallet:None,antigravity:None,plan:if usage["subscriptionTier"]=="TIER1"{"AI Pro"}else{""}.into(),windows,extra:vec![],at:chrono::Utc::now().timestamp()})
 }
 fn decode(raw:&str)->Result<Snapshot,String>{
     let raw=raw.trim_start();let raw=raw.strip_prefix(")]}'").unwrap_or(raw).trim_start();
@@ -100,6 +100,32 @@ fn load(account:&Account)->Result<Session,String>{
     if slot(&email)!=expected{return Err("Gemini 账号不一致，请重新连接".into());}
     Ok(Session{email,cookie:cookie(value["cookie"].as_str().ok_or(LOGIN_ERROR)?)?})
 }
+pub(crate) fn email_slot(raw: &str) -> Result<(String, String), String> {
+    let e = email(raw)?;
+    Ok((e.clone(), slot(&e)))
+}
+
+pub(crate) fn login_chrome_session(address: &str, stopped: &Arc<AtomicBool>) -> Result<(String, String), String> {
+    #[cfg(windows)]
+    {
+        let s = browser::login(address, stopped)?;
+        Ok((s.email, s.cookie))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (address, stopped);
+        Err("Chrome 原生连接暂仅支持 Windows，可使用手动 Cookie / Token 连接".into())
+    }
+}
+
+pub(crate) fn query_web_session(agent: &ureq::Agent, email_raw: &str, cookie_raw: &str) -> Result<(String, Snapshot), (String, u64)> {
+    let e = email(email_raw).map_err(|m| (m, 0))?;
+    let c = cookie(cookie_raw).map_err(|m| (m, 0))?;
+    let session = Session { email: e.clone(), cookie: c };
+    let snap = request(agent, &request_url(&session.email), &session)?;
+    Ok((e, snap))
+}
+
 pub fn forget(account:&Account){if let Some(path)=account.slot.as_deref().and_then(|s|session_path(s).ok()){let _=fs::remove_file(path);}}
 pub fn address(account:&Account)->Option<String>{load(account).ok().map(|s|s.email)}
 pub fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{

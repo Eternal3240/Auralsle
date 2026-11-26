@@ -19,7 +19,7 @@ fn script_path(slot:&str)->Result<PathBuf,String>{
 }
 
 fn endpoint(provider:Provider,source:&str)->Result<String,String>{
-    if provider.relay(){return relay::validate_base_url(source);}
+    if provider.relay(){return relay::site_url(source,provider==Provider::RelayCustom);}
     match provider {
         Provider::OpenCodeGo=>Ok(String::new()),
         Provider::MiniMax|Provider::Glm=>match source {""|"cn"=>Ok("cn".into()),"global"=>Ok("global".into()),_=>Err("请选择中国区或国际区，密钥不会自动跨区重试".into())},
@@ -297,5 +297,18 @@ impl Config {
         let mut config=Config::default();let id=config.connect_api(&c,None).unwrap();
         let value=config.json();assert_eq!(value["accounts"][0]["slot"],"random-reference");assert_eq!(config.accounts[0].id,id);
         assert_eq!(Config::from_json(&value),config);
+    }
+    #[test]
+    fn only_custom_scripts_accept_local_http(){
+        for host in ["localhost","127.0.0.1","[::1]"] {
+            let base=format!("http://{host}:8317/gateway");
+            assert_eq!(endpoint(Provider::RelayCustom,&format!("{base}/")).unwrap(),base);
+            for p in [Provider::NewApi,Provider::OneApi,Provider::Sub2Api,Provider::RelayGeneral] {
+                assert!(endpoint(p,&base).is_err());
+            }
+        }
+        for bad in ["http://relay.example","http://192.168.1.1","http://localhost.example","http://127.0.0.2","ftp://localhost","http://user@localhost","http://localhost/?x=1","http://localhost/#x"] {
+            assert!(endpoint(Provider::RelayCustom,bad).is_err(),"{bad}");
+        }
     }
 }

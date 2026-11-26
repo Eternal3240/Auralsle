@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn shift_follows_the_free_axis_and_respects_the_switch() {
         let elapsed = STEP * MAX_SHIFT as u32; // 走到位移上限
-        for dock in [Dock::Top, Dock::Left, Dock::Right] {
+        for dock in [Dock::Top, Dock::Bottom, Dock::Left, Dock::Right] {
             let side = dock.is_side();
             let (x, y) = shift(true, dock, elapsed);
             assert_eq!((x, y), if side {(0, MAX_SHIFT)} else {(MAX_SHIFT, 0)}, "{dock:?}：只能沿不贴边的一轴移动");

@@ -13,6 +13,9 @@ use std::sync::Arc;
 pub const RED: Color32 = Color32::from_rgb(242, 48, 70);
 pub const RED_TOP: Color32 = Color32::from_rgb(253, 104, 92);
 pub const BLUE: Color32 = Color32::from_rgb(62, 172, 248);
+/// “已连接”蓝：蓝牙连接提醒和无电量设备的连接环共用，不在电量的绿黄橙红里。
+pub const LINK: Color32 = Color32::from_rgb(10, 132, 255);
+pub const LINK_SOFT: Color32 = Color32::from_rgb(90, 169, 255);
 pub const BLUE_DEEP: Color32 = Color32::from_rgb(13, 69, 128);
 pub const CYAN: Color32 = Color32::from_rgb(102, 219, 255);
 pub const SOFT_GREEN: Color32 = Color32::from_rgb(118, 196, 151);
@@ -30,6 +33,8 @@ pub const TRACK: Color32 = Color32::from_rgb(36, 36, 39);
 pub const ARROW_BG: Color32 = Color32::from_rgb(48, 48, 51);
 pub const WATER_TRACK: Color32 = Color32::from_rgb(15, 38, 64);
 pub const YELLOW: Color32 = Color32::from_rgb(255, 196, 61);
+/// 无线设备电量 10–19%：介于黄色“一般”和红色“即将耗尽”之间。
+pub const ORANGE: Color32 = Color32::from_rgb(255, 138, 61);
 
 pub fn alpha_blue(a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(BLUE.r(), BLUE.g(), BLUE.b(), (255.0 * a) as u8)
@@ -380,6 +385,25 @@ mod tests {
                 let font=super::font(14.0,weight);
                 for ch in "눈, 코, 입 향기로운 숨을 담은 너의 코 사랑해 眼鼻嘴 TAEYANG ㄱㄴㅏ".chars().filter(|c|!c.is_whitespace()){
                     assert!(ctx.fonts(|f|f.has_glyph(&font,ch)),"缺少字形：{ch}，字体：{font:?}");
+                }
+            }
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn uyghur_and_tibetan_lyrics_have_glyphs_in_all_weights(){
+        let ctx=eframe::egui::Context::default();
+        super::load_fonts(&ctx);
+        // 覆盖维语全部字母：每个字母在词首、词中、词尾、独立各出现一次。
+        let uyghur="سوي گۈ دىگەن شۇنداق بولامدۇ يايرىم سېنى سېغىندىم شۇنچە ئا ئە ب پ ت ج چ خ د ر ز ژ س ش غ ف ق ك گ ڭ ل م ن ھ و ۇ ۆ ۈ ۋ ې ى ي ئ لا بلا بەبە بۆبۆ بڭب بھب بېب بىب";
+        let shown=crate::rtl_text::display(uyghur).into_owned();
+        let tibetan="བཀྲ་ཤིས་བདེ་ལེགས། སྐྱིད་པོ། གྲོགས་པོ། ཁྱེད་རང་།";
+        let _=ctx.run(Default::default(),|ctx|{
+            for weight in [super::W::Regular,super::W::Semibold,super::W::Bold]{
+                let font=super::font(14.0,weight);
+                for ch in shown.chars().chain(tibetan.chars()).filter(|c|!c.is_whitespace()){
+                    assert!(ctx.fonts(|f|f.has_glyph(&font,ch)),"缺少字形：U+{:04X}，字体：{font:?}",ch as u32);
                 }
             }
         });

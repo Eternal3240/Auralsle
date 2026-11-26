@@ -116,6 +116,14 @@ pub struct Backdrop {
 }
 
 impl Backdrop {
+    pub fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.visible || self.placed.1
+    }
+
     pub fn new() -> windows::core::Result<Self> {
         let hwnd = create_backdrop_window()?;
         // Win10 不支持这个 Win32 宿主背景属性。失败时不能继续绘制纯色画刷，

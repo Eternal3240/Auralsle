@@ -549,6 +549,69 @@ pub fn basic_auth(user: &str, password: &str) -> String {
     format!("Basic {}",base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}")))
 }
 
+fn is_dav_multistatus(xml: &str) -> bool {
+    let mut s = xml.trim_start_matches('\u{feff}').trim();
+    loop {
+        if let Some(after_pi) = s.strip_prefix("<?") {
+            let Some(end) = after_pi.find("?>") else {
+                return false;
+            };
+            s = after_pi[end + 2..].trim_start();
+        } else if let Some(after_comment) = s.strip_prefix("<!--") {
+            let Some(end) = after_comment.find("-->") else {
+                return false;
+            };
+            s = after_comment[end + 3..].trim_start();
+        } else {
+            break;
+        }
+    }
+    let Some(after_lt) = s.strip_prefix('<') else {
+        return false;
+    };
+    let name_len = after_lt
+        .find(|c: char| c.is_ascii_whitespace() || matches!(c, '>' | '/'))
+        .unwrap_or(after_lt.len());
+    let root_name = &after_lt[..name_len];
+    let expected_xmlns = match root_name.split_once(':') {
+        Some((prefix, "multistatus")) if !prefix.is_empty() => format!("xmlns:{prefix}"),
+        None if root_name == "multistatus" => "xmlns".to_string(),
+        _ => return false,
+    };
+    let mut quote: Option<char> = None;
+    let mut tag_end = None;
+    for (idx, ch) in after_lt[name_len..].char_indices() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == '>' => {
+                tag_end = Some(name_len + idx);
+                break;
+            }
+            None => {}
+        }
+    }
+    let Some(tag_end) = tag_end else {
+        return false;
+    };
+    let tag_inner = &after_lt[name_len..tag_end];
+    let has_dav_ns = regex::Regex::new(&format!(
+        r#"(?:^|\s){}\s*=\s*(?:"DAV:"|'DAV:')"#,
+        regex::escape(&expected_xmlns)
+    ))
+    .ok()
+    .is_some_and(|re| re.is_match(tag_inner));
+    if !has_dav_ns {
+        return false;
+    }
+    if tag_inner.trim_end().ends_with('/') {
+        return true;
+    }
+    let closing = format!("</{root_name}>");
+    s.trim_end().ends_with(&closing)
+}
+
 fn dav(
     agent: &ureq::Agent,
     method: &str,
@@ -558,7 +621,11 @@ fn dav(
     cfg: &Config,
     password: &str,
 ) -> Result<String, Failure> {
-    dav_response(agent,method,url,depth,body,cfg,password).map(|(xml,_)|xml)
+    let (xml, _) = dav_response(agent, method, url, depth, body, cfg, password)?;
+    if !is_dav_multistatus(&xml) {
+        return Err(Failure::text("服务器未返回有效的 CalDAV 响应，请核对日历同步地址和登录方式"));
+    }
+    Ok(xml)
 }
 
 /// 返回最终地址，让发现流程按重定向后的地址解析相对路径。
@@ -663,6 +730,12 @@ pub struct Fetched {
     pub report:ReadReport,
 }
 
+impl Fetched {
+    fn has_parse_errors_without_events(&self) -> bool {
+        self.events.is_empty() && self.report.invalid > 0
+    }
+}
+
 fn record_fetch(provider:Provider,scope:&str,result:&Result<Fetched,Failure>){
     if cfg!(test){return;}
     let empty=ReadReport::default();
@@ -692,7 +765,15 @@ pub fn fetch_month(cfg: &Config, password: &str, month: NaiveDate) -> Result<Fet
     let first = month_start(month);
     let end = first.checked_add_months(chrono::Months::new(1)).unwrap();
     let utc = |date: NaiveDate| date.and_hms_opt(0, 0, 0).unwrap().and_local_timezone(chrono::Local).earliest().unwrap().with_timezone(&chrono::Utc);
-    let result=fetch_range(cfg, password, utc(first), utc(end));record_fetch(cfg.provider,"month",&result);result
+    let result = fetch_range(cfg, password, utc(first), utc(end)).and_then(|fetched| {
+        if fetched.has_parse_errors_without_events() {
+            Err(Failure::text(fetched.report.warning()).with_report(fetched.report))
+        } else {
+            Ok(fetched)
+        }
+    });
+    record_fetch(cfg.provider, "month", &result);
+    result
 }
 
 fn fetch_range(cfg: &Config, password: &str, lo: chrono::DateTime<chrono::Utc>, hi: chrono::DateTime<chrono::Utc>) -> Result<Fetched, Failure> {
@@ -712,7 +793,6 @@ fn fetch_range(cfg: &Config, password: &str, lo: chrono::DateTime<chrono::Utc>, 
         }
     }
     if !ok {return Err(first_error.unwrap_or_else(||Failure::text("没有找到日历")).with_report(report));}
-    if events.is_empty() && report.invalid>0{return Err(Failure::text(report.warning()).with_report(report));}
     events.sort_by_key(|m|m.start);
     let mut seen=std::collections::HashSet::new();events.retain(|m|seen.insert(dedupe_key(m)));
     Ok(Fetched{href,events,report})
@@ -1142,12 +1222,12 @@ pub enum Cmd {
 }
 
 pub enum Event {
-    /// 试连结果；`count` 是未来 24 小时的事件数，`config` 带回发现到的日历地址。
+    /// `message` 是读取警告或失败原因，`count` 是未来 24 小时的可用日程数。
     Test { ok: bool, message: String, count: usize, config: Option<Config> },
     /// 一次成功同步。
     Synced { config: Config, events: Vec<crate::mail::Meeting>, at: String },
     MonthLoaded { config: Config, month: NaiveDate, result: Result<Vec<crate::mail::Meeting>, String> },
-    /// 数据可用但不完整；成功结果之后单独更新状态，不反复弹窗。
+    /// 更新同步提示。近期日程读取成功时发送，即使没有可用数据更新缓存。
     Warning {config:Config,month:Option<NaiveDate>,message:String},
     /// 一次失败（界面只在连续失败时显示红字）。
     Failed { config: Config, message: String },
@@ -1224,8 +1304,7 @@ fn run_with(cmd_rx: Receiver<Cmd>, ev: Sender<Event>, interval: Duration, mut sy
                             Ok(f) => {
                                 let mut saved = c.clone();
                                 saved.href = Some(f.href);
-                                let warning=f.report.warning();
-                                (true,if warning.is_empty(){"连接成功".into()}else{format!("部分日程未同步：{warning}")}, f.events.len(), Some(saved))
+                                (true, f.report.warning(), f.events.len(), Some(saved))
                             }
                             Err(e) => (false, e.message, 0, None),
                         };
@@ -1262,7 +1341,9 @@ fn sync_once(
     match fetch(cfg, &password) {
         Ok(f) => {
             let warning=f.report.warning();
-            let _ = ev.send(Event::Synced { config:cfg.clone(),events: f.events, at: now_label() });
+            if !f.has_parse_errors_without_events() {
+                let _ = ev.send(Event::Synced { config:cfg.clone(),events: f.events, at: now_label() });
+            }
             let _ = ev.send(Event::Warning{config:cfg.clone(),month:None,message:warning});
         }
         Err(e) => {
@@ -1298,7 +1379,7 @@ mod tests {
         let (mut socket,_)=listener.accept().unwrap();
         socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         assert!(read_discovery_request(&mut socket).starts_with("PROPFIND "));
-        let xml="<d:multistatus><d:response><d:href>/calendar/</d:href><d:propstat><d:prop><d:resourcetype><c:calendar/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>";
+        let xml="<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:response><d:href>/calendar/</d:href><d:propstat><d:prop><d:resourcetype><c:calendar/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>";
         write!(socket,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",xml.len()).unwrap();
     }
 
@@ -1314,10 +1395,10 @@ mod tests {
                 socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                 let request=read_discovery_request(&mut socket);
                 let body=if request.starts_with("PROPFIND ") {
-                    "<d:multistatus><d:response><d:href>/empty/</d:href><d:propstat><d:prop><d:resourcetype><c:calendar/></d:resourcetype></d:prop></d:propstat></d:response><d:response><d:href>/work/</d:href><d:propstat><d:prop><d:resourcetype><c:calendar/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"
+                    "<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:response><d:href>/empty/</d:href><d:propstat><d:prop><d:resourcetype><c:calendar/></d:resourcetype></d:prop></d:propstat></d:response><d:response><d:href>/work/</d:href><d:propstat><d:prop><d:resourcetype><c:calendar/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"
                 }else if request.starts_with("REPORT /work/ ") {
-                    "<d:multistatus><d:response><d:href>/work/a.ics</d:href><c:calendar-data>BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:work-event\nDTSTART:20261104T020000Z\nSUMMARY:工作日程\nEND:VEVENT\nEND:VCALENDAR</c:calendar-data></d:response></d:multistatus>"
-                }else{"<d:multistatus/>"};
+                    "<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:response><d:href>/work/a.ics</d:href><c:calendar-data>BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:work-event\nDTSTART:20261104T020000Z\nSUMMARY:工作日程\nEND:VEVENT\nEND:VCALENDAR</c:calendar-data></d:response></d:multistatus>"
+                }else{r#"<d:multistatus xmlns:d="DAV:"/>"#};
                 write!(socket,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
             }
         });
@@ -1415,7 +1496,7 @@ mod tests {
                             let request=read_discovery_request(&mut stream);
                             let path=request.split_whitespace().nth(1).unwrap().to_owned();
                             paths.push(path.clone());
-                            let principal=r#"<d:multistatus><d:response><d:href>/</d:href><d:propstat><d:prop><d:current-user-principal><d:href>/account/</d:href></d:current-user-principal></d:prop></d:propstat></d:response></d:multistatus>"#;
+                            let principal=r#"<d:multistatus xmlns:d="DAV:"><d:response><d:href>/</d:href><d:propstat><d:prop><d:current-user-principal><d:href>/account/</d:href></d:current-user-principal></d:prop></d:propstat></d:response></d:multistatus>"#;
                             let (status,extra,body)=match path.as_str() {
                                 "/" if well_known=>(405,"",""),
                                 "/"|"/.well-known/caldav" if redirect=>(302,"Location: /account/\r\n",""),
@@ -1547,7 +1628,8 @@ mod tests {
                 while !request.contains("\r\n\r\n"){let mut buf=[0;1024];let n=stream.read(&mut buf).unwrap();assert!(n>0);request.push_str(&String::from_utf8_lossy(&buf[..n]));}
                 assert!(request.starts_with(if i==1{"REPORT /next "}else{"REPORT / "}));
                 assert!(request.to_ascii_lowercase().contains("authorization: basic "));
-                write!(stream,"HTTP/1.1 {status}\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                let body = if i == 1 { r#"<multistatus xmlns="DAV:"/>"# } else { "" };
+                write!(stream,"HTTP/1.1 {status}\r\nLocation: {location}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
             }
         });
         let cfg=Config{provider:Provider::Feishu,username:"synthetic".into(),href:None,server:Some(base.clone())};
@@ -1684,7 +1766,7 @@ mod tests {
                     if index==1 {assert!(request.contains("<d:href>/calendar/item.ics</d:href>"));}
                     let data=if index==1 && succeeds {"BEGIN:VCALENDAR&#xD;&#xA;BEGIN:VEVENT&#xD;&#xA;UID:test&#xD;&#xA;SUMMARY:测试&#xD;&#xA;DTSTART:20261103T032000Z&#xD;&#xA;RRULE:FREQ=DAILY;COUNT=2&#xD;&#xA;END:VEVENT&#xD;&#xA;END:VCALENDAR"} else {""};
                     let status=if data.is_empty(){404}else{200};
-                    let xml=format!("<d:multistatus><d:response><d:href>/calendar/item.ics</d:href><d:propstat><d:prop><c:calendar-data>{data}</c:calendar-data></d:prop><d:status>HTTP/1.1 {status} Result</d:status></d:propstat></d:response></d:multistatus>");
+                    let xml=format!(r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response><d:href>/calendar/item.ics</d:href><d:propstat><d:prop><c:calendar-data>{data}</c:calendar-data></d:prop><d:status>HTTP/1.1 {status} Result</d:status></d:propstat></d:response></d:multistatus>"#);
                     write!(socket,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",xml.len(),xml).unwrap();
                 }
             });
@@ -1698,12 +1780,12 @@ mod tests {
     #[test]
     fn caldav_collection_listing_reads_slash_objects_and_recurring_events() {
         use std::{io::Write,net::TcpListener};
-        for succeeds in [true,false] {
+        for (succeeds, login_at) in [(true, None), (false, None), (false, Some(1)), (false, Some(2))] {
             let listener=TcpListener::bind("127.0.0.1:0").unwrap();
             let base=format!("http://{}/",listener.local_addr().unwrap());
             let server=std::thread::spawn(move||{
             serve_calendar_discovery(&listener);
-                for index in 0..3 {
+                for index in 0..=login_at.unwrap_or(2) {
                     let (mut socket,_)=listener.accept().unwrap();
                     socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
                     let mut buf=Vec::new();let mut chunk=[0u8;4096];
@@ -1719,17 +1801,28 @@ mod tests {
                     assert!(request.contains(if index==0 {"calendar-query"} else if index==1 {"PROPFIND"} else {"calendar-multiget"}));
                     if index != 1 { assert!(request.contains("<c:expand")); }
                     if index==2 {assert!(request.contains("<d:href>/calendar/item/</d:href>"));}
+                    if login_at == Some(index) {
+                        let html = "<html><body><form>登录</form></body></html>";
+                        write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",html.len()).unwrap();
+                        break;
+                    }
                     let data=if index==2 && succeeds {"BEGIN:VCALENDAR&#xD;&#xA;BEGIN:VEVENT&#xD;&#xA;UID:test&#xD;&#xA;SUMMARY:测试&#xD;&#xA;DTSTART:20261103T032000Z&#xD;&#xA;RRULE:FREQ=DAILY;COUNT=2&#xD;&#xA;END:VEVENT&#xD;&#xA;END:VCALENDAR"} else {""};
                     let status=if data.is_empty(){404}else{200};
-                    let object=format!("<d:multistatus><d:response><d:href>/calendar/item/</d:href><d:propstat><d:prop><c:calendar-data>{data}</c:calendar-data></d:prop><d:status>HTTP/1.1 {status} Result</d:status></d:propstat></d:response></d:multistatus>");
                     let collection="<d:response><d:href>/calendar/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/><c:calendar/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>";
-                    let xml=if index==0 {format!("<d:multistatus>{collection}</d:multistatus>")} else if index==1 {format!("<d:multistatus>{collection}<d:response><d:href>/calendar/item/</d:href></d:response></d:multistatus>")} else {object};
+                    let body = match index {
+                        0 => collection.to_owned(),
+                        1 => format!("{collection}<d:response><d:href>/calendar/item/</d:href></d:response>"),
+                        _ => format!("<d:response><d:href>/calendar/item/</d:href><d:propstat><d:prop><c:calendar-data>{data}</c:calendar-data></d:prop><d:status>HTTP/1.1 {status} Result</d:status></d:propstat></d:response>"),
+                    };
+                    let xml = format!(r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">{body}</d:multistatus>"#);
                     write!(socket,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",xml.len(),xml).unwrap();
                 }
             });
             let cfg=Config{provider:Provider::DingTalk,username:"demo".into(),href:Some(format!("{base}calendar/")),server:Some(base)};
             let result=fetch_month(&cfg,"test",NaiveDate::from_ymd_opt(2026,11,3).unwrap());
-            if succeeds {assert_eq!(result.unwrap().events.len(),2);} else {assert!(result.is_err());}
+            if succeeds {assert_eq!(result.unwrap().events.len(),2);}
+            else if login_at.is_some() {assert!(result.err().unwrap().message.contains("服务器未返回有效的 CalDAV"));}
+            else {assert!(result.is_err());}
             server.join().unwrap();
         }
     }

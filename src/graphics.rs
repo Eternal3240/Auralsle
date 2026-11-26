@@ -49,7 +49,12 @@ impl Default for GpuHardwareInfo {
 
 static GPU_INFO_CACHE: OnceLock<Mutex<Option<GpuHardwareInfo>>> = OnceLock::new();
 static RUNNING_GPU_BACKEND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+static ACTIVE_WGPU_MSAA: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 static RUNNING_BACKEND_LABEL: OnceLock<Mutex<String>> = OnceLock::new();
+
+pub fn wgpu_msaa_samples() -> u32 {
+    ACTIVE_WGPU_MSAA.load(std::sync::atomic::Ordering::Relaxed).max(1)
+}
 
 pub fn running_gpu_backend_mode() -> u8 {
     RUNNING_GPU_BACKEND.load(std::sync::atomic::Ordering::Relaxed)
@@ -156,6 +161,7 @@ pub fn configure_native(options: &mut eframe::NativeOptions) {
         || crate::renderer::compat_active();
     // Direct3D 12 与 wgpu 管线启用 4x MSAA 硬件抗锯齿，提升圆角、文字与矢量曲线边缘锐度
     options.multisampling = if dx12_requested || use_vulkan_wgpu { 4 } else { 0 };
+    ACTIVE_WGPU_MSAA.store(options.multisampling.max(1) as u32, std::sync::atomic::Ordering::Relaxed);
     let backends = if cfg_mode == 1 {
         // 用户指定 Vulkan：优先启用原生 Vulkan 硬件后端，辅以 DX12 兼容
         eframe::wgpu::Backends::VULKAN | eframe::wgpu::Backends::DX12

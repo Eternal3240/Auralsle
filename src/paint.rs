@@ -70,13 +70,24 @@ impl<'a> Card<'a> {
         c.painter.set_clip_rect(r);
         c
     }
+    pub(crate) fn edge_control(&self, x: f32, y: f32, w: f32, h: f32) -> Option<Self> {
+        let clip = self.painter.clip_rect();
+        let rect = self.rect(x, y, w, h);
+        let margin = (rect.left() - clip.left()).min(clip.right() - rect.right());
+        if margin <= 0.0 || rect.top() < clip.top() || rect.bottom() > clip.bottom() {
+            return None;
+        }
+        let alpha = crate::anim::smoothstep(0.0, 6.0 * self.s, margin);
+        let control = self.faded(alpha);
+        Some(if alpha < 0.8 { control.ghost() } else { control })
+    }
 
     // ---------- 文字（y 一律是基线，跨字体对齐稳定） ----------
     pub fn font(&self, size: f32, w: W) -> FontId {
         font(size * self.s, w)
     }
     pub fn galley(&self, t: &str, size: f32, w: W, color: Color32) -> std::sync::Arc<egui::Galley> {
-        self.painter.layout_no_wrap(t.to_owned(), self.font(size, w), color)
+        self.painter.layout_no_wrap(crate::rtl_text::display(t).into_owned(), self.font(size, w), color)
     }
     pub fn text_w(&self, t: &str, size: f32, w: W) -> f32 {
         self.galley(t, size, w, Color32::WHITE).size().x / self.s
@@ -175,6 +186,16 @@ impl<'a> Card<'a> {
     }
     pub fn ring(&self, x: f32, y: f32, r: f32, width: f32, color: Color32) {
         self.painter.circle_stroke(self.pos(x, y), r * self.s, Stroke::new(width * self.s, color));
+    }
+    /// 以半径为中线的圆环描边，和 arc 同一套几何。
+    pub fn ring_centered(&self, x: f32, y: f32, r: f32, width: f32, color: Color32) {
+        let n = 96;
+        let v: Vec<Pos2> = (0..n).map(|i| {let a = TAU * i as f32 / n as f32; self.pos(x + r * a.cos(), y + r * a.sin())}).collect();
+        self.painter.add(egui::Shape::closed_line(v, Stroke::new(width * self.s, color)));
+    }
+    /// 整圈描边，线宽以半径为中线向内外各占一半，和 `arc` 的弧线完全重合。
+    pub fn track(&self, cx: f32, cy: f32, r: f32, width: f32, color: Color32) {
+        self.ring_centered(cx, cy, r, width, color);
     }
     pub fn seg(&self, a: (f32, f32), b: (f32, f32), width: f32, color: Color32) {
         self.painter.line_segment([self.pos(a.0, a.1), self.pos(b.0, b.1)], Stroke::new(width * self.s, color));
@@ -292,6 +313,18 @@ impl<'a> Card<'a> {
         let h = ctx.animate_bool_with_time(r.id.with("h"), self.live && r.hovered(), 0.14);
         let p = ctx.animate_bool_with_time(r.id.with("p"), self.live && r.is_pointer_button_down_on(), 0.07);
         (h, p)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn material_circle_with_role(&self, response: &Response, x: f32, y: f32, radius: f32, role: crate::material::ControlRole) {
+        self.material_control(response, self.rect(x - radius, y - radius, 2.0 * radius, 2.0 * radius), radius, role);
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn material_control(&self, response: &Response, rect: Rect, radius: f32, role: crate::material::ControlRole) {
+        if self.live {
+            crate::material::control(response.id, rect.intersect(self.painter.clip_rect()), radius * self.s, role);
+        }
     }
 }
 
@@ -929,6 +962,22 @@ pub fn clock(c:&Card,x:f32,y:f32,text:&str,size:f32) {
         (digits,x+c.text_w(period,size*0.72,W::Semibold)+4.0)
     }else{(text,x)};
     c.text(x,y,digits,size,W::Bold,theme::WHITE,H::Left);
+}
+
+/// 顶栏图钉由倾斜轮廓转为竖直实心，剪贴板行内图标保持独立。
+pub fn hold_pin(c:&Card,cx:f32,cy:f32,active:f32,color:Color32) {
+    let (sin,cos)=((1.0-active)*0.55).sin_cos();
+    let point=|x:f32,y:f32|(cx+x*cos-y*sin,cy+x*sin+y*cos);
+    let head=[point(-2.7,-5.8),point(2.7,-5.8),point(2.0,-4.5),point(2.0,-0.8),
+        point(3.9,1.5),point(-3.9,1.5),point(-2.0,-0.8),point(-2.0,-4.5)];
+    if active>0.0 {
+        let ink=c.faded(active);
+        ink.poly(&[head[0],head[1],head[2],head[7]],color);
+        ink.poly(&[head[7],head[2],head[3],head[6]],color);
+        ink.poly(&[head[6],head[3],head[4],head[5]],color);
+    }
+    for i in 0..head.len(){c.seg(head[i],head[(i+1)%head.len()],1.2,color);}
+    c.seg(point(0.0,1.5),point(0.0,6.0),1.2,color);
 }
 
 /// 图钉：固定的剪贴板条目。

@@ -98,7 +98,7 @@ fn mixed_caldav_response_preserves_readable_events_and_reports_resource_errors()
     let listener=TcpListener::bind("127.0.0.1:0").unwrap();let base=format!("http://{}/",listener.local_addr().unwrap());
     let worker=std::thread::spawn(move||{
         let (mut socket,_)=listener.accept().unwrap();let _=read_request(&mut socket);
-        let xml="<d:multistatus><d:response><d:href>/good.ics</d:href><c:calendar-data>BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:good\nDTSTART:20261112T020000Z\nEND:VEVENT\nBEGIN:VEVENT\nUID:bad\nDTSTART;TZID=Unsupported/Zone:20261112T100000\nEND:VEVENT\nEND:VCALENDAR</c:calendar-data></d:response><d:response><d:href>/private.ics</d:href><d:status>HTTP/1.1 403 Forbidden</d:status></d:response></d:multistatus>";
+        let xml="<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:response><d:href>/good.ics</d:href><c:calendar-data>BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:good\nDTSTART:20261112T020000Z\nEND:VEVENT\nBEGIN:VEVENT\nUID:bad\nDTSTART;TZID=Unsupported/Zone:20261112T100000\nEND:VEVENT\nEND:VCALENDAR</c:calendar-data></d:response><d:response><d:href>/private.ics</d:href><d:status>HTTP/1.1 403 Forbidden</d:status></d:response></d:multistatus>";
         write!(socket,"HTTP/1.1 207 Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",xml.len()).unwrap();
     });
     let config=Config{provider:Provider::DingTalk,username:"mock".into(),href:None,server:Some(base.clone())};
@@ -138,7 +138,7 @@ fn inaccessible_home_does_not_block_other_homes_or_hide_the_warning(){
                 "/home/"=>(207,"<response><href>/work/</href><resourcetype><calendar/></resourcetype></response>"),
                 _=>(207,"<response><href>/work/one.ics</href><calendar-data>BEGIN:VEVENT\nUID:work\nDTSTART:20261112T020000Z\nEND:VEVENT</calendar-data></response>"),
             };
-            let body=format!("<multistatus>{body}</multistatus>");write!(socket,"HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            let body=format!("<multistatus xmlns=\"DAV:\">{body}</multistatus>");write!(socket,"HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         }
     });
     let cfg=Config{provider:Provider::Custom,username:"mock".into(),href:None,server:Some(base)};

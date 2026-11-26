@@ -1,6 +1,6 @@
 [package]
 name = "auralsle"
-version = "3.9.0"
+version = "4.0.0"
 edition = "2021"
 license = "MIT"
 description = "灵屿 AuraIsle：Windows 屏幕边缘的桌面伙伴与智能信息岛"
@@ -68,10 +68,17 @@ windows = { version = "0.58", features = [
   "Win32_Graphics_Dwm",
   "Win32_System_LibraryLoader",
   "Win32_System_Memory",
+  "Wdk_Graphics_Direct3D", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11",
+  "Wdk_System_SystemInformation", "Win32_System_ProcessStatus",
+  "Win32_Networking_WinSock",
   "Win32_System_Com",
   "Win32_System_DataExchange",
   "Win32_Security",
   "Win32_Security_Cryptography",
+  "Win32_Security_Cryptography_Catalog",
+  "Win32_Security_Cryptography_Sip",
+  "Win32_Security_WinTrust",
   "Win32_System_Power",
   "Win32_System_Registry",
   "Win32_System_SystemInformation",
@@ -79,6 +86,8 @@ windows = { version = "0.58", features = [
   "Win32_NetworkManagement_Ndis",  # [ai-status-mod] MIB_IF_TABLE2 依赖 Ndis
   "Win32_System_Performance",  # [ai-status-mod] 系统监控：PDH 读 GPU 使用率
   "Win32_System_Threading",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
   "Win32_System_RemoteDesktop",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Diagnostics_Debug",
@@ -97,7 +106,10 @@ windows = { version = "0.58", features = [
   "Win32_Media_Audio_Endpoints",
   "Win32_Media_Audio",
   "Win32_System_WinRT",
+  "Win32_System_WinRT_Direct3D11",
+  "Win32_System_WinRT_Graphics_Capture",
   "Win32_System_WinRT_Composition", "UI_Composition", "UI_Composition_Desktop", "System", "Foundation_Numerics",
+  "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11",
   "UI_Notifications_Management",
   "UI_Notifications", "ApplicationModel",
   "Win32_System_Ole", "Win32_UI_Shell_Common", "Networking_Connectivity",
@@ -105,7 +117,7 @@ windows = { version = "0.58", features = [
   "Win32_Devices_Display",  # 显示器亮度：DDC/CI（Twinkle Tray 式逐屏调亮度）
   "Win32_Devices_Properties",
   "Win32_Devices_Bluetooth",
-  "Devices_Bluetooth", "Devices_Enumeration",
+  "Devices_Bluetooth", "Devices_Enumeration", "Devices_Bluetooth_GenericAttributeProfile",
   "Devices_Radios",
   "Win32_Security_Credentials",
 ] }

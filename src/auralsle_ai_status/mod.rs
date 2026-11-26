@@ -166,7 +166,7 @@ pub(crate) fn text_width(t: &str) -> f32 {
 /// 紧凑状态的宽度：只有「图标 + 状态文字」。
 /// 「回到 AI」由任务结束提示卡片提供，不再占用岛体宽度。
 pub(crate) fn compact_width(label: &str) -> f32 {
-    ICON + ICON_TEXT_GAP + text_width(label)
+    COMPACT_ICON + ICON_TEXT_GAP + text_width(label)
 }
 
 /// 多个紧凑状态并排占用的总宽度。
@@ -279,6 +279,7 @@ pub(crate) fn extend_layout(layout: &mut crate::bar_layout::Layout) {
         *value -= extra / 2.0;
     }
     layout.width += extra;
+    layout.right_tail += extra;
 }
 
 /// 紧凑状态的左端 x（药丸局部坐标，右端对齐 `RIGHT_PAD`）。

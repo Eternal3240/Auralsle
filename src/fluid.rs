@@ -270,30 +270,10 @@ impl Fluid {
             let dx = (screen_x - gx) / GLOW_RX;
             let dy = (screen_y - gy) / GLOW_RY;
             let e = (-(dx * dx + dy * dy) * 1.5).exp();
-            over(&mut c, &mut a, [1.0, 1.0, 1.0], 0.15 * e * self.glow_a);
+            over(&mut c, &mut a, [1.0, 1.0, 1.0], 0.12 * e * self.glow_a);
         }
 
         unmultiply(c, a)
-    }
-
-    pub fn compose_for_card(
-        &self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        expand: f32,
-        local_cursor: Option<(f32, f32)>,
-    ) -> Color32 {
-        self.compose_inner(
-            x,
-            y,
-            w,
-            h,
-            expand,
-            local_cursor.map(|(cx, cy)| (cx, cy, 1.0)),
-            false,
-        )
     }
 
     fn compose_inner(
@@ -670,5 +650,37 @@ mod tests {
                 assert!(c.a() as f32 >= floor, "alpha 不能被压到低于底色：{}", c.a());
             }
         }
+    }
+
+    #[test]
+    fn edge_cursor_glow_couples_to_adjacent_card_without_cloning_across_host() {
+        let mut f = Fluid::new();
+        f.advance(1.0, 0.016);
+        let host_left = 100.0_f32;
+        let host_top = 0.0_f32;
+        let host_w = 400.0_f32;
+        let host_h = 36.0_f32;
+        let adj_left = 508.0_f32;
+        let far_left = 20.0_f32;
+
+        // Baseline without cursor
+        let base_adj = f.compose_card_in_host(adj_left + 4.0, 18.0, adj_left, 4.0, 72.0, 28.0, host_left, host_top, 0.0);
+
+        // Cursor near the right edge of host (within 6px of host_left + host_w = 500.0)
+        f.set_cursor(Some((host_w - 6.0, 18.0)));
+        for _ in 0..30 {
+            f.advance(f.t + 0.016, 0.016);
+        }
+        let lum = |c: Color32| c.r() as i32 + c.g() as i32 + c.b() as i32;
+        let coupled_near = f.compose_card_in_host(adj_left + 4.0, 18.0, adj_left, 4.0, 72.0, 28.0, host_left, host_top, 0.0);
+        let far_card = f.compose_card_in_host(far_left + 4.0, 18.0, far_left, 4.0, 72.0, 28.0, host_left, host_top, 0.0);
+        assert!(
+            lum(coupled_near) > lum(base_adj),
+            "主岛右缘光晕应平滑耦合到相邻右侧副卡：near={coupled_near:?} vs base={base_adj:?}"
+        );
+        assert!(
+            lum(coupled_near) > lum(far_card),
+            "远端另一侧副卡不应同步主岛另一侧光标亮斑：near={coupled_near:?} vs far={far_card:?}"
+        );
     }
 }

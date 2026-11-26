@@ -199,7 +199,7 @@ impl App{
 }
 #[cfg(test)]mod tests{
     use super::*;
-    fn account()->Account{Account{email:"test@example.com".into(),provider:crate::mail::Provider::Qq,custom:None,enabled:true}}
+    fn account()->Account{Account{email:"test@example.com".into(),provider:crate::mail::Provider::Qq,custom:None,enabled:true,use_windows_proxy:false}}
     #[test]fn failed_server_operation_keeps_the_message_and_reports_error(){
         let ctx=eframe::egui::Context::default();let mut app=App::new(&ctx,Default::default());let a=account();app.mail.accounts=vec![a.clone()];
         app.mail_manage_request(None,Folder::Inbox,Action::Load);

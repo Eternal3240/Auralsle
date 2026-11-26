@@ -34,6 +34,7 @@ struct Shell {
     placement_scale: f32,
     /// 上次定位时的目标屏幕与水平位置；变化后立即重新定位，不等下一次轮询。
     placement_key: (String, i32, auralsle::model::Dock, bool, (i32, i32)),
+    placed_bounds: Option<auralsle::display_layout::Bounds>,
     oled_shift: (i32, i32),
     win_x: f32,
     sys: (Option<u8>, bool, PollClock),
@@ -57,7 +58,7 @@ struct Shell {
     opening_messenger:Option<(app::Unread,Instant)>,
     /// 后台线程正在唤起消息客户端。
     #[cfg(windows)]
-    tray_opening:Option<(app::Unread,std::sync::mpsc::Receiver<Result<(),OpenError>>)>,
+    tray_opening:Option<(app::Unread,std::sync::mpsc::Receiver<Result<messenger::Target,OpenError>>)>,
     #[cfg(windows)]
     hidden: bool,
     /// 毛玻璃皮肤的背景亮度采样（仅毛玻璃皮肤运行）。
@@ -74,6 +75,9 @@ struct Shell {
     bt_rx: Option<auralsle::bt::Service>,
     bt: Vec<auralsle::bt::Device>,
     bt_ready: bool,
+    #[cfg(windows)]
+    receiver_rx: Option<auralsle::bt::Service>,
+    receivers: Vec<auralsle::bt::Device>,
     volume_quiet: PollClock,
     /// v0.5.5：邮件收信服务（工作线程），以及上次同步给它的账号/开关快照。
     /// 邮箱模块开启时才存在；关闭后收信与整理线程随之退出。
@@ -92,6 +96,14 @@ struct Shell {
     oppo_notify: Option<(auralsle::oppo_notify::MirrorHandle, std::sync::mpsc::Receiver<auralsle::oppo_notify::MirrorEvent>)>,
     #[cfg(windows)]
     oppo_notify_sig: Option<(bool, bool)>,
+    #[cfg(windows)]
+    material: Option<auralsle::material::Runtime>,
+    #[cfg(windows)]
+    material_failed: bool,
+    #[cfg(windows)]
+    wgpu_rs: Option<eframe::egui_wgpu::RenderState>,
+    #[cfg(windows)]
+    gl_ctx: Option<std::sync::Arc<eframe::glow::Context>>,
 }
 
 const MODULE_OFF:&str="该功能已在「页面管理」中关闭";
@@ -122,12 +134,10 @@ impl Shell {
 
     #[cfg(windows)]
     fn confirm_messenger_open(&mut self,unread:app::Unread)->bool{
+        if app::Messenger::OFFICE.contains(&unread.source)
+            && unsafe{windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as isize}!=unread.window{return false;}
         let foreground=self.messengers.foreground(&[unread.source]);
-        if !self.app.confirm_messenger_open(unread,foreground){
-            let seen=foreground.map(|(source,pid)|format!("{} 账号 {pid}",source.name())).unwrap_or_else(messenger::windows::describe_foreground);
-            messenger::windows::trace(format!("唤起 {} 账号 {}：未到前台（前台是 {seen}）",unread.source.name(),unread.pid));
-            return false;
-        }
+        if !self.app.confirm_messenger_open(unread,foreground){return false;}
         messenger::windows::trace(format!("唤起 {} 账号 {}：已在前台",unread.source.name(),unread.pid));
         self.messengers.viewed_client(unread.source,unread.pid);
         true
@@ -144,6 +154,39 @@ impl Shell {
             ctx.request_repaint();
         }
         self.unread_at=PollClock::now();
+    }
+
+    #[cfg(windows)]
+    fn sync_capture_exclusion(app: &mut App, window: Option<&mut auralsle::native::Window>, material_forced: bool) -> bool {
+        let was_enabled = app.settings.exclude_from_capture;
+        let requested = app.capture_exclusion_request.take();
+        let desired = requested.unwrap_or(was_enabled);
+        let error = match window {
+            Some(window) => window.take_capture_exclusion_error().or_else(|| {
+                requested.and_then(|enabled| {
+                    if enabled || !material_forced {
+                        window.set_capture_exclusion(enabled);
+                        window.take_capture_exclusion_error()
+                    } else {
+                        None
+                    }
+                })
+            }),
+            None => desired.then(|| "当前窗口无法应用截图和录屏隐藏。".into()),
+        };
+        let applied = desired && error.is_none();
+        if was_enabled != applied {
+            app.settings.exclude_from_capture = applied;
+            app.settings.save();
+        }
+        let failed = error.is_some();
+        if failed {
+            if was_enabled && !app.settings_open {
+                app.say("截图和录屏隐藏未生效");
+            }
+            app.capture_exclusion_error = error;
+        }
+        requested.is_some() || failed
     }
 
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -199,6 +242,15 @@ impl Shell {
         #[cfg(windows)] let system_rx=auralsle::system::observe(cc.egui_ctx.clone(),system_state.clone(),initial_input);
         // 岛体大小只作用于主窗口，在首帧之前生效，避免启动时先按 100% 闪一下。
         #[cfg(windows)] eframe::set_root_viewport_scale(app.settings.island_scale());
+        #[cfg(windows)]
+        let native = {
+            let mut window = auralsle::native::Window::new(cc);
+            if app.settings.exclude_from_capture {
+                app.capture_exclusion_request = Some(true);
+            }
+            Self::sync_capture_exclusion(&mut app, window.as_mut(), false);
+            window
+        };
         Self {
             app,
             t0: Instant::now(),
@@ -219,6 +271,7 @@ impl Shell {
             placement_at: PollClock::default(),
             placement_scale: 0.0,
             placement_key: (String::new(), 0, auralsle::model::Dock::Top, true, (0, 0)),
+            placed_bounds: None,
             oled_shift: (0, 0),
             win_x: 0.0,
             sys: (None, false, PollClock::default()),
@@ -237,7 +290,7 @@ impl Shell {
             #[cfg(windows)] hidden:false,
             #[cfg(windows)] backdrop:None,
             #[cfg(windows)]
-            native: auralsle::native::Window::new(cc),
+            native,
             #[cfg(windows)]
             tray,
             #[cfg(windows)]
@@ -246,6 +299,17 @@ impl Shell {
             bt_rx: None,
             bt: Vec::new(),
             bt_ready: false,
+            #[cfg(windows)]
+            receiver_rx: None,
+            receivers: Vec::new(),
+            #[cfg(windows)]
+            material: None,
+            #[cfg(windows)]
+            material_failed: false,
+            #[cfg(windows)]
+            wgpu_rs: cc.wgpu_render_state.clone(),
+            #[cfg(windows)]
+            gl_ctx: cc.gl.clone(),
             volume_quiet: PollClock::default(),
             mail: None,
             mail_sig: None,
@@ -314,12 +378,11 @@ impl Shell {
         let origin = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min).unwrap_or(Pos2::new(self.win_x, 0.0));
         #[cfg(windows)]
         let origin=self.native.as_ref().and_then(|w|w.logical_origin(ppp)).unwrap_or(origin);
-        let cursor = cursor_logical(ppp).map(|(x, y)| Pos2::new(x - origin.x, y - origin.y));
+        let desktop_cursor = desktop_cursor();
+        let cursor = desktop_cursor.map(|(x, y)| Pos2::new(x as f32 / ppp - origin.x, y as f32 / ppp - origin.y));
         // 所在屏幕换算到窗口逻辑坐标，供通知详情等浮层避开屏幕边缘。
         #[cfg(windows)]
-        let screen=auralsle::display_layout::selected(&self.app.displays,&self.app.settings.display_id).map(|d|{
-            // 与岛体摆放用同一范围：避开顶栏后，拖动换边和浮层都以顶栏下沿为顶边。
-            let b=auralsle::display_layout::placement_bounds(d,self.app.settings.avoids_top_bar());
+        let screen=self.placed_bounds.map(|b|{
             egui::Rect::from_min_max(Pos2::new(b.left as f32/ppp-origin.x,b.top as f32/ppp-origin.y),Pos2::new(b.right as f32/ppp-origin.x,b.bottom as f32/ppp-origin.y))
         });
         #[cfg(not(windows))]
@@ -337,6 +400,26 @@ impl Shell {
             charging: self.sys.1,
             network: Some(self.system_state.network),
             cursor,
+            desktop_cursor,
+            primary_down: {
+                #[cfg(windows)] {
+                    self.app.dragging_position().then(|| unsafe {
+                        use windows::Win32::UI::{Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON}, WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON}};
+                        let key = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
+                        GetAsyncKeyState(key.0 as i32) < 0
+                    })
+                }
+                #[cfg(not(windows))] { None }
+            },
+            cancel_position_drag: {
+                #[cfg(windows)] {
+                    self.app.dragging_position() && unsafe {
+                        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
+                        GetAsyncKeyState(VK_ESCAPE.0 as i32) < 0
+                    }
+                }
+                #[cfg(not(windows))] { false }
+            },
             idle_seconds: {
                 #[cfg(windows)] {Some(auralsle::system::idle_seconds())}
                 #[cfg(not(windows))] {None}
@@ -357,6 +440,7 @@ impl Shell {
             volume: self.system_state.volume,
             bt: self.bt.clone(),
             bt_ready: self.bt_ready,
+            receivers: self.receivers.clone(),
             screen,
             backdrop,
             glass_blur,
@@ -364,6 +448,18 @@ impl Shell {
                 #[cfg(windows)] {self.native.as_ref().is_some_and(|w|w.opaque_surface())}
                 #[cfg(not(windows))] {false}
             },
+            #[cfg(windows)]
+            material_active: self.material.is_some()
+                && self.app.settings.skin == auralsle::model::Skin::LiquidGlass
+                && self.placed
+                && !self.hidden
+                && !auralsle::system::screen_locked(),
+            #[cfg(windows)]
+            material_appearance: self
+                .material
+                .as_ref()
+                .map(auralsle::material::Runtime::appearance)
+                .unwrap_or_default(),
         }
     }
 }
@@ -431,6 +527,10 @@ impl eframe::App for Shell {
             self.app.foreground_changed();
         }
         #[cfg(windows)]
+        if self.native.as_ref().is_some_and(|w|w.take_display_change()) {
+            self.placement_at=PollClock::default();
+        }
+        #[cfg(windows)]
         let offset=self.app.placement_offset();
         // 拖动时位置不取整，按万分之一比例比较，窗口逐帧平滑跟随。
         #[cfg(windows)]
@@ -449,7 +549,9 @@ impl eframe::App for Shell {
             self.placement_scale=ctx.pixels_per_point();
             self.placement_key=placement_key;
             let display=auralsle::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
-            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,auralsle::display_layout::placement_bounds(d,self.app.settings.avoids_top_bar()),offset,self.app.settings.dock,shift))) {
+            let bounds=display.map(|d|d.dock_bounds(self.app.settings.dock,self.app.settings.avoids_top_bar()));
+            self.placed_bounds=bounds;
+            if bounds.is_some_and(|b|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,b,offset,self.app.settings.dock,shift))) {
                 if !self.placed {diagnostics::startup("目标屏幕物理坐标定位完成，已请求显示");}
                 self.placed=true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -489,9 +591,18 @@ impl eframe::App for Shell {
                 self.system_ready=true;
                 self.fullscreen=observation.fullscreen;
             }
-            self.hidden=auralsle::display_layout::hide_for_fullscreen(self.app.settings.hide_fullscreen,self.fullscreen,auralsle::display_layout::selected(&self.app.displays,&self.app.settings.display_id).map(|d|d.bounds));
+            let island_bounds = auralsle::display_layout::selected(&self.app.displays, &self.app.settings.display_id).map(|d| d.bounds);
+            let fs_on_island = auralsle::display_layout::hide_for_fullscreen(true, self.fullscreen, island_bounds);
+            let temp_avoid_cfg = auralsle::auralsle_ai_status::config::get();
+            self.app.sync_fullscreen_avoid(fs_on_island, temp_avoid_cfg.temp_avoid_fullscreen);
+            let keep_visible_temp_avoid = fs_on_island && (self.app.is_temp_avoiding() || self.app.fullscreen_avoid_dismissed);
+            self.hidden = !keep_visible_temp_avoid
+                && auralsle::display_layout::hide_for_fullscreen(self.app.settings.hide_fullscreen, self.fullscreen, island_bounds);
             // 毛玻璃：在岛体左右两侧和画布底边（都在窗口区域之外）取样，估计岛背后的明暗。
-            if self.app.settings.skin.supports_blur() && !self.hidden {
+            if self.app.settings.skin.supports_blur()
+                && !self.hidden
+                && !self.material.as_ref().is_some_and(|m| m.appearance().ready)
+            {
                 let sampler=self.backdrop.get_or_insert_with(auralsle::backdrop::Sampler::start);
                 let ppp=ctx.pixels_per_point();
                 if let Some(origin)=self.native.as_ref().and_then(|w|w.logical_origin(ppp)) {
@@ -505,14 +616,24 @@ impl eframe::App for Shell {
             let mcfg_bt = auralsle::auralsle_ai_status::config::get();
             if mcfg_bt.mod_bt_devices_enabled
                 && (self.app.settings.bluetooth_notifications
+                    || self.app.settings.show_bluetooth
                     || mcfg_bt.show_bt_battery_on_island
                     || mcfg_bt.device_page_visible)
             {
                 if self.bt_rx.is_none() { self.bt_rx = Some(auralsle::bt::spawn()); }
+                if self.receiver_rx.is_none() {
+                    let wake_ctx = ctx.clone();
+                    self.receiver_rx = Some(auralsle::bt::spawn_receivers(
+                        self.app.wireless_compat_store(),
+                        move || wake_ctx.request_repaint(),
+                    ));
+                }
             } else {
                 self.bt_rx = None;
                 self.bt.clear();
                 self.bt_ready = false;
+                self.receiver_rx = None;
+                self.receivers.clear();
             }
             if let Some(service) = &self.bt_rx {
                 while let Ok(found) = service.rx.try_recv() {
@@ -523,12 +644,16 @@ impl eframe::App for Shell {
                     self.bt_ready = true;
                 }
             }
+            if let Some(service) = &self.receiver_rx {
+                while let Ok(found) = service.rx.try_recv() {
+                    self.receivers = found;
+                }
+            }
             let previous_pending=self.app.pending_messengers.clone();
             for event in self.messengers.poll_taskbar(ctx,&self.app.settings){match event{
                 TaskbarEvent::Status(client,status)=>self.app.set_messenger_status(client,status),
-                TaskbarEvent::Message(unread)=>{
-                    if self.messengers.track_unread(unread)==Err(OpenError::Exited){continue;}
-                    self.app.receive_messenger_reminder(unread);
+                TaskbarEvent::Message(unread,target)=>{
+                    if let Some(unread)=self.messengers.register_taskbar(unread,target){self.app.receive_messenger_reminder(unread);}
                 }
             }}
             let mirror_cfg = auralsle::auralsle_ai_status::config::get();
@@ -556,14 +681,24 @@ impl eframe::App for Shell {
             }
             if let Some((_, ref rx)) = self.oppo_notify {
                 while let Ok(ev) = rx.try_recv() {
-                    if let auralsle::oppo_notify::MirrorEventKind::Notification {
-                        notification,
-                        is_update,
-                        icon_png,
-                    } = ev.kind
-                    {
-                        self.app
-                            .receive_oppo_mirrored_notification(notification, is_update, icon_png);
+                    match ev.kind {
+                        auralsle::oppo_notify::MirrorEventKind::Notification {
+                            notification,
+                            is_update,
+                            icon_png,
+                        } => {
+                            self.app
+                                .receive_oppo_mirrored_notification(notification, is_update, icon_png);
+                        }
+                        auralsle::oppo_notify::MirrorEventKind::Dismissed { key, pkg_name } => {
+                            self.app.dismiss_oppo_mirrored_notification(&key, &pkg_name);
+                        }
+                        auralsle::oppo_notify::MirrorEventKind::ClearedAll => {
+                            self.app.clear_all_oppo_mirrored_notifications();
+                        }
+                        auralsle::oppo_notify::MirrorEventKind::OppoSuppressed { .. }
+                        | auralsle::oppo_notify::MirrorEventKind::Started { .. }
+                        | auralsle::oppo_notify::MirrorEventKind::Waiting { .. } => {}
                     }
                 }
             }
@@ -584,20 +719,24 @@ impl eframe::App for Shell {
                     }
                 }}
             }
-            if self.app.pending_messengers!=previous_pending || self.unread_at.ready(Duration::from_secs(1)){
+            let unread_changed=self.app.pending_messengers!=previous_pending;
+            let unread_poll_due=self.unread_at.ready(Duration::from_secs(1));
+            if unread_changed || unread_poll_due{
                 self.clear_exited_messengers(ctx);
             }
             if !self.app.pending_messengers.is_empty(){ctx.request_repaint_after(Duration::from_secs(1));}
-            if foreground_changed || self.app.pending_messengers!=previous_pending {
-                // 在微信 / QQ 里打开了某个账号的窗口：清掉这个账号的未读。
-                let mut sources:Vec<app::Messenger>=self.app.pending_messengers.iter().map(|u|u.source).collect();sources.dedup();
+            let sources=messenger_foreground_sources(&self.app.pending_messengers,
+                foreground_changed || self.app.pending_messengers!=previous_pending,unread_poll_due);
+            if !sources.is_empty(){
                 match self.messengers.foreground(&sources){
                     Some((source,pid))=>{
-                        if self.app.pending_messengers.iter().any(|u|u.source==source){messenger::windows::trace(format!("岛上清除 {} 账号 {pid}（前台切换={foreground_changed}）",source.name()));}
-                        self.messengers.viewed_client(source,pid);
-                        self.app.viewed_client(source,pid);
+                        if self.app.pending_messengers.iter().any(|u|u.viewed_by(source,pid)){
+                            messenger::windows::trace(format!("岛上清除 {} 账号 {pid}（前台切换={foreground_changed}）",source.name()));
+                            self.messengers.viewed_client(source,pid);
+                            self.app.viewed_client(source,pid);
+                        }
                     }
-                    None=>if foreground_changed && !sources.is_empty(){messenger::windows::trace(format!("前台切换但不是消息客户端主窗口：{}；岛上未读 {:?}",messenger::windows::describe_foreground(),self.app.pending_messengers.iter().map(|u|(u.source.name(),u.pid)).collect::<Vec<_>>()));},
+                    None=>if foreground_changed{messenger::windows::trace(format!("前台切换但不是消息客户端主窗口：{}；岛上未读 {:?}",messenger::windows::describe_foreground(),self.app.pending_messengers.iter().map(|u|(u.source.name(),u.pid)).collect::<Vec<_>>()));},
                 }
             }
             if self.tray_opening.as_ref().is_some_and(|(unread,_)|!self.app.pending_messengers.contains(unread)){
@@ -606,11 +745,17 @@ impl eframe::App for Shell {
             if let Some((unread,rx))=&self.tray_opening {
                 let unread=*unread;
                 match rx.try_recv(){
-                    Ok(Ok(()))=>{
+                    Ok(Ok(opened))=>{
                         self.tray_opening=None;
-                        if !self.confirm_messenger_open(unread){
-                            self.opening_messenger=Some((unread,Instant::now()));
-                            ctx.request_repaint_after(Duration::from_secs(4));
+                        if opened.unread!=unread && self.messengers.replace_opened(unread,opened).is_err(){
+                            self.app.reveal_messenger_notice(unread);
+                            self.app.messenger_unavailable(OpenError::Unavailable.message(unread.source));
+                        }else{
+                            if opened.unread!=unread{self.app.receive_messenger_reminder(opened.unread);}
+                            if !self.confirm_messenger_open(opened.unread){
+                                self.opening_messenger=Some((opened.unread,Instant::now()));
+                                ctx.request_repaint_after(Duration::from_secs(4));
+                            }
                         }
                     }
                     Ok(Err(error))=>{
@@ -636,6 +781,7 @@ impl eframe::App for Shell {
                 else if started.elapsed()>=Duration::from_secs(4){
                     self.opening_messenger=None;
                     if !self.confirm_messenger_open(unread){
+                        messenger::windows::trace(format!("唤起 {} 账号 {}：等待原窗口到前台超时（前台是 {}）",unread.source.name(),unread.pid,messenger::windows::describe_foreground()));
                         self.app.messenger_unavailable(format!("{}尚未切到前台，可点图标重试",unread.source.name()));
                     }
                 }
@@ -646,6 +792,60 @@ impl eframe::App for Shell {
                 let message=*message;
                 self.seek_rx=None;
                 if !success{self.app.say(message);}
+            }
+        }
+        #[cfg(windows)]
+        {
+            let lg_selected = self.app.settings.skin == auralsle::model::Skin::LiquidGlass;
+            if lg_selected {
+                let mcfg_lg = auralsle::auralsle_ai_status::config::get();
+                let opts = auralsle::material::Options {
+                    controls: true,
+                    stiffness: 1.0,
+                    damping: 0.5,
+                    params: mcfg_lg.liquid_glass_params(),
+                    shadow: Some(1.0),
+                    glass_foreground: true,
+                };
+                if self.material.is_none() && !self.material_failed {
+                    match auralsle::material::Runtime::new_liquid_glass(
+                        self.wgpu_rs.as_ref(),
+                        self.gl_ctx.as_ref(),
+                        opts.clone(),
+                        auralsle::graphics::wgpu_msaa_samples(),
+                    ) {
+                        Ok(rt) => self.material = Some(rt),
+                        Err(e) => {
+                            auralsle::material::Runtime::report_failure(&e);
+                            self.material_failed = true;
+                            if let Some(native) = &mut self.native {
+                                native.restore_capture_exclusion(self.app.settings.exclude_from_capture);
+                                native.set_material_blur_suppressed(false);
+                            }
+                        }
+                    }
+                }
+                if let Some(mat) = &mut self.material {
+                    mat.set_options(opts);
+                    let active = self.placed && !self.hidden && !auralsle::system::screen_locked();
+                    if !active {
+                        mat.suspend();
+                    }
+                    if let Some(native) = &mut self.native {
+                        native.set_material_blur_suppressed(true);
+                    }
+                }
+            } else if self.material.is_some() || self.material_failed {
+                if let Some(mut mat) = self.material.take() {
+                    if let Some(gl) = &self.gl_ctx {
+                        mat.destroy_gl(gl);
+                    }
+                }
+                self.material_failed = false;
+                if let Some(native) = &mut self.native {
+                    native.restore_capture_exclusion(self.app.settings.exclude_from_capture);
+                    native.set_material_blur_suppressed(false);
+                }
             }
         }
         let env = self.env(ctx);
@@ -690,6 +890,7 @@ impl eframe::App for Shell {
             while let Some(ev)=self.quota.try_recv(self.app.quota_config()){self.app.quota_event(ev);}
         }
         auralsle::frame_watch::mark_stage("main:central_panel");
+        auralsle::resources::FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut out = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::TRANSPARENT))
@@ -697,9 +898,20 @@ impl eframe::App for Shell {
                 // 左右停靠时画布是竖向的 SIDE_W × SIDE_H。
                 let size=if self.app.settings.dock.is_side() {egui::vec2(auralsle::side_dock::SIDE_W,auralsle::side_dock::SIDE_H)} else {egui::vec2(app::WIN_W,app::WIN_H)};
                 let win = egui::Rect::from_min_size(ui.max_rect().min+egui::vec2(app::LEFT_PAD,0.0),size);  // [ai-status-mod] 左侧留白给课程卡片
-                out = Some(self.app.frame(ui, win, &env));
+                out = Some({
+                    #[cfg(windows)]
+                    if let Some(mat) = &mut self.material {
+                        mat.draw(|| self.app.frame(ui, win, &env))
+                    } else {
+                        self.app.frame(ui, win, &env)
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        self.app.frame(ui, win, &env)
+                    }
+                });
             });
-        let Some(out) = out else { return };
+        let Some(mut out) = out else { return };
 
         #[cfg(windows)]
         {
@@ -714,7 +926,9 @@ impl eframe::App for Shell {
             if shift!=self.oled_shift {
                 self.oled_shift=shift;
                 let display=auralsle::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
-                if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(ctx.pixels_per_point(),auralsle::display_layout::placement_bounds(d,self.app.settings.avoids_top_bar()),self.app.placement_offset(),self.app.settings.dock,shift))) {
+                let bounds=display.map(|d|d.dock_bounds(self.app.settings.dock,self.app.settings.avoids_top_bar()));
+                if bounds.is_some_and(|b|self.native.as_ref().is_some_and(|w|w.place_on_display(ctx.pixels_per_point(),b,self.app.placement_offset(),self.app.settings.dock,shift))) {
+                    self.placed_bounds=bounds;
                     self.placement_key.4=shift;
                 }
                 ctx.request_repaint();
@@ -734,7 +948,7 @@ impl eframe::App for Shell {
                 let changed=shot.as_ref().is_some_and(|image|native.present_frame(image.size,image.as_raw()));
                 if shot.is_none() || changed || other_input {
                     let now=Instant::now();
-                    match auralsle::layered::readback_delay(self.readback_at,now,other_input) {
+                    match auralsle::layered::readback_delay(self.readback_at,now,other_input,out.repaint_after) {
                         None=>{self.readback_at=Some(now);ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));}
                         Some(wait)=>ctx.request_repaint_after(wait),
                     }
@@ -744,10 +958,46 @@ impl eframe::App for Shell {
             // 保留主窗口的事件循环，避免全屏隐藏后设置窗口无法关闭或重新打开。
             let region=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.region)};
             let hit=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.hit)};
-            native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},if self.hidden{None}else{out.glass.as_deref()},ctx.pixels_per_point(), out.editing, !self.hidden && out.expanded);
-            if !self.hidden && self.app.settings.avoids_top_bar() && self.app.settings.top_bar_on_top && !self.app.settings.dock.is_side() {
-                if let Some(display)=auralsle::display_layout::selected(&self.app.displays,&self.app.settings.display_id) {
-                    native.keep_above_top_bar(display.bounds);
+            let glass = if self.hidden || self.material.is_some() { None } else { out.glass.as_deref() };
+            native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)}, glass, ctx.pixels_per_point(), out.editing, !self.hidden && out.expanded);
+            if !self.hidden && self.app.settings.dock == auralsle::model::Dock::Top {
+                let on_top = self.app.settings.avoids_top_bar() && self.app.settings.top_bar_on_top;
+                if let Some(display) = auralsle::display_layout::selected(&self.app.displays, &self.app.settings.display_id)
+                    .filter(|_| on_top || out.top_bar_notice.is_some())
+                {
+                    let notice = out.top_bar_notice.filter(|_| !on_top).map(|rect| (rect, ctx.pixels_per_point()));
+                    native.keep_above_top_bar(display.bounds, notice);
+                }
+            }
+            // 原生定位、裁剪及毛玻璃底板状态更新完毕后，再确认截图排除和桌面背景采样。
+            if let Some(mat) = &mut self.material {
+                let mut drop_material = None;
+                match mat.finish(
+                    ctx,
+                    native,
+                    &mut out,
+                    self.t0.elapsed().as_secs_f64(),
+                    env.desktop_cursor,
+                ) {
+                    Ok(Some(delay)) => {
+                        out.repaint_after = out.repaint_after.min(delay);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        drop_material = Some(e);
+                    }
+                }
+                if let Some(err) = drop_material {
+                    auralsle::material::Runtime::report_failure(&err);
+                    if let Some(mut rt) = self.material.take() {
+                        if let Some(gl) = &self.gl_ctx {
+                            rt.destroy_gl(gl);
+                        }
+                    }
+                    self.material_failed = true;
+                    native.restore_capture_exclusion(self.app.settings.exclude_from_capture);
+                    native.set_material_blur_suppressed(false);
+                    ctx.request_repaint();
                 }
             }
         }
@@ -869,8 +1119,11 @@ impl eframe::App for Shell {
                     self.volume_quiet=PollClock::now();
                 },
                 Cmd::Copy(text)=>{ctx.copy_text(text);self.app.say("已复制");},
-                Cmd::Notify(title,body)=>{
-                    #[cfg(windows)] if let Some(tray)=&self.tray{tray.notify(&title,&body,self.app.settings.sound);}
+                Cmd::Notify(title,body,sound)=>{
+                    #[cfg(windows)] {
+                        if sound==auralsle::app::NotificationSound::Health {auralsle::tray::play_health_sound();}
+                        if let Some(tray)=&self.tray{tray.notify(&title,&body,sound==auralsle::app::NotificationSound::System);}
+                    }
                 },
                 cmd @ (Cmd::RequestNotifications|Cmd::RequestQqNotifications)=>{
                     #[cfg(windows)] {self.app.settings.qq_only=matches!(cmd,Cmd::RequestQqNotifications);self.app.settings.read_notifications=true;self.app.settings.save();self.incoming=None;match auralsle::system::connect_with_settings(ctx.clone(),&self.app.settings){Ok(rx)=>{self.incoming=Some(rx);self.app.listener_status="正在请求 Windows 通知权限…".into();},Err(e)=>self.app.listener_status=format!("Windows 未允许读取通知：{}。需要相应的系统权限或应用身份。",e.code())}}
@@ -908,6 +1161,10 @@ impl eframe::App for Shell {
         self.app.settings_ui(ctx, autostart);
         auralsle::frame_watch::mark_stage("main:mail_reader_ui");
         self.app.mail_reader_ui(ctx);
+        #[cfg(windows)]
+        if Self::sync_capture_exclusion(&mut self.app, self.native.as_mut(), self.material.is_some()) {
+            ctx.request_repaint();
+        }
         auralsle::frame_watch::end_frame();
         #[cfg(windows)] let repaint_after=if self.hidden{Duration::from_secs(1)}else{out.repaint_after};
         #[cfg(not(windows))] let repaint_after=out.repaint_after;
@@ -955,7 +1212,11 @@ impl eframe::App for Shell {
         }
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        #[cfg(windows)]
+        if let (Some(mat), Some(gl)) = (&mut self.material, gl) {
+            mat.destroy_gl(gl);
+        }
         auralsle::oppo_notify::restore_on_normal_exit();
     }
 }
@@ -975,6 +1236,37 @@ fn quota_sig_matches(known:&(bool,Vec<auralsle::quota::Account>),enabled:bool,co
         let auralsle::quota::Account{id,provider,alias:_,source,slot,enabled,pinned:_}=current;
         known.id==*id && known.provider==*provider && known.source==*source && known.slot==*slot && known.enabled==*enabled
     })
+}
+
+#[cfg(windows)]
+fn messenger_foreground_sources(pending:&[app::Unread],changed:bool,poll_due:bool)->Vec<app::Messenger>{
+    let mut sources=Vec::new();
+    if changed || poll_due{
+        for unread in pending{
+            // 办公窗口的前台事件可能早于最小化状态的恢复，同一窗口恢复后无需再次换前台。
+            if !changed && (unread.pid==0 || !app::Messenger::OFFICE.contains(&unread.source)){continue;}
+            if !sources.contains(&unread.source){sources.push(unread.source);}
+        }
+    }
+    sources
+}
+
+#[cfg(all(test,windows))]
+mod messenger_foreground_tests {
+    use super::*;
+    use app::{Messenger,Unread};
+
+    #[test]
+    fn a_restored_office_window_gets_rechecked_without_another_foreground_event(){
+        let pending=[
+            Unread{source:Messenger::Feishu,pid:21,window:42},
+            Unread::of(Messenger::DingTalk),
+            Unread{source:Messenger::Wechat,pid:22,window:43},
+        ];
+        assert_eq!(messenger_foreground_sources(&pending,true,false),[Messenger::Feishu,Messenger::DingTalk,Messenger::Wechat]);
+        assert!(messenger_foreground_sources(&pending,false,false).is_empty());
+        assert_eq!(messenger_foreground_sources(&pending,false,true),[Messenger::Feishu]);
+    }
 }
 
 #[cfg(test)]
@@ -1088,16 +1380,16 @@ fn read_power() -> (Option<u8>, bool) {
 }
 
 #[cfg(windows)]
-fn cursor_logical(ppp: f32) -> Option<(f32, f32)> {
+fn desktop_cursor() -> Option<(i32, i32)> {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut p = POINT::default();
     unsafe { GetCursorPos(&mut p) }.ok()?;
-    Some((p.x as f32 / ppp, p.y as f32 / ppp))
+    Some((p.x, p.y))
 }
 
 #[cfg(not(windows))]
-fn cursor_logical(_ppp: f32) -> Option<(f32, f32)> {
+fn desktop_cursor() -> Option<(i32, i32)> {
     None
 }
 

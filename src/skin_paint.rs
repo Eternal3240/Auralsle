@@ -25,18 +25,22 @@ pub struct Palette {
     pub darken: f32,
     /// 深色块（卡片、按钮底）映射时的亮度系数：越小越接近纸色，毛玻璃浅色用它做白色磨砂按钮。
     pub chip: f32,
+    /// 液态玻璃亮底适配时保留外圈高光与图标亮色铬框。
+    pub glass_chrome: bool,
 }
 
 /// 奶油（参考 Oyen）：暖白底、深棕字、橙色强调。
-pub const CREAM: Palette = Palette { paper: [255, 243, 228], ink: [46, 32, 22], accent: Some([240, 138, 36]), dark_alpha: 1.0, lift: 1.0, darken: 0.78, chip: 1.0 };
+pub const CREAM: Palette = Palette { paper: [255, 243, 228], ink: [46, 32, 22], accent: Some([240, 138, 36]), dark_alpha: 1.0, lift: 1.0, darken: 0.78, chip: 1.0, glass_chrome: false };
 /// 毛玻璃·浅：白色磨砂、近黑字、系统蓝。
-pub const GLASS_LIGHT: Palette = Palette { paper: [255, 255, 255], ink: [22, 22, 26], accent: Some([10, 112, 230]), dark_alpha: 0.8, lift: 1.0, darken: 0.78, chip: 0.6 };
+pub const GLASS_LIGHT: Palette = Palette { paper: [255, 255, 255], ink: [22, 22, 26], accent: Some([10, 112, 230]), dark_alpha: 0.8, lift: 1.0, darken: 0.78, chip: 0.6, glass_chrome: false };
+/// 液态玻璃·亮背景适配：保留玻璃铬框，同时确保深墨文字高对比可读。
+pub const GLASS_LIGHT_READABLE: Palette = Palette { paper: [255, 255, 255], ink: [22, 22, 26], accent: Some([10, 112, 230]), dark_alpha: 0.8, lift: 0.45, darken: 0.78, chip: 0.6, glass_chrome: true };
 /// 毛玻璃·深：保持黑底白字，只把灰色文字提亮、卡片底调透，适配更通透的深色玻璃。
-pub const GLASS_DARK: Palette = Palette { paper: [0, 0, 0], ink: [255, 255, 255], accent: None, dark_alpha: 0.5, lift: 0.6, darken: 1.0, chip: 1.0 };
+pub const GLASS_DARK: Palette = Palette { paper: [0, 0, 0], ink: [255, 255, 255], accent: None, dark_alpha: 0.5, lift: 0.6, darken: 1.0, chip: 1.0, glass_chrome: false };
 /// 液态玻璃（对标 Wei-Zhang09/LiquidGlassUI 与 rdev/liquid-glass-react）：内层深色卡片转换为高通透冰晶磨砂玻璃层，告别突兀黑块。
-pub const LIQUID_GLASS: Palette = Palette { paper: [14, 16, 22], ink: [255, 255, 255], accent: Some([88, 176, 255]), dark_alpha: 0.22, lift: 0.48, darken: 1.0, chip: 1.0 };
+pub const LIQUID_GLASS: Palette = Palette { paper: [14, 16, 22], ink: [255, 255, 255], accent: Some([88, 176, 255]), dark_alpha: 0.22, lift: 0.48, darken: 1.0, chip: 1.0, glass_chrome: false };
 /// 悬浮云：底板是随封面取色的半透明流体云，页面里按「黑底」画的按钮 / 剪贴板大背景自动转换为轻盈的半透明柔光磨砂玻璃，彻底消除突兀的大黑块。
-pub const FLUID: Palette = Palette { paper: [0, 0, 0], ink: [255, 255, 255], accent: None, dark_alpha: 0.24, lift: 0.72, darken: 1.0, chip: 1.0 };
+pub const FLUID: Palette = Palette { paper: [0, 0, 0], ink: [255, 255, 255], accent: None, dark_alpha: 0.24, lift: 0.72, darken: 1.0, chip: 1.0, glass_chrome: false };
 
 /// 当前帧是否按悬浮云绘制，供不经过换色层的控件取同款配色。
 fn fluid_flag() -> &'static std::sync::atomic::AtomicBool {
@@ -103,6 +107,11 @@ fn luma(c: [f32; 3]) -> f32 {
     0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
 }
 
+#[allow(dead_code)]
+pub(crate) fn keep_glass_chrome(color: Color32, palette: &Palette) -> Color32 {
+    if palette.glass_chrome { color } else { map_color(color, palette) }
+}
+
 /// 映射单个颜色（Color32 为预乘 alpha）。
 pub fn map_color(color: Color32, p: &Palette) -> Color32 {
     let a = color.a();
@@ -129,7 +138,7 @@ pub fn map_color(color: Color32, p: &Palette) -> Color32 {
             ];
             let frost_alpha = a as f32 * (0.12 + 0.36 * raw_t).clamp(0.11, 0.28);
             (frost, frost_alpha)
-        } else if !cfg!(test) && (*p == GLASS_LIGHT || *p == CREAM) && a <= 68 && raw_t > 0.75 {
+        } else if !cfg!(test) && (*p == GLASS_LIGHT || *p == GLASS_LIGHT_READABLE || *p == CREAM) && a <= 68 && raw_t > 0.75 {
             // [修复图四/五/六/八 浅色毛玻璃卡片底板与分割线]：
             // 岛内子卡片/输入框/分割线使用 Color32::from_white_alpha(8..48)，在浅色毛玻璃下映射为清透冷灰蓝内嵌层与清晰细描边
             if a <= 18 {
@@ -137,7 +146,7 @@ pub fn map_color(color: Color32, p: &Palette) -> Color32 {
             } else {
                 ([0.14, 0.18, 0.28], (a as f32 * 1.40).clamp(24.0, 68.0))
             }
-        } else if !cfg!(test) && *p == GLASS_LIGHT && raw_t < 0.38 {
+        } else if !cfg!(test) && (*p == GLASS_LIGHT || *p == GLASS_LIGHT_READABLE) && raw_t < 0.38 {
             let recessed_ink = [0.12, 0.16, 0.24];
             let k_alpha = if raw_t <= 0.05 { 0.07 } else if raw_t < 0.18 { 0.11 } else { 0.15 };
             (recessed_ink, (a as f32 * k_alpha).clamp(12.0, 38.0))
@@ -148,7 +157,7 @@ pub fn map_color(color: Color32, p: &Palette) -> Color32 {
                 [0.886, 0.816, 0.725]
             };
             (warm_card, a as f32 * 0.94)
-        } else if !cfg!(test) && (*p == GLASS_LIGHT || *p == CREAM) && raw_t >= 0.38 {
+        } else if !cfg!(test) && (*p == GLASS_LIGHT || *p == GLASS_LIGHT_READABLE || *p == CREAM) && raw_t >= 0.38 {
             // [修复图四/六/八 浅色毛玻璃文字发虚/镂空问题]：
             // 灰阶副标题 (from_gray(115..185)) 映射为高对比度深石板蓝灰 (#364052)，主白字映射为深墨黑 (#121620)
             if raw_t >= 0.82 {
